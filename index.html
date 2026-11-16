@@ -169,6 +169,7 @@ mark { background:color-mix(in srgb, var(--warn) 35%, transparent); color:inheri
 .diff .del::before { content:"− "; color:var(--bad); } .diff .add::before { content:"+ "; color:var(--ok); }
 .path { font:13px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--mut); overflow-wrap:anywhere; margin-top:2px; }
 
+.warnline { color:var(--warn); font-size:14px; margin:0 0 12px; }
 /* question card */
 .q { border:2px solid var(--busy); }
 .q .qh { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--busy); margin-top:4px; }
@@ -770,7 +771,7 @@ input.addEventListener("input", picker);
 input.addEventListener("input", () => { if (input.value.trim()) $("quick").replaceChildren(); });
 
 // ---------------------------------------------------------------- sheets
-function openSheet(...kids) { $("sheetbody").replaceChildren(...kids); $("sheet").classList.remove("hidden"); }
+function openSheet(...kids) { $("sheetbody").replaceChildren(...kids.filter(k => k != null && k !== false)); $("sheet").classList.remove("hidden"); }
 function closeSheet() { $("sheet").classList.add("hidden"); $("sheetbody").replaceChildren(); }
 $("sheet").addEventListener("click", e => { if (e.target.id === "sheet") closeSheet(); });
 
@@ -834,21 +835,39 @@ function searchSheet() {
   setTimeout(() => q.focus(), 50);
 }
 
-async function newSession() {
-  let folders = [];
-  try { folders = (await api("/api/projects")).projects; } catch (e) { return alert(e.message); }
-  let picked = null;
+async function newSession(state = {}) {
+  let folders = [], taken = new Set();
+  try {
+    folders = (await api("/api/projects")).projects;
+    taken = new Set((await api("/api/sessions")).sessions.map(s => s.name));
+  } catch (e) { return alert(e.message); }
+  let picked = state.picked || null;
+  const unique = b => { b = b.replace(/[^A-Za-z0-9_-]/g, "-").replace(/^[-_]+/, "").slice(0, 28) || "s";
+    let n = b, i = 2; while (taken.has(n)) n = b + "-" + i++; return n; };
   const name = h("input", {class: "field", placeholder: "name (letters, digits, - _)", autocapitalize: "off", autocorrect: "off"});
+  name.value = state.name || ""; if (state.auto !== false) name.dataset.auto = "1";
   const filter = h("input", {class: "field", type: "search", placeholder: "Filter folders…"});
   const list = h("div", {class: "folders"});
-  const ask = h("input", {type: "checkbox"});
-  const go_ = h("button", {class: "btn allow", disabled: ""}, "Start");
+  const convs = h("div", {});
+  const ask = h("input", {type: "checkbox"}); ask.checked = !!state.ask;
+  const go_ = h("button", {class: "btn allow", disabled: ""}, "Start fresh");
   const note = h("div", {class: "note"});
-  const valid = () => { go_.disabled = !(picked && /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(name.value)); };
+  const keep = () => ({picked, name: name.value, auto: !!name.dataset.auto, ask: ask.checked});
+  const valid = () => { go_.disabled = !(picked && /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(name.value) && !taken.has(name.value)); };
+  const loadConvs = async () => {
+    convs.replaceChildren(h("div", {class: "sub", style: "color:var(--mut);font-size:13px;margin:0 0 10px"}, "Loading conversations…"));
+    let cs = [];
+    try { cs = (await api("/api/conversations?path=" + encodeURIComponent(picked))).conversations; } catch (e) { cs = []; }
+    convs.replaceChildren(...(cs.length ? [h("div", {class: "lbl"}, "Continue a conversation"),
+      h("div", {class: "folders"}, cs.map(c => h("button", {class: "item", onclick: () => preview(c, keep())},
+        h("div", {style: "min-width:0;flex:1"}, c.title || (c.first || "").slice(0, 80),
+          h("div", {class: "sub"}, `${c.messages} message${c.messages === 1 ? "" : "s"} · ${ago(c.mtime) || "now"}`,
+            c.open_in ? " · open " + (c.open_in === "terminal" ? "in a terminal" : "in " + c.open_in.slice(4)) : "")))))] : []));
+  };
   const draw = () => list.replaceChildren(...folders.filter(f => f.toLowerCase().includes(filter.value.toLowerCase())).map(f =>
     h("button", {class: "item" + (f === picked ? " sel" : ""), onclick: () => {
-      picked = f; if (!name.value || name.dataset.auto) { name.value = base(f).replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 32); name.dataset.auto = "1"; }
-      draw(); valid(); }},
+      picked = f; if (!name.value || name.dataset.auto) { name.value = unique(base(f)); name.dataset.auto = "1"; }
+      draw(); valid(); loadConvs(); }},
       h("div", {}, base(f), h("div", {class: "sub"}, f)))));
   name.oninput = () => { delete name.dataset.auto; valid(); };
   filter.oninput = draw;
@@ -857,10 +876,41 @@ async function newSession() {
     try { await api("/api/sessions", {name: name.value, path: picked, ask: ask.checked}); closeSheet(); go("#/s/" + name.value); }
     catch (e) { note.textContent = e.message; valid(); }
   };
-  draw();
-  openSheet(h("h2", {}, "New session"), h("div", {class: "lbl"}, "Folder (ones Claude already trusts)"), filter, list,
+  draw(); valid(); if (picked) loadConvs();
+  openSheet(h("h2", {}, "New session"), h("div", {class: "lbl"}, "Folder (ones Claude already trusts)"), filter, list, convs,
     h("div", {class: "lbl"}, "Name"), name,
     h("label", {class: "toggle"}, ask, "Ask before running tools"), note, h("div", {class: "row"}, go_));
+
+  // ---- preview of one past conversation, then continue / fork / jump
+  function preview(c, st) {
+    const nm = h("input", {class: "field", autocapitalize: "off", autocorrect: "off"});
+    nm.value = st.auto || !st.name ? unique(c.title || base(st.picked)) : st.name;
+    const ask2 = h("input", {type: "checkbox"}); ask2.checked = st.ask;
+    const msg = h("div", {class: "note"});
+    const start = async fork => {
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(nm.value) || taken.has(nm.value)) return msg.textContent = "Pick another name.";
+      msg.textContent = fork ? "Forking…" : "Starting Claude…";
+      try { await api("/api/sessions", {name: nm.value, path: st.picked, ask: ask2.checked, resume: c.id, fork}); closeSheet(); go("#/s/" + nm.value); }
+      catch (e) { msg.textContent = e.message; }
+    };
+    const inCcs = c.open_in && c.open_in.startsWith("ccs:"), inTerm = c.open_in === "terminal";
+    const actions = inCcs
+      ? [h("button", {class: "btn allow", onclick: () => { closeSheet(); go("#/s/" + c.open_in.slice(4)); }}, "Open session " + c.open_in.slice(4))]
+      : inTerm ? [h("button", {class: "btn allow", onclick: () => start(true)}, "Fork a copy")]
+      : [h("button", {class: "btn", onclick: () => start(true)}, "Fork a copy"), h("button", {class: "btn allow", onclick: () => start(false)}, "Continue here")];
+    openSheet(
+      h("button", {class: "more", onclick: () => newSession(st)}, "‹ Back"),
+      h("h2", {}, c.title || "Untitled conversation"),
+      h("div", {class: "sub", style: "color:var(--mut);font-size:13px;margin:-6px 0 12px"},
+        `${base(st.picked)} · ${c.messages} message${c.messages === 1 ? "" : "s"} · last active ${ago(c.mtime) || "now"}`),
+      inCcs ? h("div", {class: "warnline"}, "Already open in ccs session " + c.open_in.slice(4) + ".")
+        : inTerm ? h("div", {class: "warnline"}, "Open in another terminal right now. A fork continues from here as a copy; the original stays untouched.") : null,
+      c.first ? h("div", {class: "lbl"}, "First message") : null, c.first ? h("div", {class: "u", style: "margin:0 0 12px auto"}, c.first) : null,
+      c.last ? h("div", {class: "lbl"}, "Claude's last reply") : null,
+      c.last ? h("div", {class: "a", style: "max-height:30vh;overflow-y:auto;border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin-bottom:12px"}, md(c.last)) : null,
+      ...(inCcs ? [] : [h("div", {class: "lbl"}, "Session name"), nm, h("label", {class: "toggle"}, ask2, "Ask before running tools")]),
+      msg, h("div", {class: "row"}, ...actions));
+  }
 }
 $("add").onclick = newSession;
 

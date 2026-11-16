@@ -437,16 +437,45 @@ class Store:
         return 200, p
 
     # ------------------------------------------------------------ lifecycle (phone)
-    def create(self, name, path, ask):
-        """New session from the phone: only in a folder Claude already trusts (no blocking trust dialog)."""
+    def conversations(self, path):
+        """Past conversations in a trusted folder, each marked with where it's currently open, if anywhere."""
+        if not isinstance(path, str) or path not in self.lifecycle.trusted_projects():
+            return 400, "pick one of the listed folders"
+        convs = self.lifecycle.conversations(path)
+        live_ccs = self._live_ccs_conversations()
+        live_any = self.lifecycle.live_conversations()
+        for c in convs:
+            c["open_in"] = ("ccs:" + live_ccs[c["id"]]) if c["id"] in live_ccs else \
+                ("terminal" if c["id"] in live_any else None)
+        return 200, convs
+
+    def _live_ccs_conversations(self):
+        live = self.tmux_live()
+        with self.lock:
+            return {s["claude_session_id"]: n for n, s in self.sessions.items()
+                    if n in live and s.get("claude_session_id") and s.get("state") != "exited"}
+
+    def create(self, name, path, ask, resume=None, fork=False):
+        """New session from the phone: only in a folder Claude already trusts (no blocking trust dialog).
+        With resume=<conversation id>, continue (or, with fork, copy) a past conversation from that folder."""
         if not ccs.valid_name(name):
             return 400, "name: letters, digits, - and _ (max 32)"
         if not isinstance(path, str) or path not in self.lifecycle.trusted_projects():
             return 400, "pick one of the listed folders"
         if name in ccs.registry():
             return 409, f"a session named {name} already exists"
+        extra = ["--permission-mode", "default"] if ask is True else []
+        if resume is not None:
+            if not isinstance(resume, str) or resume not in {c["id"] for c in self.lifecycle.conversations(path)}:
+                return 400, "unknown conversation for this folder"
+            live_ccs = self._live_ccs_conversations()
+            if resume in live_ccs:
+                return 409, f"already open in session {live_ccs[resume]}"
+            if resume in self.lifecycle.live_conversations() and fork is not True:
+                return 409, "this conversation is open in another terminal: fork a copy instead"
+            extra += ["--resume", resume] + (["--fork-session"] if fork is True else [])
         try:
-            self.lifecycle.start(name, path, ["--permission-mode", "default"] if ask is True else [])
+            self.lifecycle.start(name, path, extra)
         except (ValueError, RuntimeError) as e:
             return 409, str(e)
         self.reconcile()
@@ -800,6 +829,14 @@ class Lifecycle:
         return ccs.resume_session(name)
 
     @staticmethod
+    def conversations(path):
+        return ccs.conversations(path)
+
+    @staticmethod
+    def live_conversations():
+        return ccs.live_conversations()
+
+    @staticmethod
     def kill(name):
         ccs.kill_session(name)
 
@@ -993,6 +1030,9 @@ class Http(http.server.BaseHTTPRequestHandler):
             return self._sse()
         if path == "/api/projects":
             return self._send(200, {"projects": store.lifecycle.trusted_projects()})
+        if path == "/api/conversations":
+            code, res = store.conversations(parse_qs(url.query).get("path", [""])[0])
+            return self._send(code, {"conversations": res} if code == 200 else {"error": res})
         m = re.fullmatch(r"/api/sessions/([^/]+)/history", path)
         if m and ccs.valid_name(m.group(1)):
             qs = parse_qs(url.query)
@@ -1053,7 +1093,8 @@ class Http(http.server.BaseHTTPRequestHandler):
                 print(f"ccsd: CLIENT ERROR from {self.client_address[0]}: {msg}", file=sys.stderr, flush=True)
             return self._send(200, {"status": "logged"})
         if path == "/api/sessions":
-            code, res = store.create(body.get("name"), body.get("path"), body.get("ask"))
+            code, res = store.create(body.get("name"), body.get("path"), body.get("ask"),
+                                     body.get("resume"), body.get("fork"))
             return self._send(code, {"status": res} if code == 200 else {"error": res})
         m = re.fullmatch(r"/api/sessions/([^/]+)/(resume|kill)", path)
         if m and ccs.valid_name(m.group(1)):

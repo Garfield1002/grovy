@@ -5,6 +5,7 @@ on a private tmux server socket (-L) so your own tmux sessions are never touched
 """
 import io
 import json
+import re
 import os
 import shutil
 import socket
@@ -389,18 +390,22 @@ class TestLifecycle(StoreCase):
     def test_trusted_projects(self):
         home = tempfile.mkdtemp(dir=TMP)
         dev = os.path.join(home, "dev")
-        for d in ("dev/known", "dev/newrepo/.git", "dev/notgit", "other/untrusted"):
+        for d in ("dev/known", "dev/newrepo/.git", "dev/okrepo/.git", "dev/notgit", "other/untrusted"):
             os.makedirs(os.path.join(home, d))
         with open(os.path.join(home, ".claude.json"), "w") as f:
             json.dump({"projects": {dev: {"hasTrustDialogAccepted": True},
                                     os.path.join(dev, "known"): {"hasTrustDialogAccepted": False},
+                                    os.path.join(dev, "okrepo"): {"hasTrustDialogAccepted": True},
                                     os.path.join(home, "other", "untrusted"): {"hasTrustDialogAccepted": False}}}, f)
         with mock.patch.dict(os.environ, {"HOME": home, "TMPDIR": "/nonexistent-tmp"}):
             got = ccs.trusted_projects()
         rp = os.path.realpath
         self.assertIn(rp(dev), got)
-        self.assertIn(rp(os.path.join(dev, "known")), got)       # explicit False, but inside trusted ~/dev
-        self.assertIn(rp(os.path.join(dev, "newrepo")), got)     # git repo directly inside a trusted root
+        self.assertIn(rp(os.path.join(dev, "known")), got)       # plain folder: inherits ~/dev's trust
+        # A git repo is its own trust boundary: inside trusted ~/dev it still shows the trust dialog
+        # (verified with Claude Code 2.1.325), so only an explicitly trusted repo may be offered.
+        self.assertNotIn(rp(os.path.join(dev, "newrepo")), got)
+        self.assertIn(rp(os.path.join(dev, "okrepo")), got)
         self.assertNotIn(rp(os.path.join(dev, "notgit")), got)
         self.assertNotIn(rp(os.path.join(home, "other", "untrusted")), got)
 
@@ -572,6 +577,59 @@ class TestEventLogRotation(unittest.TestCase):
         self.assertEqual(s.seq, 41)
         self.assertTrue(os.path.exists(os.path.join(d, "events.jsonl.1")))
         self.assertEqual(len(s.events["a"]), 1)
+
+
+class TestConversations(StoreCase):
+    ID1, ID2 = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+
+    def write(self, home, folder, cid, recs):
+        d = os.path.join(home, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(folder)))
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, cid + ".jsonl"), "w") as f:
+            for r in recs:
+                f.write(json.dumps(r) + "\n")
+            f.write("{torn line\n")
+
+    def test_index(self):
+        home, folder = tempfile.mkdtemp(dir=TMP), tempfile.mkdtemp(dir=TMP)
+        u = lambda c, **k: {"type": "user", "cwd": folder, "message": {"content": c}, **k}
+        self.write(home, folder, self.ID1, [
+            u("<command-name>/clear</command-name>"), u("hi", isMeta=True),
+            u("Fix the build please"), {"type": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}},
+            u([{"type": "tool_result", "content": "x"}]), {"type": "ai-title", "aiTitle": "Build fix"},
+            {"type": "custom-title", "customTitle": "My build"}, u("sub", isSidechain=True)])
+        self.write(home, folder, self.ID2, [u("<only wrappers>")])                    # no real messages
+        self.write(home, folder, "not-a-uuid", [u("x")])
+        self.write(home, "/elsewhere-xyz", self.ID2, [u("other folder")])
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+            got = ccs.conversations(folder)
+        self.assertEqual(len(got), 1)
+        c = got[0]
+        self.assertEqual((c["id"], c["title"], c["first"], c["last"], c["messages"]),
+                         (self.ID1, "My build", "Fix the build please", "Done.", 1))
+
+    def test_resume_rules(self):
+        started = []
+        live_terminal = {self.ID2}
+
+        class Fake:
+            trusted_projects = staticmethod(lambda: ["/ok"])
+            conversations = staticmethod(lambda p: [{"id": self.ID1}, {"id": self.ID2}])
+            live_conversations = staticmethod(lambda: {i: 1 for i in live_terminal})
+            start = staticmethod(lambda n, p, e: started.append(e))
+
+        self.store.lifecycle = Fake()
+        self.assertEqual(self.store.create("x", "/ok", False, resume="../../etc")[0], 400)
+        self.assertEqual(self.store.create("x", "/ok", False, resume=self.ID2)[0], 409)          # open in a terminal
+        self.assertEqual(self.store.create("x", "/ok", True, resume=self.ID2, fork=True)[0], 200)
+        self.assertEqual(started[-1], ["--permission-mode", "default", "--resume", self.ID2, "--fork-session"])
+        self.store.sessions["a"]["claude_session_id"] = self.ID1                                  # open in ccs "a"
+        code, msg = self.store.create("y", "/ok", False, resume=self.ID1)
+        self.assertEqual(code, 409)
+        self.assertIn("session a", msg)
+        self.store.sessions["a"]["claude_session_id"] = None
+        self.assertEqual(self.store.create("y", "/ok", False, resume=self.ID1)[0], 200)
+        self.assertEqual(started[-1], ["--resume", self.ID1])
 
 
 class TestInterrupt(StoreCase):

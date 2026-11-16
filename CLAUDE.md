@@ -75,7 +75,8 @@ Put scratch files in your scratchpad, not the repo.
 
 - Hooks are injected per session with `claude --settings FILE`; hook arrays merge with the user's settings.
   Hooks inherit the environment. **All hooks are held back until the workspace-trust dialog is accepted.**
-  Trust is inherited from any trusted ancestor in `~/.claude.json`.
+  Trust (`~/.claude.json` `projects[path].hasTrustDialogAccepted`): a plain folder inherits it from any trusted
+  ancestor, but a **git repo is its own boundary**: inside trusted `~/dev`, an untrusted repo still gets the dialog.
 - `PermissionRequest`: the terminal dialog is shown *while* the hook waits. Answering it in the terminal kills
   the hook, so the daemon sees EOF. Exit 0 with no output means "no opinion": normal dialog.
 - `AskUserQuestion` arrives as a `PermissionRequest`. Answer with `allow` plus `updatedInput.answers =

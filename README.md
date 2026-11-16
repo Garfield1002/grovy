@@ -195,6 +195,25 @@ through `SessionStart(source=clear|compact)`. Typing `/` in the composer opens a
 **Interrupt.** While a session is `working` with no pending dialog, the ■ button presses Esc (after a confirm). Esc
 emits no hook, so ccs records the interrupt itself and sets the state to `unknown`. The next send asks "type anyway?".
 
+**Sessions from the phone.** The **＋** on the session list opens *New session*:
+* **Folders.** Pick one from a list (never a typed path) of folders where Claude won't stop at the workspace-trust
+  dialog, which would hold back every hook. Verified rule (Claude Code 2.1.325): a plain folder inherits trust from a
+  trusted ancestor in `~/.claude.json`. A **git repo is its own boundary**: it needs to have been trusted itself
+  (open it once in a terminal). Optionally tick *Ask before running tools* (`--permission-mode default`); resume
+  remembers it.
+* **Continue a conversation.** Picking a folder also lists Claude's saved conversations for it (from
+  `~/.claude/projects/`), newest first, by AI title, size and age. Tapping one shows a preview (first message,
+  Claude's last reply), then:
+  * **Continue here** starts a ccs session with `claude --resume <id>`.
+  * **Fork a copy** adds `--fork-session`, giving a new id and leaving the original untouched.
+  * If the conversation is already open in a ccs session, you get **Open session X** instead.
+  * If it's open in a plain terminal, only a fork is offered, so there's never a second writer. ccs detects that from
+    Claude Code's own `~/.claude/sessions/<pid>.json` (undocumented; best effort, checked against `/proc` start
+    times).
+* **Session page.** The ⋯ menu has *Search this conversation* and *Stop session*. An exited session shows **Resume
+  session**. Tapping the title switches between sessions. *Load earlier* pages back through the event log. Yes / No /
+  Go ahead chips appear when Claude's last reply ends with a question.
+
 ## Failure modes
 
 | scenario | behaviour |
@@ -222,7 +241,8 @@ emits no hook, so ccs records the interrupt itself and sets the state to `unknow
   keystrokes go to that dialog. ccs only types in hook-confirmed idle states, and every typed prompt must be
   confirmed by `UserPromptSubmit`, but a non-zero window remains. Use the terminal for anything unusual.
 * **Workspace trust.** Claude holds back *all* hooks until a new folder's trust dialog is accepted. For a new
-  project, `ccs attach` once and accept it. Until then the session shows `starting`.
+  project (or any git repo you haven't opened in Claude before), `ccs attach` once and accept it. Until then the
+  session shows `starting`. The phone only offers folders that won't hit the dialog.
 * **After answering a dialog in the terminal**, state can be `unknown` until Claude's next hook event
   (e.g. its `idle_prompt` notification); see the "type anyway?" confirmation above.
 * Not every dialog emits `PermissionRequest` (e.g. MCP elicitations, plan approval). Those show as
