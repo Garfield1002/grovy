@@ -232,6 +232,7 @@ textarea:focus { border-color:var(--mut); }
 .pagecard b { display:block; } .pagecard span { font-size:13px; color:var(--mut); }
 .pagecard .go { margin-left:auto; color:var(--acc); font-weight:650; white-space:nowrap; }
 .pagecard.gone { opacity:.6; }
+.pagecard .pi.open { color:var(--warn); background:color-mix(in srgb, var(--warn) 14%, transparent); }
 .pagecard .rm { margin-left:auto; flex:none; font-size:13px; font-weight:600; color:var(--bad); border:1px solid var(--line);
   border-radius:99px; padding:6px 12px; }
 .sech { display:flex; align-items:baseline; justify-content:space-between; margin:22px 2px 2px; font-size:13px; font-weight:650;
@@ -821,6 +822,7 @@ function eventNode(e, isLatestReply) {
     case "Exited": return sysLine("terminal closed");
     case "Interrupted": return sysLine("■ interrupted from the phone");
     case "Renamed": return sysLine("renamed from " + (d.from || "?") + " to " + (d.to || "?"));
+    case "Updated": return sysLine("updated from the phone, cutting off: " + (d.cut_off || []).join("; "));
     case "Page": return pageCard(d.page, d.title || d.name, "page · version " + d.version);
     case "PermissionResult": {
       if (d.kind === "question") return sysLine(d.status === "delivered"
@@ -1226,10 +1228,8 @@ function sessionMenu() {
     Object.keys(pages).length ? h("button", {class: "item", onclick: () => pagesSheet(name)}, "Pages",
       h("div", {class: "sub"}, Object.keys(pages).length + " published by Claude")) : null,
     h("button", {class: "item", onclick: () => renameSheet(name)}, "Rename"),
-    s.state === "idle" || s.state === "error" ? h("button", {class: "item", onclick: () => {
-        ask(`Restart "${name}"? Claude exits and resumes the same conversation (only while it's idle).`, "Restart")
-          .then(yes => yes && act("restart"));
-      }}, "Restart session", h("div", {class: "sub"}, "Picks up new grovy settings; only while idle")) : null,
+    s.state !== "exited" ? h("button", {class: "item", onclick: () => updateSession(name)}, "Update session",
+      h("div", {class: "sub"}, "Restart Claude with the latest grovy, same conversation")) : null,
     s.state === "exited"
       ? [h("button", {class: "item", onclick: () => act("resume")}, "Resume session"),
          h("button", {class: "item danger", onclick: () => { closeSheet(); removeSessions([name]); }}, "Remove from list")]
@@ -1240,6 +1240,19 @@ function sessionMenu() {
     h("div", {class: "sub", style: "padding:10px 4px;color:var(--mut);font-size:13px"}, s.cwd || ""));
 }
 $("menu").onclick = sessionMenu;
+async function updateSession(name) {   // the server decides whether it's safe; forcing is a separate, explicit tap
+  if (!await ask(`Update "${name}"? Claude restarts with the latest grovy and resumes the same conversation.`, "Update")) return;
+  const post = force => api(`/api/sessions/${encodeURIComponent(name)}/restart`, {force});
+  try { await post(false); }
+  catch (e) {
+    if (!/^not now: /.test(e.message)) return say(e.message);
+    const why = e.message.replace(/^not now: /, "");
+    if (!await ask(`Right now ${why}.\n\nUpdating anyway stops all of that: the current reply, background tasks and any `
+        + `open request are cut off. The conversation itself is resumed.`, "Update anyway", {danger: true})) return;
+    try { await post(true); } catch (e2) { say(e2.message); }
+  }
+  refresh();
+}
 $("resume").onclick = async () => {
   $("resume").disabled = true; $("resume").textContent = "Starting…";
   try { await api(`/api/sessions/${encodeURIComponent(view)}/resume`, {}); } catch (e) { say(e.message); }
@@ -1426,12 +1439,19 @@ addEventListener("hashchange", route);
 function pageCard(id, title, sub, deletable = false) {
   const gone = !pages[id];
   return h("button", {class: "pagecard" + (gone ? " gone" : ""), onclick: () => gone ? null : openPage(id)},
-    h("span", {class: "pi"}, "▤"), h("div", {}, h("b", {}, title || "page"),
-      h("span", {}, gone ? "deleted" : sub + (pages[id].share ? " · shared" : ""))),
+    lockIcon(!gone && !!pages[id].share), h("div", {}, h("b", {}, title || "page"),
+      h("span", {}, gone ? "deleted" : sub + (pages[id].share ? " · public" : " · private"))),
     gone ? null : deletable
       ? h("span", {class: "rm", role: "button", "aria-label": "Delete " + (title || "page"),
           onclick: ev => { ev.stopPropagation(); deletePage(id, title); }}, "Delete")
       : h("span", {class: "go"}, "Open"));
+}
+function lockIcon(open) {   // closed padlock: only you (with the token); open: anyone on the network with the link
+  return h("span", {class: "pi" + (open ? " open" : ""), title: open ? "Public: shared on your network" : "Private"},
+    sv("svg", {viewBox: "0 0 24 24", width: 18, height: 18, fill: "none", stroke: "currentColor", "stroke-width": 2,
+               "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true"},
+      sv("rect", {x: 5, y: 11, width: 14, height: 10, rx: 2}),
+      sv("path", {d: open ? "M8 11V7a4 4 0 0 1 7.5-2" : "M8 11V7a4 4 0 0 1 8 0v4"})));
 }
 async function deletePage(id, title) {
   if (!await ask(`Delete the page "${title || "page"}"? Its link stops working.`, "Delete", {danger: true})) return;

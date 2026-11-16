@@ -769,6 +769,52 @@ class TestSecurityReview(StoreCase):
             grovy.main(["page", "share", "x"])
 
 
+class TestSetupAndCustomCss(unittest.TestCase):
+    def test_service_unit(self):
+        u = grovy.service_unit("100.1.2.3", 7333, path="/a:/b:/a:/x%y")
+        self.assertIn("KillMode=process", u)              # restarting the daemon must not kill tmux
+        self.assertIn("Environment=GROVY_BIND=100.1.2.3", u)
+        self.assertIn("Environment=PATH=/a:/b:/x%%y\n", u)  # de-duplicated, % escaped for systemd
+        self.assertIn(os.path.join(grovy.HERE, "grovy") + " serve", u)
+
+    def test_dry_run_changes_nothing(self):
+        home = tempfile.mkdtemp(dir=TMP)
+        env = {"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, "cfg"), "PATH": "/usr/bin:/bin"}
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env), mock.patch.object(grovy.shutil, "which", lambda x: "/bin/true"), \
+                mock.patch.object(grovy, "sock_request", mock.Mock(side_effect=OSError)), redirect_stdout(out):
+            rc = grovy.main(["setup", "--dry-run", "--bind", "0.0.0.0", "--no-service"])
+        self.assertEqual(rc, 0)
+        self.assertIn("linking", out.getvalue())
+        self.assertEqual(os.listdir(home), [])
+
+    def test_custom_css_is_served_and_reloaded(self):
+        d = tempfile.mkdtemp(dir=TMP)
+        with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": d}):
+            base, csp = grovyd.load_index()
+            with open(os.path.join(d, "custom.css"), "w") as f:
+                f.write(":root { --user:#123456; }")
+            html, csp2 = grovyd.load_index()
+            self.assertIn(b'<style id="custom-css">\n:root { --user:#123456; }', html)
+            self.assertLess(html.index(b"</style>"), html.index(b"custom-css"))   # after the built-in styles
+            self.assertEqual(csp, csp2)                                         # scripts (and hashes) unchanged
+            with open(os.path.join(d, "custom.css"), "w") as f:
+                f.write("a{}</style><script>alert(1)</script>")
+            with mock.patch("sys.stderr", io.StringIO()):
+                self.assertEqual(grovyd.load_index()[0], base)                  # can't close the style block
+            srv = grovyd.HttpServer.__new__(grovyd.HttpServer)
+            srv.index_mtime = None
+            with open(os.path.join(d, "custom.css"), "w") as f:
+                f.write("b{color:red}")
+            srv.refresh_index()
+            self.assertIn(b"b{color:red}", srv.index)
+            with open(os.path.join(d, "custom.css"), "w") as f:
+                f.write("b{color:blue}")
+            os.utime(os.path.join(d, "custom.css"), ns=(1, 1))
+            srv.refresh_index()
+            self.assertIn(b"b{color:blue}", srv.index)                          # hot reload, no restart
+
+
 class TestPages(StoreCase):
     def test_publish_versions_list_delete(self):
         code, p = self.store.publish_page("a", "report", "Bench", "<h1>v1</h1>")
@@ -928,6 +974,29 @@ class TestRestart(StoreCase):
         self.assertEqual(self.store.restart("a")[0], 200)
         self.assertEqual(calls, [("kill", "a"), ("resume", "a")])
 
+
+    def test_forced_update_cuts_off_and_is_recorded(self):
+        calls = []
+
+        class Fake:
+            kill = staticmethod(lambda n: calls.append(("kill", n)))
+            resume = staticmethod(lambda n: calls.append(("resume", n)) or f"resumed {n}")
+        self.store.lifecycle = Fake()
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="long job"))
+        code, msg = self.store.restart("a")
+        self.assertEqual(code, 409)
+        self.assertTrue(msg.startswith("not now: Claude is working"))      # the phone offers "Update anyway"
+        self.assertEqual(calls, [])
+        code, msg = self.store.restart("a", force=True)
+        self.assertEqual(code, 200)
+        self.assertTrue(msg.startswith("updated: "))
+        self.assertEqual(calls, [("kill", "a"), ("resume", "a")])
+        rec = [e for e in self.store.events["a"] if e["type"] == "Updated"][-1]
+        self.assertEqual(rec["data"]["cut_off"], ["Claude is working"])
+        del self.live["a"]
+        self.store.reconcile()
+        self.assertEqual(self.store.restart("a", force=True)[0], 409)       # ended: that's Resume, not Update
 
 class TestInterrupt(StoreCase):
     def test_only_while_working(self):

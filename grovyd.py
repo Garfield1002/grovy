@@ -47,6 +47,8 @@ DUP_WINDOW = 1.0  # seconds
 FORCE_STALE = 60  # a "working" session silent this long may be force-typed into, if the user confirms
 PERM_TIMEOUT = grovy.PERMISSION_TIMEOUT
 
+LABELS = {"working": "working", "needs_input": "waiting on a terminal dialog", "starting": "starting",
+          "unknown": "in an unknown state"}
 STATE_RANK = {"needs_input": 0, "error": 1, "unknown": 2, "working": 3, "starting": 4, "idle": 5, "exited": 6}
 
 
@@ -585,28 +587,34 @@ class Store:
             self._save_state()
         self.publish(name)
 
-    def restart(self, name):
-        """Stop + resume in one step (picks up new grovy settings, e.g. the status line). Only when nothing can be
-        cut off: Claude idle, no background tasks, no pending request, no prompt in flight."""
+    def restart(self, name, force=False):
+        """"Update": stop + resume in one step, so the session picks up new grovy settings (hooks, status line).
+        Without force, only when nothing can be cut off: Claude idle, no background tasks, no pending request,
+        no prompt in flight. force=True is the user's explicit, one-time "update anyway": what was running is
+        cut off (the conversation itself is resumed)."""
         with self.lock:
             s = self.sessions.get(name)
             if not s:
                 return 404, "unknown session"
+            if s["state"] == "exited":
+                return 409, "the session has ended: use Resume"
             busy = [why for why, cond in (
-                (f"Claude is {s['state']}", s["state"] not in ("idle", "error")),
+                (f"Claude is {LABELS.get(s['state'], s['state'])}", s["state"] not in ("idle", "error")),
                 (f"{s.get('background')} background task(s) are running", s.get("background")),
-                ("a request is waiting for an answer", self._pending(name)),
-                ("a prompt is being sent", any(p["session"] == name and p["status"] in ("queued", "injected")
-                                               for p in self.prompts))) if cond]
-            if busy:
+                ("a request is waiting for your answer", self._pending(name)),
+                ("a message is being sent", any(p["session"] == name and p["status"] in ("queued", "injected")
+                                                for p in self.prompts))) if cond]
+            if busy and not force:
                 return 409, "not now: " + "; ".join(busy)
+            if busy:
+                self._record(name, "Updated", {"forced": True, "cut_off": busy})
         try:
             self.lifecycle.kill(name)
         except (ValueError, RuntimeError) as e:
             return 409, str(e)
         self.reconcile()
         code, msg = self.resume(name)
-        return (200, "restarted: " + msg) if code == 200 else (code, "stopped, but resume failed: " + msg)
+        return (200, "updated: " + msg) if code == 200 else (code, "stopped, but resume failed: " + msg)
 
     def forget(self, name):
         """Remove an ended session from the list (its conversation stays resumable from ＋)."""
@@ -1183,9 +1191,33 @@ class SockServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 INDEX_PATH = os.path.join(grovy.HERE, "index.html")
 
 
+CUSTOM_CSS_MAX = 256 * 1024
+
+
+def custom_css_path():
+    return os.path.join(grovy.config_dir(), "custom.css")
+
+
+def custom_css():
+    """The user's custom.css, or b"" (missing, too big, or containing "</style", which would end the block)."""
+    try:
+        with open(custom_css_path(), "rb") as f:
+            css = f.read(CUSTOM_CSS_MAX + 1)
+    except OSError:
+        return b""
+    if len(css) > CUSTOM_CSS_MAX or b"</style" in css.lower():
+        print(f"grovyd: ignoring {custom_css_path()}: over {CUSTOM_CSS_MAX // 1024} KB or contains </style",
+              file=sys.stderr, flush=True)
+        return b""
+    return css
+
+
 def load_index():
     with open(INDEX_PATH, "rb") as f:
         html = f.read()
+    css = custom_css()
+    if css:   # after the built-in styles, so the same selectors and tokens override them
+        html = html.replace(b"</style>", b"</style>\n<style id=\"custom-css\">\n" + css + b"\n</style>", 1)
     scripts = re.findall(rb"<script>(.*?)</script>", html, re.S)
     hashes = " ".join("'sha256-%s'" % base64.b64encode(hashlib.sha256(s).digest()).decode() for s in scripts)
     csp = (f"default-src 'none'; script-src {hashes}; style-src 'unsafe-inline'; connect-src 'self'; "
@@ -1458,7 +1490,10 @@ class Http(http.server.BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/sessions/([^/]+)/rename", path)
         if m and grovy.valid_name(m.group(1)):
             return wrap(*store.rename(m.group(1), body.get("name")))
-        m = re.fullmatch(r"/api/sessions/([^/]+)/(resume|kill|forget|interrupt|restart)", path)
+        m = re.fullmatch(r"/api/sessions/([^/]+)/restart", path)
+        if m and grovy.valid_name(m.group(1)):
+            return wrap(*store.restart(m.group(1), force=body.get("force") is True))
+        m = re.fullmatch(r"/api/sessions/([^/]+)/(resume|kill|forget|interrupt)", path)
         if m and grovy.valid_name(m.group(1)):
             return wrap(*getattr(store, m.group(2))(m.group(1)))
         m = re.fullmatch(r"/api/pages/([^/]+)/share", path)
@@ -1593,11 +1628,16 @@ class HttpServer(http.server.ThreadingHTTPServer):
     index_mtime = None
 
     def refresh_index(self):
-        """Pick up index.html edits without a daemon restart (the CSP hash is recomputed too)."""
+        """Pick up index.html and custom.css edits without a daemon restart (the CSP hash is recomputed too)."""
         try:
             m = os.stat(INDEX_PATH).st_mtime_ns
         except OSError:
             return
+        try:
+            c = os.stat(custom_css_path())
+            m = (m, c.st_mtime_ns, c.st_size)
+        except OSError:
+            m = (m, None)
         if m != self.index_mtime:
             self.index, self.csp = load_index()
             self.index_mtime = m

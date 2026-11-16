@@ -30,6 +30,7 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 | `grovyd.py` | daemon: `Store` (state machine, permissions/questions, prompt queue, lifecycle, history), `Http`, `SockHandler` |
 | `index.html` | the whole UI: vanilla JS, one inline `<script>` (its CSP hash is computed at load) |
 | pages | `grovy page` (`cmd_page`) → socket `page` → `Store.publish_page`; served by `/p/<id>` with `PAGE_CSP` + `PAGE_BRIDGE`. Never loosen `PAGE_CSP` (no `allow-same-origin`, no `connect-src`) without the user agreeing |
+| setup, customizing | `grovy setup` (`cmd_setup`, `SERVICE_UNIT`; keep `examples/grovy.service` in sync). User styles: `~/.config/grovy/custom.css`, injected by `load_index()`. Put user-facing customization there, not in the repo |
 | widgets | `WIDGET_GUIDE` in `grovy.py` (what Claude is told, via the SessionStart hook) and `WIDGETS` in `index.html` (renderers). Change both together; every renderer validates its input and throws a readable `Error` |
 | `tests/test_grovy.py` | unit tests that drive `grovyd.Store` with fake tmux/paste callables, plus real-tmux integration tests on a private server |
 
@@ -78,7 +79,7 @@ Put scratch files in your scratchpad, not the repo.
 
 - Hooks are injected per session with `claude --settings FILE`; hook arrays merge with the user's settings.
   **The `--settings` file is read once at start**: editing it doesn't affect a running Claude (verified with a
-  statusLine marker). Changes to it reach a session on its next start, i.e. Stop + Resume.
+  statusLine marker). Changes to it reach a session on its next start: ⋯ → Update session (`Store.restart`).
 - The status line (`statusLine` in the same file → `grovy statusline NAME`) gets JSON on stdin: `model.display_name`,
   `effort.level`, `fast_mode`, `context_window.{used,remaining}_percentage` (null until the first message), `cost.*`,
   `cwd`, `session_id`. grovy forwards a trimmed copy and prints the user's own status line, so the terminal is unchanged.

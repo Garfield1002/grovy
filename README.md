@@ -31,12 +31,20 @@ claude ──hooks──► grovy hook NAME ──unix socket──► grovyd �
 Needs Linux or macOS, Python 3.11+, tmux and Claude Code. Quick start:
 
 ```sh
-git clone <this repo> ~/grovy && cd ~/grovy
-mkdir -p ~/.local/bin && ln -s "$PWD/grovy" ~/.local/bin/grovy   # any dir on your PATH
-grovy doctor                                  # checks python, tmux, claude
-tmux new -d -s grovyd 'grovy serve --bind 0.0.0.0'   # or the systemd unit below; only on a LAN/VPN you trust
-grovy url                                     # open the printed link once on your phone (it sets a login cookie)
+git clone <this repo> ~/grovy && ~/grovy/grovy setup
 ```
+
+`grovy setup` (safe to rerun; `--dry-run` shows what it would do):
+1. links `grovy` into `~/.local/bin`;
+2. asks which address the phone should use (suggests a Tailscale address if there is one; plain HTTP, so only
+   networks you trust);
+3. writes and starts a systemd user service (`~/.config/systemd/user/grovy.service`) that starts at boot, with your
+   shell's PATH so it finds `claude`, and enables linger so it runs without you logging in. Without systemd
+   (macOS) or with `--no-service`, it prints a tmux command to start the daemon instead;
+4. creates `~/.config/grovy/custom.css` for your own styles;
+5. prints the link to open once on your phone (it sets a login cookie).
+
+Manual equivalent: link `grovy` onto your PATH, run `grovy serve --bind ADDR` somewhere persistent, then `grovy url`.
 
 Then tap **＋** on the phone. It offers folders where Claude already trusts the workspace: Claude holds back all
 hooks until its trust dialog is accepted, so run `claude` once in a new project on the computer first.
@@ -71,13 +79,21 @@ grovy rename api backend                      # rename (also while running; "api
 
 ### Daemon as a service
 
-```sh
-cp examples/grovy.service ~/.config/systemd/user/   # edit ExecStart path + GROVY_BIND
-systemctl --user daemon-reload && systemctl --user enable --now grovy
-loginctl enable-linger "$USER"
-```
+`grovy setup` installs it. By hand: `examples/grovy.service` is the same unit (edit the paths), then
+`systemctl --user daemon-reload && systemctl --user enable --now grovy && loginctl enable-linger "$USER"`.
+Keep `KillMode=process`: without it, restarting the service can kill the tmux server and every session in it.
 
-Restarting the daemon never touches Claude: sessions belong to tmux.
+Restarting the daemon never touches Claude: sessions belong to tmux. Updating: `git pull`, then
+`systemctl --user restart grovy` (the page and the hooks pick up changes by themselves).
+
+### Making it yours
+
+* **Looks:** `~/.config/grovy/custom.css` (or `$GROVY_CONFIG_DIR/custom.css`) is loaded after the built-in styles
+  and picked up on the next page reload. Override the colour tokens (`--bg`, `--acc`, `--user`, … listed in
+  `examples/custom.css`) or any selector. It lives outside the repo, so `git pull` never conflicts with it.
+  Max 256 KB; a file containing `</style` is ignored.
+* **Anything else:** the code is three files, standard-library Python plus one HTML page. Ask a Claude session in
+  grovy to change grovy: `CLAUDE.md` tells it how to do that safely while you're using it.
 
 ### Phone access over the VPN
 
@@ -239,7 +255,12 @@ emits no hook, so grovy records the interrupt itself and sets the state to `unkn
 * **Session page.** The ⋯ menu has *Search this conversation*, *Rename* and *Stop session* (or *Remove from list*
   once it has ended; ended sessions also get a *Remove* button in the list). An exited session shows **Resume
   session**. Tapping the title switches between sessions. *Load earlier* pages back through the event log. Yes / No /
-  Go ahead chips appear when Claude's last reply ends with a question.
+  Go ahead chips appear when Claude's last reply ends with a question; they fill the message box.
+* **Update session** (⋯ menu) restarts Claude with the latest grovy and resumes the same conversation. Hook changes
+  apply right away, but the per-session settings file (status line, hook list) is only read when Claude starts.
+  It runs only when nothing would be cut off (idle, no background task, no open request, no message being sent).
+  Otherwise it says what is going on and offers **Update anyway**, which cuts those off. That consent covers that
+  one tap, and the chat records what was cut off.
 
 **Renaming.** Works while Claude runs: the tmux session is renamed live, and the registry keeps the old name as an
 *alias*. The running Claude keeps reporting its hook events under the old name until its next start (Claude reads its

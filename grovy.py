@@ -11,6 +11,7 @@ Hooks are injected per managed session with `claude --settings FILE`, whose comm
 """
 import argparse
 import fcntl
+import ipaddress
 import json
 import os
 import re
@@ -61,6 +62,11 @@ def default_state_dir():
         except OSError:
             pass
     return new
+
+
+def config_dir():
+    """Your own customizations (custom.css), kept out of the repo so `git pull` never conflicts with them."""
+    return env("CONFIG_DIR") or os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "grovy")
 
 
 def state_dir():
@@ -950,6 +956,162 @@ def cmd_doctor(_):
     return 0 if ok else 1
 
 
+SERVICE_UNIT = """\
+# Written by `grovy setup`; rerun it to change the address or port (or edit here, then
+# systemctl --user daemon-reload && systemctl --user restart grovy).
+[Unit]
+Description=grovy - Claude Code session manager daemon
+
+[Service]
+ExecStart={exe} serve
+Environment=GROVY_BIND={bind}
+Environment=GROVY_PORT={port}
+# The PATH of the shell that ran setup: claude (and the Claude sessions' Bash tool) need it.
+Environment=PATH={path}
+Restart=on-failure
+RestartSec=2
+# Essential: if this daemon starts the tmux server (first session from the phone), tmux is in this
+# unit's cgroup, and the default KillMode would kill tmux and every Claude session on restart or crash.
+KillMode=process
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def service_unit(bind, port, path=None):
+    path = path if path is not None else os.environ.get("PATH", "/usr/bin:/bin")
+    path = ":".join(dict.fromkeys(p for p in path.split(":") if p))   # de-duplicated, order kept
+    q = lambda v: str(v).replace("%", "%%")   # noqa: E731  systemd expands %-specifiers
+    return SERVICE_UNIT.format(exe=q(os.path.join(HERE, "grovy")), bind=q(bind), port=int(port), path=q(path))
+
+
+def _ask(prompt, default):
+    try:
+        got = input(f"{prompt} [{default}]: ").strip()
+    except EOFError:
+        got = ""
+    return got or default
+
+
+def _pick_bind(assume_yes):
+    out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5).stdout.split()
+    addrs = [a for a in out if ":" not in a]
+    vpn = [a for a in addrs if ipaddress.ip_address(a) in ipaddress.ip_network("100.64.0.0/10")]   # Tailscale
+    choices = [("127.0.0.1", "this computer only (no phone access)"),
+               ("0.0.0.0", "every network this computer is on")] + \
+              [(a, "Tailscale/VPN address" if a in vpn else "this address only") for a in addrs]
+    default = vpn[0] if vpn else "0.0.0.0"
+    if assume_yes or not sys.stdin.isatty():
+        return default
+    print("Where should the phone reach grovy? Only expose it on networks you trust (it is plain HTTP).")
+    for i, (a, what) in enumerate(choices, 1):
+        print(f"  {i}) {a:<16} {what}")
+    got = _ask("Address or number", default)
+    if got.isdigit() and 1 <= int(got) <= len(choices):
+        return choices[int(got) - 1][0]
+    ipaddress.ip_address(got)   # ValueError on garbage
+    return got
+
+
+def cmd_setup(a):
+    """One-time install: link grovy onto PATH, write and start the systemd user service, print the phone link."""
+    dry = a.dry_run
+    step = lambda msg: print(("(dry run) " if dry else "") + msg)  # noqa: E731
+    for tool in ("tmux", claude_cmd()):
+        if not shutil.which(tool):
+            die(f"{tool} not found on PATH: install it first" + (" (or set GROVY_CLAUDE)" if tool != "tmux" else ""))
+    # 1. grovy on PATH
+    bindir = os.path.expanduser("~/.local/bin")
+    link, target = os.path.join(bindir, "grovy"), os.path.join(HERE, "grovy")
+    if os.path.realpath(link) == os.path.realpath(target):
+        step(f"ok: {link} already points here")
+    elif os.path.lexists(link):
+        step(f"skipped: {link} exists and points elsewhere ({os.path.realpath(link)}); remove it to use this copy")
+    else:
+        step(f"linking {link} -> {target}")
+        if not dry:
+            os.makedirs(bindir, exist_ok=True)
+            os.symlink(target, link)
+    if bindir not in os.environ.get("PATH", "").split(os.pathsep):
+        print(f"note: {bindir} is not on your PATH; add it in your shell profile: export PATH=\"$HOME/.local/bin:$PATH\"")
+    # 2. token and custom.css template
+    if not dry:
+        load_token(create=True)
+    css = os.path.join(config_dir(), "custom.css")
+    if not os.path.exists(css):
+        step(f"creating {css} (your own styles; see the comments in it)")
+        if not dry:
+            os.makedirs(config_dir(), exist_ok=True)
+            shutil.copyfile(os.path.join(HERE, "examples", "custom.css"), css)
+    # 3. the daemon as a service
+    bind = a.bind or _pick_bind(a.yes)
+    ipaddress.ip_address(bind)
+    unit = service_unit(bind, a.port)
+    running = False
+    try:
+        running = bool(sock_request({"type": "status"}, timeout=1.0))
+    except (OSError, ValueError):
+        pass
+    systemd = not a.no_service and shutil.which("systemctl") and subprocess.run(
+        ["systemctl", "--user", "show-environment"], capture_output=True, timeout=10).returncode == 0
+    if a.no_service or not systemd:
+        if not a.no_service:
+            print("no systemd user session here: start the daemon yourself, e.g. in tmux:")
+        print(f"  tmux new -d -s grovyd 'GROVY_BIND={bind} GROVY_PORT={a.port} {target} serve'")
+    else:
+        path = os.path.expanduser("~/.config/systemd/user/grovy.service")
+        old = open(path).read() if os.path.exists(path) else None
+        if old == unit:
+            step(f"ok: {path} is up to date")
+        else:
+            step(f"writing {path}" + (" (previous version kept as grovy.service.bak)" if old else ""))
+            if dry:
+                print(unit)
+            else:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                if old:
+                    shutil.copyfile(path, path + ".bak")
+                with open(path, "w") as f:
+                    f.write(unit)
+        active = subprocess.run(["systemctl", "--user", "is-active", "grovy"], capture_output=True,
+                                text=True, timeout=10).stdout.strip() == "active"
+        if running and not active:
+            step("enabling the service for the next boot; a grovy daemon is already running outside it, so it "
+                 "isn't started now.\n  Stop that one (sessions are unaffected), then: systemctl --user start grovy")
+            cmds = [["daemon-reload"], ["enable", "grovy"]]
+        else:
+            step("starting the service and enabling it at boot")
+            cmds = [["daemon-reload"], ["enable", "grovy"], ["restart", "grovy"]]
+        for c in cmds if not dry else []:
+            r = subprocess.run(["systemctl", "--user", *c], capture_output=True, text=True, timeout=30)
+            if r.returncode:
+                die(f"systemctl --user {' '.join(c)} failed: {r.stderr.strip()}")
+        linger = subprocess.run(["loginctl", "show-user", os.environ.get("USER", ""), "-p", "Linger"],
+                                capture_output=True, text=True, timeout=10).stdout.strip()
+        if linger != "Linger=yes":
+            step("enabling linger, so the daemon runs after a reboot without you logging in")
+            if not dry and subprocess.run(["loginctl", "enable-linger"], capture_output=True, timeout=30).returncode:
+                print("note: `loginctl enable-linger` failed; without it the daemon starts when you log in")
+    if dry:
+        return 0
+    # 4. the phone link
+    for _ in range(50):
+        try:
+            if sock_request({"type": "status"}, timeout=1.0):
+                break
+        except (OSError, ValueError):
+            time.sleep(0.2)
+    else:
+        print("the daemon isn't answering yet; when it is, run `grovy url` for the phone link")
+        return 0
+    print("\nOpen this once on your phone (it logs the phone in):")
+    cmd_url(None)
+    print("\nThen tap + to start a session. New projects: run `claude` once in the folder first, to accept its "
+          "trust prompt.\nCustomize the look in " + css + "; check everything with `grovy doctor`.")
+    return 0
+
+
 def cmd_page(a):
     """Publish an HTML page to the phone (a sandboxed local "artifact"), or list/remove this session's pages."""
     session = a.session or env("SESSION")
@@ -1025,6 +1187,13 @@ def main(argv=None):
     s = sub.add_parser("hook", help="(called by Claude Code) process one hook event from stdin")
     s.add_argument("name")
     s.set_defaults(fn=lambda a: cmd_hook(a.name))
+    s = sub.add_parser("setup", help="one-time install: PATH link, systemd service, phone link")
+    s.add_argument("--bind", help="address to listen on (asked if omitted)")
+    s.add_argument("--port", type=int, default=env_int("PORT", 7333))
+    s.add_argument("--no-service", action="store_true", help="don't install the systemd service")
+    s.add_argument("-y", "--yes", action="store_true", help="don't ask; use the suggested address")
+    s.add_argument("--dry-run", action="store_true", help="show what would be done, change nothing")
+    s.set_defaults(fn=cmd_setup)
     s = sub.add_parser("page", help="publish an HTML page to the phone (sandboxed), or list/remove pages")
     ps = s.add_subparsers(dest="op", required=True)
     pp = ps.add_parser("publish", help="publish FILE; publishing the same name again updates it")

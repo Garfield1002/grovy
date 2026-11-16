@@ -1,0 +1,21 @@
+/* grovy custom styles: copy to ~/.config/grovy/custom.css (grovy setup does this) and edit.
+   Loaded after the built-in styles and picked up on the next page reload; no daemon restart.
+   Kept outside the repo, so `git pull` never conflicts with it.
+
+   The easiest changes are the colour tokens. Light theme: */
+:root {
+  /* --bg:#f7f6f3;    page background      --fg:#1d1d1b;  text
+     --card:#fff;     cards and sheets     --line:#e4e2dc; borders
+     --acc:#c96442;   links, accents       --user:#dfe8fb; your message bubbles
+     --ok:#2f8a4c;    allow, idle          --warn:#c27c0e; needs you
+     --bad:#c2402f;   deny, errors         --busy:#3a6fd8; working
+     --c1 … --c6:     chart series colours */
+}
+/* Dark theme (when the phone is in dark mode): */
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* --bg:#161615; --fg:#ebe9e4; --card:#21211f; --acc:#e08a67; --user:#25365c; … */
+  }
+}
+/* Any selector works too, e.g. a larger chat font:
+   .md { font-size:17px; } */
