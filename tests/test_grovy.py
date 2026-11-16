@@ -1000,6 +1000,78 @@ class TestOutdated(StoreCase):
             self.assertFalse(self.store.summary("b")["outdated"])
 
 
+class TestOomGuard(StoreCase):
+    """systemd-oomd killed whole tmux panes (Claude included) when another job ran the machine out of memory."""
+
+    def setUp(self):
+        super().setUp()
+        f = self.f = type("F", (), {})()
+        f.pids_now, f.cgroup, f.journal, f.moved = {}, {}, set(), []
+        f.pids = lambda: dict(f.pids_now)
+        f.scope = lambda pid: f.cgroup.get(pid)
+        def protect(name, pid):
+            f.moved.append((name, pid))
+            f.cgroup[pid] = f"grovy-{name}-{pid}.scope"
+            return f.cgroup[pid]
+        f.protect = protect
+        f.killed = lambda scopes: bool(set(scopes) & f.journal)
+        self.notes = []
+        self.store.notifier = type("N", (), {"send": lambda _, n, k, t: self.notes.append((n, k, t))})()
+        self.store.oom = f
+
+    def test_sessions_are_moved_once_into_an_avoid_scope(self):
+        self.f.pids_now = {"a": 100, "b": 200}
+        self.f.cgroup = {100: "tmux-spawn-x.scope", 200: "grovy-b-200.scope"}   # b: already shielded (restart)
+        self.store.reconcile()
+        self.store.reconcile()
+        self.assertEqual(self.f.moved, [("a", 100)])
+        self.assertEqual(self.store.sessions["a"]["scopes"], ["tmux-spawn-x.scope", "grovy-a-100.scope"])
+        self.f.pids_now["a"] = 101    # resumed: a new Claude
+        self.f.cgroup[101] = "tmux-spawn-y.scope"
+        self.store.reconcile()
+        self.assertEqual(self.f.moved[-1], ("a", 101))
+
+    def test_oom_kill_is_reported(self):
+        self.f.pids_now = {"a": 100, "b": 200}
+        self.f.cgroup = {100: "tmux-spawn-x.scope", 200: "tmux-spawn-z.scope"}
+        self.store.reconcile()
+        self.f.journal = {"grovy-a-100.scope"}
+        del self.live["a"], self.live["b"]
+        self.f.pids_now = {}
+        self.store.reconcile()
+        types = lambda n: [e["type"] for e in self.store.events[n]]
+        self.assertEqual(types("a")[-2:], ["Exited", "Killed"])
+        self.assertNotIn("Killed", types("b"))              # b just ended
+        self.assertEqual(self.store.sessions["a"]["activity"], "killed by the out-of-memory killer")
+        self.assertEqual([(n, k) for n, k, _ in self.notes], [("a", "error")])
+        self.store.reconcile()
+        self.assertEqual(types("a").count("Killed"), 1)
+
+    def test_failures_are_quiet(self):
+        self.f.pids = lambda: (_ for _ in ()).throw(RuntimeError("tmux down"))
+        with mock.patch("sys.stderr", io.StringIO()):
+            self.store.reconcile()                           # no exception
+        self.f.pids = lambda: {"a": 100}
+        self.f.cgroup = {100: "tmux-spawn-x.scope"}
+        self.f.protect = lambda n, p: None                   # no systemd user manager
+        with mock.patch("sys.stderr", io.StringIO()):
+            self.store.reconcile()
+        self.assertEqual(self.store.sessions["a"]["scopes"], ["tmux-spawn-x.scope"])   # still checked at exit
+
+
+class TestOomHelpers(unittest.TestCase):
+    def test_proc_scope_and_journal_match(self):
+        self.assertTrue(grovy.proc_scope(os.getpid()) is None or grovy.proc_scope(os.getpid()).endswith(".scope"))
+        self.assertIsNone(grovy.proc_scope(10**9))
+        for line in ("tmux-spawn-9.scope: systemd-oomd killed 14 process(es) in this unit.",
+                     "x.scope: Failed with result 'oom-kill'."):
+            self.assertTrue(grovy.OOM_LOG_RE.search(line))
+        self.assertFalse(grovy.OOM_LOG_RE.search("x.scope: Consumed 2min CPU time, 6.1M memory peak."))
+        with mock.patch.object(grovy.subprocess, "run", side_effect=OSError("no journalctl")):
+            self.assertFalse(grovy.oom_killed(["x.scope"]))
+            self.assertIsNone(grovy.oom_protect("a", 1))
+
+
 class TestRestart(StoreCase):
     def test_restart_only_when_nothing_is_cut_off(self):
         calls = []

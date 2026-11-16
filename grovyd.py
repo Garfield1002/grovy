@@ -100,7 +100,7 @@ KEEP = {
 
 class Store:
     def __init__(self, sdir, tmux_live=grovy.tmux_managed, paste=grovy.paste_prompt, notifier=None,
-                 key=grovy.send_key, lifecycle=None):
+                 key=grovy.send_key, lifecycle=None, oom=None):
         self.dir = sdir
         self.lock = threading.RLock()
         self.tmux_live = tmux_live
@@ -108,6 +108,7 @@ class Store:
         self.key = key
         self.lifecycle = lifecycle or Lifecycle()
         self.notifier = notifier
+        self.oom = oom          # OomGuard or None (tests, systems without systemd)
         self.sessions = {}      # name -> runtime dict
         self.events = {}        # name -> deque of event records
         self.perms = {}         # id -> permission dict (includes threading.Event under "_ev")
@@ -958,7 +959,7 @@ class Store:
 
     # ------------------------------------------------------------ reconciliation
     def reconcile(self):
-        changed = set()
+        changed, gone = set(), []
         try:   # outside the lock: reads the user's settings files
             expected = {n: grovy.session_fingerprint(n) for n in grovy.registry()}
         except (OSError, ValueError) as e:
@@ -985,6 +986,8 @@ class Store:
                             s["outdated"] = outdated
                             changed.add(name)
                 if name not in live and s["state"] != "exited":
+                    if s.get("scopes"):
+                        gone.append((name, s["scopes"]))
                     self._expire_perms(name, "tmux session gone")
                     self._set(name, "exited", "tmux session gone")
                     self._record(name, "Exited", {"note": "tmux session no longer exists"})
@@ -1017,8 +1020,43 @@ class Store:
                 self._save_prompts()
         for name in changed:
             self.publish(name)
+        if self.oom:
+            self._oom_check(gone)
         for name in list(self.sessions):
             self.try_deliver(name)
+
+    def _oom_check(self, gone):
+        """Outside the lock (systemd and journal calls): say when the OOM killer took a session, and keep new
+        sessions' Claude out of its way."""
+        for name, scopes in gone:
+            if self.oom.killed(scopes):
+                with self.lock:
+                    self._record(name, "Killed", {"by": "oom"})
+                    self._set(name, "exited", "killed by the out-of-memory killer")
+                    self._save_state()
+                self._notify(name, "error", "killed by the out-of-memory killer (memory pressure on this machine)")
+                self.publish(name)
+        try:
+            pids = self.oom.pids()
+        except Exception as e:  # never let this break reconciliation
+            print(f"grovyd: oom guard: {e}", file=sys.stderr)
+            return
+        with self.lock:
+            todo = [(n, pid) for n, pid in pids.items() if n in self.sessions and self.sessions[n].get("oom_pid") != pid]
+        for name, pid in todo:
+            scope = self.oom.scope(pid)
+            scopes = [scope] if scope else []
+            if scope and not scope.startswith("grovy-"):
+                new = self.oom.protect(name, pid)
+                if new:
+                    scopes.append(new)
+                else:
+                    print(f"grovyd: couldn't shield {name} from the OOM killer", file=sys.stderr)
+            with self.lock:
+                s = self.sessions.get(name)
+                if s:
+                    s["oom_pid"], s["scopes"] = pid, scopes
+                    self._save_state()
 
     def _forceable(self, s):
         """unknown, or working but silent (e.g. turn interrupted with Esc: Claude emits no hook)."""
@@ -1173,6 +1211,18 @@ def _public(p):
 
 
 # ---------------------------------------------------------------- notifications
+
+class OomGuard:
+    """systemd-oomd side effects (swappable in tests). Off without busctl/journalctl or with GROVY_OOM_AVOID=0."""
+    pids = staticmethod(grovy.pane_pids)
+    scope = staticmethod(grovy.proc_scope)
+    protect = staticmethod(grovy.oom_protect)
+    killed = staticmethod(grovy.oom_killed)
+
+    @staticmethod
+    def available():
+        return grovy.env("OOM_AVOID", "1") != "0" and bool(shutil.which("busctl") and shutil.which("journalctl"))
+
 
 class Lifecycle:
     """tmux/claude side effects for phone-initiated lifecycle actions (swappable in tests)."""
@@ -1790,7 +1840,7 @@ def serve(bind, port):
     notifier = None
     if grovy.env("NOTIFY_CMD"):
         notifier = Notifier(grovy.env("NOTIFY_CMD"), grovy.env("PUBLIC_URL"))
-    store = Store(sdir, notifier=notifier)
+    store = Store(sdir, notifier=notifier, oom=OomGuard() if OomGuard.available() else None)
 
     sp = grovy.sock_path()
     if os.path.exists(sp):

@@ -68,6 +68,7 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 | `GROVY_PUBLIC_URL` | unset | appended to notifications as a link |
 | `GROVY_DEBUG` | unset | log HTTP requests |
 | `GROVY_WIDGETS` | `1` | `0` = don't tell Claude sessions about widgets and pages (applies to sessions started afterwards) |
+| `GROVY_OOM_AVOID` | `1` | `0` = don't move sessions out of systemd-oomd's way (see "Out of memory") |
 | `GROVY_SUBAGENT_HOOKS` | `0` | `1` = also forward the tool events of subagents (normally only their permission requests and notifications) |
 
 ## Notifications (Telegram or anything else)
@@ -287,11 +288,34 @@ shows. **Stop sharing** (`grovy page unshare NAME`) revokes it; sharing again is
 revokes it too. Sharing exists **only on the phone**: there is no CLI or socket command for it, so a Claude
 session can publish pages but can't make one public.
 
+## Out of memory
+
+systemd-oomd kills a whole cgroup once memory pressure in your user manager (`user@UID.service`, limit 50% for 20s
+on Debian) stays high, and each tmux pane is its own cgroup (`tmux-spawn-….scope`). So when a big job elsewhere ran
+the machine short, oomd killed the Claude sessions, one after another, with everything they had started.
+
+* **Shield.** The reconcile loop moves each session's Claude (the pane's process: tmux execs it directly) into its
+  own scope, `grovy-NAME-PID.scope`, created with `ManagedOOMPreference=avoid`. It does this through D-Bus
+  (`busctl --user call … StartTransientUnit`, what `systemd-run --scope` does). oomd then picks that scope only when
+  no other candidate is left. Verified with systemd 257: the cgroup gets `user.oomd_avoid=1`, and oomd honours it
+  because the scope and the monitored `user@UID.service` have the same owner. Setting the property later
+  (`systemctl set-property`) does **not** set the attribute; it has to be given at creation. Sessions already running
+  are moved too (their already-running children stay where they were), and a resumed session's new Claude is moved
+  on the next pass. Without `busctl`/`journalctl` or a user manager, nothing is done.
+* **Say so.** The session remembers its scopes. When its tmux session vanishes, the daemon asks the user journal
+  (`journalctl --user -u SCOPE`) whether the OOM killer took it, and if so records a `Killed` event ("killed by the
+  out-of-memory killer"), which the chat shows and the notifier sends.
+* **Limitation.** What Claude runs directly is in its scope and shares the protection. A memory-hungry job started
+  that way is only killed once nothing else is left (another user process may go first). Start heavy jobs in their
+  own scope, ideally capped: `systemd-run --user --scope -p MemoryMax=40G CMD`. Then the kernel kills just that job
+  when it goes over, and oomd prefers it over every session.
+
 ## Failure modes
 
 | scenario | behaviour |
 |---|---|
 | SSH disconnects | nothing happens; Claude lives in tmux |
+| the machine runs short of memory | see "Out of memory" below: sessions are the OOM killer's last choice, and a session it kills says so |
 | phone sleeps / changes network | SSE reconnects automatically; on wake the page re-fetches. Drafts are kept in localStorage |
 | someone without the token holds idle connections | at the 64-connection cap the longest-idle not-yet-requested connection is closed, and an address may hold 8 such at once; real requests still get through |
 | daemon restarted | sessions untouched; state reloaded and reconciled against tmux; `needs_input` stays `needs_input` (Claude falls back to its terminal dialog); in-flight prompts → `unconfirmed`; a "type anyway" consent never survives a restart |

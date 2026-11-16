@@ -878,6 +878,8 @@ function eventNode(e, isLatestReply) {
     case "SessionStart": return sysLine(SOURCE[d.source] || "session started");
     case "SessionEnd": return sysLine("Claude exited", d.reason && d.reason !== "other" ? " (" + d.reason.replace(/_/g, " ") + ")" : "");
     case "Exited": return sysLine("terminal closed");
+    case "Killed": return h("div", {class: "err"}, "⚠ Killed by the system's out-of-memory killer: memory ran short on this machine, "
+      + "probably because of a big job (here or elsewhere). Resume continues the conversation.");
     case "Interrupted": return sysLine("■ interrupted from the phone");
     case "Renamed": return sysLine("renamed from " + (d.from || "?") + " to " + (d.to || "?"));
     case "Updated": return sysLine("updated from the phone, cutting off: " + (d.cut_off || []).join("; "));

@@ -106,5 +106,8 @@ Put scratch files in your scratchpad, not the repo.
 - `claude --resume <id>` on a conversation that was never saved exits immediately with an error.
 - Hooks fired inside a subagent carry `agent_id`/`agent_type` and the parent's `session_id`. A background subagent's
   `PostToolUse` can arrive after the parent's `Stop`.
+- (systemd 257) systemd-oomd watches `user@UID.service` and kills whole scopes; each tmux pane is one. A scope's
+  `ManagedOOMPreference=avoid` is honoured only if given when the scope is created (`user.oomd_avoid` xattr), not via
+  `set-property`. Killed scopes are garbage-collected; the reason stays in `journalctl --user -u SCOPE`.
 - A `--settings` file's `autoMode` block (`environment`/`allow`, prose, `"$defaults"` keeps the built-ins) reaches the
   auto-mode classifier: check with `claude --settings FILE auto-mode config`.

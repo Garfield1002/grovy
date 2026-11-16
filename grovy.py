@@ -210,6 +210,67 @@ def tmux_managed():
     return out
 
 
+# ---------------------------------------------------------------- the out-of-memory killer (systemd-oomd)
+# systemd-oomd kills a whole cgroup when memory pressure stays high, and each tmux pane is its own cgroup, so it
+# killed Claude sessions along with heavy jobs running elsewhere. The daemon moves each session's Claude into its own
+# scope marked ManagedOOMPreference=avoid (oomd honours it: the scope and the monitored user@UID.service have the same
+# owner), and when a session vanishes it asks the journal whether the OOM killer did it. All of it is best effort.
+
+def pane_pids():
+    """{grovy name: pid of the pane's process}. That's Claude itself: tmux execs our argv directly."""
+    r = tmux("list-panes", "-a", "-F", "#{session_name}\t#{@grovy}\t#{pane_pid}\t#{@grovy_state}", check=False)
+    if r.returncode != 0:
+        return {}
+    mine, out = os.path.realpath(state_dir()), {}
+    for parts in (line.split("\t") for line in r.stdout.splitlines()):
+        if len(parts) == 4 and parts[1] and parts[0] == tmux_name(parts[1]) and parts[2].isdigit() and \
+                os.path.realpath(parts[3] or default_state_dir()) == mine:
+            out.setdefault(parts[1], int(parts[2]))
+    return out
+
+
+def proc_scope(pid):
+    """The systemd scope a process is in (cgroup v2), e.g. tmux-spawn-….scope, or None."""
+    try:
+        with open(f"/proc/{int(pid)}/cgroup") as f:
+            m = re.search(r"^0::.*/([^/\s]+\.scope)\s*$", f.read(), re.M)
+    except (OSError, ValueError):
+        return None
+    return m.group(1) if m else None
+
+
+def oom_protect(name, pid):
+    """Move a running Claude into a new scope that systemd-oomd only picks when nothing else is left (the D-Bus call
+    `systemd-run --scope` makes; ManagedOOMPreference only takes effect when given at creation). Commands it starts
+    from then on are in that scope too. Returns the unit name, or None."""
+    unit = f"grovy-{name}-{int(pid)}.scope"
+    try:
+        r = subprocess.run(["busctl", "--user", "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+                            "org.freedesktop.systemd1.Manager", "StartTransientUnit", "ssa(sv)a(sa(sv))", unit, "fail",
+                            "4", "PIDs", "au", "1", str(int(pid)), "ManagedOOMPreference", "s", "avoid",
+                            "CollectMode", "s", "inactive-or-failed",
+                            "Description", "s", f"grovy session {name} (Claude Code)", "0"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return unit if r.returncode == 0 else None
+
+
+OOM_LOG_RE = re.compile(r"systemd-oomd killed|result 'oom-kill'|Out of memory: Killed")
+
+
+def oom_killed(scopes):
+    """Whether the user journal says the OOM killer killed one of these scopes (they're gone by now)."""
+    args = ["journalctl", "--user", "-o", "cat", "--no-pager", "-n", "50"]
+    for s in scopes:
+        args += ["-u", s]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return bool(OOM_LOG_RE.search(r.stdout))
+
+
 def tmux_alive(name):
     return name in tmux_managed()
 
