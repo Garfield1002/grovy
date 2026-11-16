@@ -155,7 +155,7 @@ socket and blocks while the phone shows the tool name and full input (Bash comma
 
 **Questions.** Claude's `AskUserQuestion` also arrives as a `PermissionRequest`, with the full
 structured questions. The phone shows a question card: option buttons, multi-select toggles, and a
-"type your own" field. A single single-choice question is answered with one tap. The answer goes back as
+"type your own" field. Tapping only selects; nothing is sent until **Send answer**. The answer goes back as
 `decision.behavior = "allow"` with `updatedInput.answers = {question: answer}`, and **Skip** sends a deny telling
 Claude to use its judgment. Verified with real Claude 2.1.325, in auto and default mode, including free-text answers.
 The terminal picker stays live in parallel, and whichever is answered first wins.

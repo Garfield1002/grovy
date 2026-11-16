@@ -1046,6 +1046,12 @@ class Http(http.server.BaseHTTPRequestHandler):
         if m and ID_RE.match(m.group(1)):
             code, res = store.decide(m.group(1), body.get("decision"), body.get("answers"))
             return self._send(code, {"status": res} if code == 200 else {"error": res})
+        if path == "/api/client-error":  # the phone reports render errors it would otherwise swallow
+            if now() - self.server.last_client_error > 5:
+                self.server.last_client_error = now()
+                msg = " | ".join(str(body.get(k, ""))[:2000].replace("\n", " ⏎ ") for k in ("view", "message", "stack"))
+                print(f"ccsd: CLIENT ERROR from {self.client_address[0]}: {msg}", file=sys.stderr, flush=True)
+            return self._send(200, {"status": "logged"})
         if path == "/api/sessions":
             code, res = store.create(body.get("name"), body.get("path"), body.get("ask"))
             return self._send(code, {"status": res} if code == 200 else {"error": res})
@@ -1108,6 +1114,7 @@ class HttpServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     stopping = False
     enforce = True
+    last_client_error = 0
     allowed_hosts = {"localhost"}
     MAX_CONNECTIONS = 64
 

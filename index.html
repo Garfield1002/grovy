@@ -126,6 +126,8 @@ main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px
 .btn.deny { color:var(--bad); border-color:var(--bad); }
 .btn:disabled { opacity:.45; }
 
+#err { position:fixed; left:12px; right:12px; top:calc(64px + env(safe-area-inset-top)); z-index:30; background:var(--bad);
+  color:#fff; border-radius:10px; padding:10px 12px; font-size:14px; }
 /* bottom sheet (switcher, menu, new session, search) */
 #sheet { position:fixed; inset:0; z-index:20; display:flex; align-items:flex-end; background:rgba(0,0,0,.35);
   animation:fadebg .2s ease-out; }
@@ -230,6 +232,7 @@ textarea:focus { border-color:var(--mut); }
       stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
   </div>
 </div></div>
+<div id="err" class="hidden" role="alert"></div>
 <div id="sheet" class="hidden"><div class="panel"><div class="grab"></div><div id="sheetbody"></div></div></div>
 <script>
 "use strict";
@@ -519,11 +522,22 @@ function toolMain(t, i) {
   else ["file_path", "path", "pattern"].forEach(k => take(k, x => h("pre", {}, x)));   // each one, separately
   return {parts, shown};
 }
+function waitingNote(note, since) {   // a sent decision normally clears in <1s; keep checking, then offer a refresh
+  const t = setInterval(() => {
+    if (!note.isConnected) return clearInterval(t);
+    refresh();
+    if (Date.now() - since > 10000) {
+      note.replaceChildren("Still here? ", h("button", {class: "more", onclick: () => { refresh(); }}, "Tap to refresh"));
+    }
+  }, 2000);
+}
 function questionNode(p) {
   const qs = (p.tool_input || {}).questions || [], answers = {}, others = {};
   const deciding = p.status !== "pending";
   const note = h("div", {class: "note"}, deciding ? "Sent, waiting for Claude…" : "");
-  const quick = qs.length === 1 && !qs[0].multiSelect;   // one single-choice question: a tap answers it
+  if (deciding) waitingNote(note, Date.now());
+  // Tapping an option only selects it; nothing is sent until "Send answer". (An earlier one-tap shortcut sent
+  // answers the user meant to review first, and a stray tap while scrolling could answer for them.)
   const submit = h("button", {class: "btn allow"}, "Send answer"), skip = h("button", {class: "btn"}, "Skip");
   const value = q => {
     const parts = q.multiSelect ? [...(answers[q.question] || [])] : (answers[q.question] ? [answers[q.question]] : []);
@@ -534,7 +548,7 @@ function questionNode(p) {
   const send = async (decision, payload) => {
     submit.disabled = skip.disabled = true; card.querySelectorAll(".opt, textarea").forEach(b => b.disabled = true);
     note.textContent = "Sending…";
-    try { await api(`/api/permissions/${p.id}/decision`, {decision, answers: payload}); note.textContent = "Sent, waiting for Claude…"; }
+    try { await api(`/api/permissions/${p.id}/decision`, {decision, answers: payload}); note.textContent = "Sent, waiting for Claude…"; waitingNote(note, Date.now()); }
     catch (err) { note.textContent = "Failed: " + err.message; submit.disabled = skip.disabled = false; }
     refresh();
   };
@@ -549,7 +563,6 @@ function questionNode(p) {
         } else {
           answers[q.question] = o.label; others[q.question] = "";
           b.parentNode.querySelectorAll(".opt").forEach(x => x.classList.toggle("sel", x === b));
-          if (quick) return sendAll();
         }
         submit.disabled = !ready();
       };
@@ -577,10 +590,11 @@ function permNode(p) {
   if (p.kind === "question") return questionNode(p);
   const deciding = p.status !== "pending";
   const note = h("div", {class: "note"}, deciding ? `Sent “${p.decision}”, waiting for Claude…` : "");
+  if (deciding) waitingNote(note, Date.now());
   const allow = h("button", {class: "btn allow"}, "Allow once"), deny = h("button", {class: "btn deny"}, "Deny");
   const decide = async d => {
     allow.disabled = deny.disabled = true; note.textContent = "Sending…";
-    try { await api(`/api/permissions/${p.id}/decision`, {decision: d}); note.textContent = "Sent, waiting for Claude…"; }
+    try { await api(`/api/permissions/${p.id}/decision`, {decision: d}); note.textContent = "Sent, waiting for Claude…"; waitingNote(note, Date.now()); }
     catch (err) { note.textContent = "Failed: " + err.message; }
     refresh();
   };
@@ -607,11 +621,13 @@ function cached(key, make) {
   return cache.get(key);
 }
 
+let renderSeq = 0;
 async function renderDetail(name) {
+  const seq = ++renderSeq;   // overlapping refreshes: only the newest response may paint
   let d;
   try { d = await api("/api/sessions/" + encodeURIComponent(name)); }
-  catch (e) { if (view === name) main.replaceChildren(h("div", {class: "empty"}, e.message)); return; }
-  if (view !== name) return;
+  catch (e) { if (view === name && seq === renderSeq) main.replaceChildren(h("div", {class: "empty"}, e.message)); return; }
+  if (view !== name || seq !== renderSeq) return;
   const s = d.session; cur = s;
   const nearBottom = innerHeight + scrollY >= document.documentElement.scrollHeight - 160;
   const stalled = s.state === "working" && Date.now() / 1000 - s.last_event > STALL;
@@ -868,8 +884,24 @@ function route() {
 }
 function refresh() {
   clearTimeout(timer);
-  timer = setTimeout(() => (view ? renderDetail(view) : renderList()).catch(() => $("live").classList.remove("on")), 80);
+  timer = setTimeout(() => (view ? renderDetail(view) : renderList())
+    .then(() => $("err").classList.add("hidden"))
+    .catch(e => { $("live").classList.remove("on"); showError(e); }), 80);
 }
+let lastReport = 0;
+function showError(e) {   // never fail silently: show it, and tell the daemon log (rate-limited)
+  if (e && e.message && /fetch|network|load failed/i.test(e.message)) return;   // just offline
+  $("err").textContent = "Display error: " + (e && e.message || e) + " (tap to retry)";
+  $("err").classList.remove("hidden");
+  if (Date.now() - lastReport > 30000) {
+    lastReport = Date.now();
+    api("/api/client-error", {message: String(e && e.message || e).slice(0, 500),
+      stack: String(e && e.stack || "").slice(0, 2000), view: view || ""}).catch(() => {});
+  }
+}
+addEventListener("error", ev => showError(ev.error || ev.message));
+$("err").onclick = () => { $("err").classList.add("hidden"); refresh(); };
+addEventListener("unhandledrejection", ev => showError(ev.reason));
 $("back").onclick = () => go("#/");
 addEventListener("hashchange", route);
 

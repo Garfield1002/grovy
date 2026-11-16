@@ -760,6 +760,19 @@ class TestHttp(unittest.TestCase):
                 srv.shutdown()
                 srv.server_close()
 
+    def test_client_error_report_is_authenticated_and_rate_limited(self):
+        self.httpd.token = "s3cret"
+        try:
+            self.assertEqual(self.req("/api/client-error", {"message": "x"})[0], 401)
+        finally:
+            self.httpd.token = ""
+        with mock.patch("sys.stderr", io.StringIO()) as err:
+            self.assertEqual(self.req("/api/client-error", {"message": "boom", "stack": "a\nb"})[0], 200)
+            self.assertEqual(self.req("/api/client-error", {"message": "again"})[0], 200)
+        self.assertIn("CLIENT ERROR", err.getvalue())
+        self.assertIn("boom", err.getvalue())
+        self.assertNotIn("again", err.getvalue())                 # rate-limited
+
     def test_dns_rebinding_host_rejected(self):
         self.assertEqual(self.req("/api/sessions", headers={"Host": "evil.example:80"})[0], 403)
         self.assertEqual(self.req("/api/sessions/a/prompts", {"text": "x"},
