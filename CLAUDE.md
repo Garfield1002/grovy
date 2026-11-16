@@ -1,7 +1,9 @@
 # Working on grovy
 
-grovy runs Claude Code sessions in tmux and serves a phone UI for them. `README.md` documents behaviour,
+grovy runs Claude Code sessions in tmux and serves a phone UI for them. `docs/DESIGN.md` documents behaviour,
 invariants and limitations: read the section you are changing (not the whole file) and keep it in sync.
+`README.md` is for users (install, what it does, troubleshooting): update it only for user-visible changes, and
+keep it short and non-technical.
 This file covers **how to change it safely**.
 
 ## You may be running inside grovy
@@ -46,7 +48,7 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 - A "force"/"type anyway" consent applies only at the moment it's given; it must not survive a later state or a restart.
 - Every bug fix gets a regression test. Check that it **fails on the old code**, e.g. with
   `git worktree add /tmp/x HEAD` and the new test file copied in.
-- Keep `README.md` in sync. It documents behaviour, failure modes and limitations.
+- Keep `docs/DESIGN.md` in sync (behaviour, failure modes, limitations), and `README.md` for user-visible changes.
 
 ## Testing
 

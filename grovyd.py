@@ -1238,7 +1238,7 @@ PAGE_MAX = 5 * 1024 * 1024
 PAGE_CDNS = "https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com"
 # Pages are Claude-written HTML: sandboxed (opaque origin: no cookies, no grovy API, no other pages), libraries
 # only from the CDN allowlist, and no fetch/XHR/WebSocket/images from the network, so a page can't send data out.
-# Browsers can't stop a page from navigating its own frame elsewhere; README "Known limitations" says so.
+# Browsers can't stop a page from navigating its own frame elsewhere; docs/DESIGN.md "Known limitations" says so.
 PAGE_CSP = ("sandbox allow-scripts allow-forms allow-modals allow-downloads; default-src 'none'; "
             f"script-src 'unsafe-inline' 'unsafe-eval' {PAGE_CDNS}; "
             f"style-src 'unsafe-inline' {PAGE_CDNS} https://fonts.googleapis.com; "
