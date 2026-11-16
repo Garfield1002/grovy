@@ -2142,6 +2142,19 @@ class TestHttp(unittest.TestCase):
         finally:
             self.httpd.token = ""
 
+    def test_login_link_only_for_a_logged_in_page(self):
+        self.httpd.token = "s3cret"
+        try:
+            self.assertEqual(self.req("/api/login-link", {})[0], 401)
+            ok = {"Cookie": "grovy_token=s3cret"}
+            code, body, _ = self.req("/api/login-link", {}, headers=ok)
+            self.assertEqual((code, json.loads(body)["token"]), (200, "s3cret"))
+            self.assertEqual(self.req("/api/login-link", {}, headers={**ok, "Origin": "http://evil.example"})[0], 403)
+            self.assertEqual(self.req("/api/login-link", headers=ok)[0], 404)   # GET: not an endpoint
+            self.assertEqual(self.req("/api/login-link", raw=b"{}", headers={**ok, "Content-Type": "text/plain"})[0], 415)
+        finally:
+            self.httpd.token = ""
+
     def test_sse(self):
         r = urllib.request.urlopen(self.base + "/api/events", timeout=5)
         self.assertEqual(r.readline(), b"retry: 3000\n")

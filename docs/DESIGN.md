@@ -41,7 +41,10 @@ grovy url                                   # prints http://ADDR:7333/?token=...
 **A token is always required, loopback included**, because other local users and DNS-rebinding web pages can
 reach 127.0.0.1 too. It's generated once into `$STATE/token` (mode 0600). `GROVY_TOKEN` overrides it. Opening the `grovy url` link sets an HttpOnly, SameSite=Strict
 cookie for a year. Without it the page shows "login needed" and the API returns 401. To rotate the token, delete the
-file and restart the daemon. `GROVY_AUTH=off` temporarily accepts requests without a token while still setting the
+file and restart the daemon. ⋯ → Login link (in the session list too) shows the same link for the address the page was opened
+on: the cookie is HttpOnly, so the page asks `POST /api/login-link`, which returns the token only to a logged-in,
+same-origin JSON request (a cross-site page can't send one). A script injected into the page could read the token
+that way; the strict script CSP is what prevents that. `GROVY_AUTH=off` temporarily accepts requests without a token while still setting the
 cookie from the link. That's useful for enrolling a phone whose only way to see the link is the grovy page itself.
 Without TLS the token protects against other peers on the network, not an on-path observer; the VPN provides the
 encryption. Cookies aren't isolated by port, so another web service on the same host name/IP that your phone visits

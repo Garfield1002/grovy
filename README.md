@@ -65,7 +65,7 @@ grovy ls                       # sessions and their state
 grovy attach api               # the real terminal
 grovy resume api               # continue an ended session
 grovy kill api                 # stop it
-grovy url                      # the phone link again
+grovy url                      # the phone link again (also on the phone: ⋯ → Login link)
 grovy doctor                   # check that everything is in order
 ```
 

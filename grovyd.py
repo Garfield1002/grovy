@@ -1953,6 +1953,10 @@ class Http(http.server.BaseHTTPRequestHandler):
                 msg = " | ".join(str(body.get(k, ""))[:2000].replace("\n", " ⏎ ") for k in ("view", "message", "stack"))
                 print(f"grovyd: CLIENT ERROR from {self.client_address[0]}: {msg}", file=sys.stderr, flush=True)
             return 200, {"status": "logged"}
+        if path == "/api/login-link":
+            # For ⋯ → Login link (signing in another device). The cookie is HttpOnly so the page can't read it; only
+            # a logged-in, same-origin POST (JSON, so a cross-site page can't even send it) gets the token back.
+            return 200, {"token": self.server.token or ""}
         if path == "/api/sessions":
             return wrap(*store.create(body.get("name"), body.get("path"), body.get("ask"),
                                       body.get("resume"), body.get("fork")))

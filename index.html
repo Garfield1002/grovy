@@ -1586,9 +1586,24 @@ function sessionMenu() {
           ask(`Stop session "${name}"? Claude exits; the conversation can be resumed later.`, "Stop", {danger: true})
             .then(yes => yes && act("kill"));
         }}, "Stop session"),
+    loginItem(),
     h("div", {class: "sub", style: "padding:10px 4px;color:var(--mut);font-size:13px"}, s.cwd || ""));
 }
-$("menu").onclick = sessionMenu;
+const loginItem = () => h("button", {class: "item", onclick: loginSheet}, "Login link",
+  h("div", {class: "sub"}, "Sign in on another device"));
+async function loginSheet() {   // the link `grovy url` prints, for the address this page was opened on
+  let tok;
+  try { tok = (await api("/api/login-link", {})).token; } catch (e) { closeSheet(); return say(e.message); }
+  const link = location.origin + "/" + (tok ? "?token=" + encodeURIComponent(tok) : "");
+  const copy = h("button", {class: "btn allow", onclick: () => copyText(link, copy)}, "Copy");
+  openSheet(h("h2", {}, "Login link"),
+    h("p", {style: "color:var(--mut);font-size:14px"}, "Open it once on another device to sign in there (it's remembered for a year)."),
+    h("pre", {class: "path", style: "white-space:pre-wrap;overflow-wrap:anywhere;user-select:all"}, link),
+    h("div", {style: "display:flex"}, copy),
+    h("p", {style: "color:var(--warn);font-size:13px"}, tok ? "Anyone with this link controls your Claude sessions: "
+      + "only send it to yourself." : "This server has no token: anyone who can reach it can use grovy."));
+}
+$("menu").onclick = () => view ? sessionMenu() : openSheet(h("h2", {}, "grovy"), loginItem());
 async function updateSession(name) {   // the server decides whether it's safe; forcing is a separate, explicit tap
   if (!await ask(`Update "${name}"? Claude restarts with the latest grovy and resumes the same conversation.`, "Update")) return;
   const post = force => api(`/api/sessions/${encodeURIComponent(name)}/restart`, {force});
@@ -1751,7 +1766,7 @@ function route() {
   const m = location.hash.match(/^#\/s\/([A-Za-z0-9_-]+)$/);
   view = m ? m[1] : null; lastEventId = 0; cur = null; first = true; lastTool = ""; cache.clear();
   older = []; noMore = false; closeSheet(); $("quick").replaceChildren();
-  $("add").classList.toggle("hidden", !!view); $("menu").classList.toggle("hidden", !view);
+  $("add").classList.toggle("hidden", !!view); $("menu").classList.remove("hidden");
   $("title").classList.toggle("tap", !!view); $("resume").classList.add("hidden"); $("meta").classList.add("hidden");
   $("back").classList.toggle("hidden", !view);
   $("pill").classList.toggle("hidden", !view);
