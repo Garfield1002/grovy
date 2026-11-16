@@ -68,6 +68,7 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 | `GROVY_PUBLIC_URL` | unset | appended to notifications as a link |
 | `GROVY_DEBUG` | unset | log HTTP requests |
 | `GROVY_WIDGETS` | `1` | `0` = don't tell Claude sessions about widgets and pages (applies to sessions started afterwards) |
+| `GROVY_SUBAGENT_HOOKS` | `0` | `1` = also forward the tool events of subagents (normally only their permission requests and notifications) |
 
 ## Notifications (Telegram or anything else)
 
@@ -87,6 +88,13 @@ in a background thread with a 15s timeout, so a failing bot never blocks hooks o
   stored in the registry for `grovy resume`.
 
   The hook command line is `grovy hook api`, so events are attributed from argv, not from cwd.
+
+  **Subagents** run under the same settings, so their hooks call `grovy hook api` too, with the parent's
+  `session_id` plus `agent_id`/`agent_type` (verified, Claude Code 2.1.325). The adapter drops those events except
+  `PermissionRequest` and `Notification`, which wait on you: a subagent's tool calls aren't the session's state, and a
+  background subagent's `PostToolUse` can arrive after the parent's `Stop`, which would show an idle session as
+  working. `SubagentStart` isn't registered, so subagents never get grovy's guide (a forked subagent inherits its
+  parent's context, guide included). `GROVY_SUBAGENT_HOOKS=1` forwards everything.
   Several sessions can share a project. A `claude` started inside a session (e.g. by a tool) does not
   inherit `--settings`, so it can't pose as the session.
 

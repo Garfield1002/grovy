@@ -140,6 +140,27 @@ class TestHookAdapter(unittest.TestCase):
         self.assertEqual(self.run_hook(json.dumps(ev("Stop")))[1], "")
         with mock.patch.dict(os.environ, {"GROVY_WIDGETS": "0"}):
             self.assertEqual(self.run_hook(json.dumps(ev("SessionStart", source="startup")))[1], "")
+
+    def test_subagent_events_stay_out_of_the_session(self):
+        """Hooks fired inside a subagent carry agent_id (verified, Claude Code 2.1.325). A background subagent's
+        PostToolUse arrived after the parent's Stop and showed an idle session as working."""
+        sent = []
+        def fake(msg, timeout=2.0, wait_reply=True):
+            sent.append(msg["event"]["hook_event_name"])
+            return {"decision": "allow"} if wait_reply else None
+        sub = {"agent_id": "ab4c", "agent_type": "general-purpose"}
+        with mock.patch.object(grovy, "sock_request", fake), mock.patch("sys.stderr", io.StringIO()):
+            for name in ("PostToolUse", "UserPromptSubmit", "Stop", "PermissionRequest", "Notification"):
+                with mock.patch("sys.stdin", io.StringIO(json.dumps(ev(name, **sub)))), redirect_stdout(io.StringIO()):
+                    grovy.cmd_hook("x")
+            self.assertEqual(sent, ["PermissionRequest", "Notification"])   # what waits on the user still shows
+            with mock.patch("sys.stdin", io.StringIO(json.dumps(ev("PostToolUse")))):
+                grovy.cmd_hook("x")                                        # the main agent's own tool calls do
+            with mock.patch.dict(os.environ, {"GROVY_SUBAGENT_HOOKS": "1"}), \
+                    mock.patch("sys.stdin", io.StringIO(json.dumps(ev("PostToolUse", **sub)))):
+                grovy.cmd_hook("x")
+        self.assertEqual(sent[2:], ["PostToolUse", "PostToolUse"])
+
     def test_auto_mode_hints_in_session_settings(self):
         with open(grovy.hook_settings("am")) as f:
             am = json.load(f)["autoMode"]

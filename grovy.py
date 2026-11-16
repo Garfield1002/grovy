@@ -33,6 +33,8 @@ TMUX_PREFIX = "grovy-"
 # Events the adapter forwards. Anything else is ignored (exit 0, no output).
 HOOK_EVENTS = ("SessionStart", "SessionEnd", "UserPromptSubmit", "PermissionRequest",
                "Notification", "Stop", "StopFailure", "PostToolUse")
+# The ones still forwarded when fired inside a subagent: requests waiting on the user (GROVY_SUBAGENT_HOOKS=1: all).
+SUBAGENT_EVENTS = ("PermissionRequest", "Notification")
 
 
 def env(name, default=None):
@@ -806,6 +808,11 @@ def cmd_hook(name):
         return 0
     event = payload.get("hook_event_name")
     if event not in HOOK_EVENTS:
+        return 0
+    if payload.get("agent_id") and event not in SUBAGENT_EVENTS and env("SUBAGENT_HOOKS", "0") != "1":
+        # Fired inside a subagent (verified: such hooks carry agent_id/agent_type, and the parent's session_id).
+        # Its tool calls aren't the session's state: a background subagent's PostToolUse can even arrive after
+        # the parent's Stop and would show an idle session as working. Only what needs the user goes through.
         return 0
     if event == "SessionStart" and isinstance(payload.get("session_id"), str):
         # Recorded here, not only in the daemon, so `grovy resume` works even if grovyd was down.

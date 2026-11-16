@@ -104,5 +104,7 @@ Put scratch files in your scratchpad, not the repo.
 - Subagent reports and task notifications are injected as prompts, so they fire `UserPromptSubmit` too. The UI
   must not show them as the user's messages.
 - `claude --resume <id>` on a conversation that was never saved exits immediately with an error.
+- Hooks fired inside a subagent carry `agent_id`/`agent_type` and the parent's `session_id`. A background subagent's
+  `PostToolUse` can arrive after the parent's `Stop`.
 - A `--settings` file's `autoMode` block (`environment`/`allow`, prose, `"$defaults"` keeps the built-ins) reaches the
   auto-mode classifier: check with `claude --settings FILE auto-mode config`.
