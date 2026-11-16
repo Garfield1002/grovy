@@ -428,9 +428,9 @@ async function renderList() {
 
 async function removeSessions(names) {
   const what = names.length === 1 ? `"${names[0]}"` : `${names.length} ended sessions`;
-  if (!confirm(`Remove ${what} from the list? The conversation stays resumable from ＋.`)) return;
+  if (!await ask(`Remove ${what} from the list? The conversation stays resumable from ＋.`, "Remove", {danger: true})) return;
   for (const n of names) {
-    try { await api(`/api/sessions/${encodeURIComponent(n)}/forget`, {}); } catch (e) { alert(n + ": " + e.message); }
+    try { await api(`/api/sessions/${encodeURIComponent(n)}/forget`, {}); } catch (e) { say(n + ": " + e.message); }
   }
   if (view && names.includes(view)) go("#/"); else refresh();
 }
@@ -650,7 +650,7 @@ const PSTATUS = {queued: ["queued: sends when Claude is idle", ""], injected: ["
 function promptNode(p) {
   const [label, cls] = PSTATUS[p.status] || [p.status, ""];
   const cancel = p.status === "queued" ? h("button", {class: "link", onclick: async () => {
-    try { await api(`/api/prompts/${p.id}/cancel`, {}); } catch (e) { alert(e.message); } refresh(); }}, "cancel") : null;
+    try { await api(`/api/prompts/${p.id}/cancel`, {}); } catch (e) { say(e.message); } refresh(); }}, "cancel") : null;
   return h("div", {class: "u pending"}, p.text,
     h("span", {class: "st " + cls}, label, p.error && p.status !== "unconfirmed" ? ": " + p.error : "", cancel));
 }
@@ -751,7 +751,7 @@ async function loadEarlier() {
   } catch (e) { if (btn) btn.textContent = "Load earlier (failed, retry)"; }
 }
 async function quickSend(text) {
-  try { await api(`/api/sessions/${encodeURIComponent(view)}/prompts`, {text}); first = true; } catch (e) { alert(e.message); }
+  try { await api(`/api/sessions/${encodeURIComponent(view)}/prompts`, {text}); first = true; } catch (e) { say(e.message); }
   refresh();
 }
 const ctxLevel = c => c > 75 ? "bad" : c > 25 ? "warn" : "";   // green ≤25%, amber ≤75%, red above
@@ -793,20 +793,21 @@ $("send").onclick = async () => {
   const text = input.value;
   if (!text.trim() || !view) return;
   const force = !!(cur && cur.can_force) &&
-    confirm("Claude's state is uncertain. Type this into the terminal anyway?\n(Cancel = queue it until Claude reports idle.)");
+    await ask("Claude's state is uncertain. Type this into the terminal anyway?\nOr queue it until Claude reports idle.",
+              "Type anyway", {cancel: "Queue it"});
   $("send").disabled = true;
   try {
     await api(`/api/sessions/${encodeURIComponent(view)}/prompts`, {text, force});
     input.value = ""; try { localStorage.removeItem(draftKey()); } catch (e) {} autosize(); $("picker").replaceChildren();
     first = true;   // jump to the bottom to show the outgoing message
-  } catch (e) { alert("Not sent: " + e.message); }
+  } catch (e) { say("Not sent: " + e.message); }
   $("send").disabled = false;
   refresh();
 };
 
 $("stop").onclick = async () => {
-  if (!view || !confirm("Interrupt Claude? (Same as pressing Esc in the terminal.)")) return;
-  try { await api(`/api/sessions/${encodeURIComponent(view)}/interrupt`, {}); } catch (e) { alert(e.message); }
+  if (!view || !await ask("Interrupt Claude? (Same as pressing Esc in the terminal.)", "Interrupt", {danger: true})) return;
+  try { await api(`/api/sessions/${encodeURIComponent(view)}/interrupt`, {}); } catch (e) { say(e.message); }
   refresh();
 };
 
@@ -831,8 +832,25 @@ input.addEventListener("input", picker);
 input.addEventListener("input", () => { if (input.value.trim()) $("quick").replaceChildren(); });
 
 // ---------------------------------------------------------------- sheets
-function openSheet(...kids) { $("sheetbody").replaceChildren(...kids.flat().filter(k => k != null && k !== false)); $("sheet").classList.remove("hidden"); }
-function closeSheet() { $("sheet").classList.add("hidden"); $("sheetbody").replaceChildren(); }
+// In-page dialogs: Chrome's native confirm()/alert() freeze the page, which then lags catching up afterwards.
+let sheetDone = null;   // resolves the open ask() with false when the sheet is dismissed any other way
+function openSheet(...kids) { if (sheetDone) { const d = sheetDone; sheetDone = null; d(false); }
+  $("sheetbody").replaceChildren(...kids.flat().filter(k => k != null && k !== false)); $("sheet").classList.remove("hidden"); }
+function closeSheet() { $("sheet").classList.add("hidden"); $("sheetbody").replaceChildren();
+  if (sheetDone) { const d = sheetDone; sheetDone = null; d(false); } }
+function ask(msg, ok, {danger = false, cancel = "Cancel"} = {}) {
+  return new Promise(res => {
+    openSheet(h("p", {style: "margin:4px 0 16px;white-space:pre-line"}, msg),
+      h("div", {style: "display:flex;gap:10px"},
+        h("button", {class: "btn", onclick: closeSheet}, cancel),
+        h("button", {class: "btn " + (danger ? "deny" : "allow"), onclick: () => { sheetDone = null; closeSheet(); res(true); }}, ok)));
+    sheetDone = res;
+  });
+}
+function say(msg) {
+  openSheet(h("p", {style: "margin:4px 0 16px;white-space:pre-line"}, msg),
+    h("div", {style: "display:flex"}, h("button", {class: "btn", onclick: closeSheet}, "OK")));
+}
 $("sheet").addEventListener("click", e => { if (e.target.id === "sheet") closeSheet(); });
 
 async function switcher() {   // tap the title: jump to another session
@@ -849,27 +867,29 @@ function sessionMenu() {
   const act = async (verb, ok) => {
     closeSheet();
     try { const r = await api(`/api/sessions/${encodeURIComponent(name)}/${verb}`, {}); if (ok) ok(r); }
-    catch (e) { alert(e.message); }
+    catch (e) { say(e.message); }
     refresh();
   };
   openSheet(h("h2", {}, name),
     h("button", {class: "item", onclick: searchSheet}, "Search this conversation"),
     h("button", {class: "item", onclick: () => renameSheet(name)}, "Rename"),
     s.state !== "exited" ? h("button", {class: "item", onclick: () => {
-        if (confirm(`Restart "${name}"? Claude exits and resumes the same conversation (only while it's idle).`)) act("restart");
+        ask(`Restart "${name}"? Claude exits and resumes the same conversation (only while it's idle).`, "Restart")
+          .then(yes => yes && act("restart"));
       }}, "Restart session", h("div", {class: "sub"}, "Picks up new grovy settings; only while idle")) : null,
     s.state === "exited"
       ? [h("button", {class: "item", onclick: () => act("resume")}, "Resume session"),
          h("button", {class: "item danger", onclick: () => { closeSheet(); removeSessions([name]); }}, "Remove from list")]
       : h("button", {class: "item danger", onclick: () => {
-          if (confirm(`Stop session "${name}"? Claude exits; the conversation can be resumed later.`)) act("kill");
+          ask(`Stop session "${name}"? Claude exits; the conversation can be resumed later.`, "Stop", {danger: true})
+            .then(yes => yes && act("kill"));
         }}, "Stop session"),
     h("div", {class: "sub", style: "padding:10px 4px;color:var(--mut);font-size:13px"}, s.cwd || ""));
 }
 $("menu").onclick = sessionMenu;
 $("resume").onclick = async () => {
   $("resume").disabled = true; $("resume").textContent = "Starting…";
-  try { await api(`/api/sessions/${encodeURIComponent(view)}/resume`, {}); } catch (e) { alert(e.message); }
+  try { await api(`/api/sessions/${encodeURIComponent(view)}/resume`, {}); } catch (e) { say(e.message); }
   $("resume").disabled = false; $("resume").textContent = "Resume session";
   refresh();
 };
@@ -930,7 +950,7 @@ async function newSession(state = {}) {
   try {
     folders = (await api("/api/projects")).projects;
     taken = new Set((await api("/api/sessions")).sessions.map(s => s.name));
-  } catch (e) { return alert(e.message); }
+  } catch (e) { return say(e.message); }
   let picked = state.picked || null;
   const unique = b => { b = b.replace(/[^A-Za-z0-9_-]/g, "-").replace(/^[-_]+/, "").slice(0, 28) || "s";
     let n = b, i = 2; while (taken.has(n)) n = b + "-" + i++; return n; };
