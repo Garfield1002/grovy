@@ -240,7 +240,8 @@ emits no hook, so grovy records the interrupt itself and sets the state to `unkn
 * **Session page.** The ⋯ menu has *Search this conversation*, *Rename* and *Stop session* (or *Remove from list*
   once it has ended; ended sessions also get a *Remove* button in the list). An exited session shows **Resume
   session**. Tapping the title switches between sessions. *Load earlier* pages back through the event log. Yes / No /
-  Go ahead chips appear when Claude's last reply ends with a question; they fill the message box.
+  Go ahead chips appear when Claude's last reply ends with a question; they fill the message box. Typing hides
+  them but keeps their space until you send, so the conversation doesn't jump.
 * **Update session** (⋯ menu, shown only when the session is out of date) restarts Claude with the latest grovy and
   resumes the same conversation. A session is out of date when what it was started with differs from what a start
   now would give: `start_session` records a fingerprint of the `--settings` content plus `SESSION_ENV_VERSION` (bumped
@@ -257,14 +258,17 @@ settings file only at start), so the daemon routes alias → current name. Old h
 alias can't be taken by another session until the renamed one is removed.
 
 **Status info.** Each session's status line runs `grovy statusline NAME`. It forwards model, effort, fast mode and
-context use to the daemon (shown under the session header and as "context N%" in the list), then prints your own
+context use to the daemon (shown as a full-width bar just above the message box, below the reply chips, replacing the composer's top line; tap for details; and as "context N%" in the list), then prints your own
 configured status line, so the terminal looks the same. Your status line is looked up in your user settings and the
 session's own project folder, never in the folder Claude happens to be in: a cloned repo's `.claude/settings.json`
 must not get its command run without Claude's trust dialog. Sessions started before this existed report it after
 their next start.
 
 **Desktop.** At 1000px wide or more, a conversation gets a sidebar with all sessions (state dot, pending-request
-badge, last activity), refreshed on any session's event at most every 400ms and only fetched while it's shown. Keyboard:
+badge, last activity) and all pages, refreshed on any session's event at most every 400ms and only fetched while it's
+shown. There is then no header row: the pill and ⋯ float at the top right
+(over the margin beside the conversation; on a window just over 1000px they can overlap a message's corner). A page opened from the sidebar may belong to another session: the viewer looks pages up in both lists
+(`pageOf`), so the conversation's refresh doesn't close it. Keyboard:
 Ctrl/Cmd+Enter sends (Enter stays a new line, as on the phone); typing with nothing focused goes to the message box;
 Alt+↑/↓ switch to the previous/next session; Esc closes a sheet or the page viewer, else the `/` picker, else leaves
 the box. In the `/` picker the first command is highlighted; ↑/↓ move, Tab or Enter completes. Sheets take focus, keep Tab inside, and give it back

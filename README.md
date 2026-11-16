@@ -54,7 +54,7 @@ in a terminal. grovy listens to Claude's hooks and shows everything on a phone-f
 - **Live progress:** when Claude runs something long (a build, training, a batch job), its script can show a progress
   bar, notes or the latest output lines in the chat while it runs. Sessions started before you updated grovy get
   this after ⋯ → Update session.
-- **On a computer:** on a wide screen the other sessions stay in a sidebar. Ctrl+Enter sends, Alt+↑/↓ switches session,
+- **On a computer:** on a wide screen your sessions and pages stay in a sidebar. Ctrl+Enter sends, Alt+↑/↓ switches session,
   Esc closes, Tab reaches every button.
 
 The terminal never goes away: `grovy attach NAME` puts you in the real session (detach with Ctrl-b d).
