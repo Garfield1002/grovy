@@ -34,6 +34,7 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 | pages | `grovy page` (`cmd_page`) → socket `page` → `Store.publish_page`; served by `/p/<id>` with `PAGE_CSP` + `PAGE_BRIDGE`. Never loosen `PAGE_CSP` (no `allow-same-origin`, no `connect-src`) without the user agreeing |
 | setup, customizing | `grovy setup` (`cmd_setup`, `SERVICE_UNIT`; keep `examples/grovy.service` in sync). User styles: `~/.config/grovy/custom.css`, injected by `load_index()`. Put user-facing customization there, not in the repo |
 | widgets | `WIDGET_GUIDE` in `grovy.py` (what Claude is told, via the SessionStart hook) and `WIDGETS` in `index.html` (renderers). Change both together; every renderer validates its input and throws a readable `Error` |
+| live widgets | client library in `grovy.py` (`track`, `progress`, `note`, `log`, `show`; CLI `tail`/`progress`/`note`/`show`) → socket `live` → `Store.live_update` → `Live` event, rendered by `liveNode`. User scripts import this module: it must stay import-cheap, and those functions must never raise or block |
 | `tests/test_grovy.py` | unit tests that drive `grovyd.Store` with fake tmux/paste callables, plus real-tmux integration tests on a private server |
 
 ## Rules

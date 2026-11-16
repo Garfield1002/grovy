@@ -276,6 +276,14 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
 .pgh { display:flex; justify-content:space-between; gap:10px; font-size:14px; margin-bottom:4px; }
 .pg i { display:block; height:8px; border-radius:4px; background:var(--line); overflow:hidden; }
 .pg b { display:block; height:100%; background:var(--busy); } .pg b.ok { background:var(--ok) } .pg b.warn { background:var(--warn) } .pg b.bad { background:var(--bad) }
+.pg b.ind { width:30%; animation:ind 1.4s ease-in-out infinite alternate; } .pg .wn { margin-top:3px; }
+@keyframes ind { from { margin-left:0 } to { margin-left:70% } }
+@media (prefers-reduced-motion: reduce) { .pg b.ind { animation:none; width:100%; opacity:.5 } }
+.wg-note { border-left:4px solid var(--line); } .wg-note.ok { border-left-color:var(--ok) } .wg-note.warn { border-left-color:var(--warn) } .wg-note.bad { border-left-color:var(--bad) }
+.wg-note .md > :first-child { margin-top:0 } .wg-note .md > :last-child { margin-bottom:0 }
+.lg { display:flex; flex-direction:column-reverse; max-height:16em; overflow:auto; background:var(--bg); border-radius:8px; padding:8px 10px; }
+.lg pre { margin:0; font:12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
+.lf { margin-top:8px; font-size:12.5px; color:var(--mut); } .lf.failed { color:var(--bad) } .lf.running::before { content:"● "; color:var(--busy) }
 .ck { display:flex; flex-direction:column; gap:7px; } .ci { display:flex; gap:10px; align-items:flex-start; }
 .ci .ic { width:20px; flex:none; text-align:center; font-weight:700; color:var(--faint); }
 .ci.done .ic { color:var(--ok) } .ci.failed .ic { color:var(--bad) } .ci.running .ic { color:var(--busy) }
@@ -451,11 +459,17 @@ let widgetSeq = 0;
 function widget(src) {
   let spec;
   try { spec = JSON.parse(src); } catch (e) { throw new Error("not valid JSON (" + e.message + ")"); }
+  return widgetNode(spec);
+}
+function widgetNode(spec, live) {   // live: a Live event's data (status, created, updated) for widgets a script shows
   wobj(spec, "widget");
   const make = WIDGETS[spec.type];
-  if (!make) throw new Error(`unknown type ${JSON.stringify(spec.type)} (chart, stats, progress, checklist, choices, form, diagram)`);
-  return h("div", {class: "wg wg-" + spec.type}, [make(spec)].flat(Infinity));
+  if (!make) throw new Error(`unknown type ${JSON.stringify(spec.type)} (${Object.keys(WIDGETS).join(", ")})`);
+  return h("div", {class: "wg wg-" + spec.type + (spec.type === "note" && tone(spec.tone) ? " " + spec.tone : "")},
+    [make(spec, live)].flat(Infinity));
 }
+const dur = s => { s = Math.max(0, Math.round(s)); return s < 60 ? s + "s" : s < 3600 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`
+  : `${Math.floor(s / 3600)}h ${String(Math.floor(s % 3600 / 60)).padStart(2, "0")}m`; };
 
 function fillComposer(text) {   // interactive widgets only ever propose a message; the user reviews and sends it
   const go = () => {
@@ -536,13 +550,34 @@ const WIDGETS = {
         h("div", {class: "tl"}, wtext(it.label, 60)), it.note ? h("div", {class: "wn"}, wtext(it.note, 120)) : null); }))];
   },
 
-  progress(s) {
-    return [wtitle(s.title), warr(s.items, "items", 20).map(it => { wobj(it, "item");
-      const v = wnum(it.value, "value"), max = it.max == null ? 100 : wnum(it.max, "max");
+  progress(s, live) {
+    let eta = null;
+    const items = warr(s.items, "items", 20).map(it => { wobj(it, "item");
+      const v = wnum(it.value, "value"), ind = it.indeterminate === true, max = it.max == null || ind ? 100 : wnum(it.max, "max");
       const pct = max > 0 ? Math.max(0, Math.min(100, v / max * 100)) : 0;
+      if (eta === null && !ind && it.max != null && max > 0) eta = [v, max];
+      const running = live && live.status === "running";
       return h("div", {class: "pg"}, h("div", {class: "pgh"}, h("span", {}, wtext(it.label, 80)),
-          h("span", {class: "wn"}, it.max == null ? fmt(v) + "%" : fmt(v) + " / " + fmt(max))),
-        h("i", {}, h("b", {class: tone(it.tone) || (pct >= 100 ? "ok" : ""), style: `width:${pct}%`}))); })];
+          h("span", {class: "wn"}, ind ? fmt(v) : it.max == null ? fmt(v) + "%" : fmt(v) + " / " + fmt(max))),
+        h("i", {}, ind && running ? h("b", {class: "ind"})
+          : h("b", {class: tone(it.tone) || (live && live.status === "failed" ? "bad" : pct >= 100 || ind ? "ok" : ""), style: `width:${ind ? 100 : pct}%`})),
+        it.note != null ? h("div", {class: "wn"}, wtext(it.note, 200)) : null); });
+    let time = null;
+    if (s.eta === true && live && wnum(live.updated, "updated") >= wnum(live.created, "created")) {
+      const took = live.updated - live.created;
+      if (live.status !== "running") time = (live.status === "done" ? "took " : "ran for ") + dur(took);
+      else if (eta && eta[0] > 0 && eta[0] < eta[1] && took >= 2) time = dur(took) + " elapsed · about " + dur(took * (eta[1] - eta[0]) / eta[0]) + " left";
+      else time = dur(took) + " elapsed";
+    }
+    return [wtitle(s.title), items, time ? h("div", {class: "wn"}, time) : null];
+  },
+
+  note(s) { return [wtitle(s.title), md(wtext(s.text, 20000))]; },
+
+  log(s) {
+    const lines = Array.isArray(s.lines) ? s.lines : (() => { throw new Error("lines must be a list"); })();
+    if (lines.length > 200) throw new Error("lines: at most 200");
+    return [wtitle(s.title), h("div", {class: "lg"}, h("pre", {}, lines.map(l => wtext(l, 500)).join("\n") || "(no output yet)"))];
   },
 
   checklist(s) {
@@ -807,6 +842,16 @@ function machineNode(kind, text) {
   el.append(btn);
   return el;
 }
+function liveNode(d) {   // a widget a script in the session shows and updates in place (`import grovy`)
+  let node;
+  try { node = widgetNode(d.spec, d); }
+  catch (e) { return h("div", {class: "wg werr"}, "Widget not shown: " + e.message); }
+  const msg = d.message ? ": " + wtext(d.message, 500) : "";
+  const foot = d.status === "running" ? "live · updated " + new Date(d.updated * 1000).toLocaleTimeString()
+    : d.status === "failed" ? "✕ failed" + msg : d.status === "stopped" ? "■ stopped" + msg : d.message ? "✓ " + wtext(d.message, 500) : "";
+  if (foot) node.append(h("div", {class: "lf " + (d.status || "")}, foot));
+  return node;
+}
 function sysLine(...t) { return h("div", {class: "sys"}, h("span", {}, ...t)); }
 function eventNode(e, isLatestReply) {
   const d = e.data || {};
@@ -837,6 +882,7 @@ function eventNode(e, isLatestReply) {
     case "Renamed": return sysLine("renamed from " + (d.from || "?") + " to " + (d.to || "?"));
     case "Updated": return sysLine("updated from the phone, cutting off: " + (d.cut_off || []).join("; "));
     case "Page": return pageCard(d.page, d.title || d.name, "page · version " + d.version);
+    case "Live": return liveNode(d);
     case "PermissionResult": {
       if (d.kind === "question") return sysLine(d.status === "delivered"
         ? (d.decision === "answer" ? "✓ answered from phone: " + Object.values(d.answers || {}).join(" · ") : "skipped from phone")
@@ -1053,7 +1099,7 @@ async function renderDetail(name) {
       prevUserTs = e.ts;
     }
     const latest = lastStop && e.id === lastStop.id;
-    const n = cached("e" + e.id + (latest ? "L" : "") + (e.type === "Page" ? (!pages[e.data.page] ? "x" : pages[e.data.page].share ? "s" : "") : ""), () => eventNode(e, latest));
+    const n = cached("e" + e.id + (latest ? "L" : "") + (e.type === "Page" ? (!pages[e.data.page] ? "x" : pages[e.data.page].share ? "s" : "") : "") + (e.type === "Live" ? "r" + e.data.rev : ""), () => eventNode(e, latest));
     if (n) items.push([e.ts, n]);
   }
   const outgoing = d.prompts.filter(p => p.status !== "submitted" &&

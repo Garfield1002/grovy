@@ -1119,6 +1119,299 @@ class TestPromptQueue(StoreCase):
         self.assertEqual(self.store.cancel_prompt(p["id"])[0], 409)
 
 
+
+class TestLive(StoreCase):
+    """Widgets that scripts in a session show and update in place (`import grovy`, `grovy progress`, ...)."""
+
+    def lives(self, name="a"):
+        return [e for e in self.store.events.get(name, ()) if e["type"] == "Live"]
+
+    def test_update_in_place(self):
+        spec = {"type": "progress", "items": [{"label": "x", "value": 1, "max": 3}]}
+        code, r = self.store.live_update("a", "job", spec)
+        self.assertEqual((code, r["rev"]), (200, 1))
+        spec2 = {"type": "progress", "items": [{"label": "x", "value": 3, "max": 3}]}
+        code, r2 = self.store.live_update("a", "job", spec2, "done", "all good")
+        self.assertEqual((code, r2["id"], r2["rev"]), (200, r["id"], 2))
+        [e] = self.lives()
+        self.assertEqual((e["data"]["spec"], e["data"]["status"], e["data"]["message"]), (spec2, "done", "all good"))
+        self.assertEqual(self.store.live_update("a", "other", spec)[0], 200)
+        self.assertEqual(len(self.lives()), 2)
+        self.assertEqual(self.store.live_update("b", "job", spec)[1]["rev"], 1)   # keys are per session
+
+    def test_validation(self):
+        ok = {"type": "note", "text": "hi"}
+        self.assertEqual(self.store.live_update("zz", "k", ok)[0], 404)
+        for key in ("", "-x", "a b", "a/b", "k" * 65, None, 3):
+            self.assertEqual(self.store.live_update("a", key, ok)[0], 400, key)
+        for spec in (None, [], "x", {"text": "no type"}, {"type": 3}):
+            self.assertEqual(self.store.live_update("a", "k", spec)[0], 400, spec)
+        self.assertEqual(self.store.live_update("a", "k", ok, "exploded")[0], 400)
+        with mock.patch.object(grovyd, "LIVE_MAX", 100):
+            self.assertEqual(self.store.live_update("a", "k", {"type": "note", "text": "x" * 200})[0], 413)
+        self.assertEqual(self.lives(), [])
+
+    def test_new_cards_are_rate_limited_but_updates_are_not(self):
+        with mock.patch.object(grovyd, "LIVE_NEW_PER_MIN", 3):
+            for i in range(3):
+                self.assertEqual(self.store.live_update("a", f"k{i}", {"type": "note"})[0], 200)
+            self.assertEqual(self.store.live_update("a", "k3", {"type": "note"})[0], 429)
+            self.assertEqual(self.store.live_update("a", "k0", {"type": "note", "text": "again"})[0], 200)
+            self.assertEqual(self.store.live_update("b", "k3", {"type": "note"})[0], 200)     # per session
+        self.assertEqual(len(self.lives()), 3)
+
+    def test_persisted_once_with_last_state(self):
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="go"))
+        for v in range(5):    # running updates within LIVE_LOG_EVERY aren't each written
+            self.store.live_update("a", "job", {"type": "progress", "items": [{"label": "", "value": v}]})
+        with open(self.store.log_path) as f:
+            self.assertEqual(sum('"Live"' in l for l in f), 1)
+        self.store.flush_live()   # the reconcile loop's flush writes the latest state
+        s2 = grovyd.Store(self.dir, tmux_live=lambda: dict(self.live), paste=None)
+        [e] = [e for e in s2.events["a"] if e["type"] == "Live"]
+        self.assertEqual((e["data"]["rev"], e["data"]["spec"]["items"][0]["value"]), (5, 4))
+        self.store.live_update("a", "job", {"type": "note", "text": "end"}, "failed", "boom")   # final: written now
+        s3 = grovyd.Store(self.dir, tmux_live=lambda: dict(self.live), paste=None)
+        lives = [e for e in s3.events["a"] if e["type"] == "Live"]
+        self.assertEqual([(e["data"]["status"], e["data"]["rev"]) for e in lives], [("failed", 6)])
+        self.assertEqual([e["type"] for e in s3.events["a"]], ["UserPromptSubmit", "Live"])   # position kept
+        # history (Load earlier) shows each card once, in its last state
+        hist = [e for e in s3.history("a", before=10**9) if e["type"] == "Live"]
+        self.assertEqual([e["data"]["status"] for e in hist], ["failed"])
+        # and after a restart the same key still updates the same card
+        s3.reconcile()
+        self.assertEqual(s3.live_update("a", "job", {"type": "note"})[1]["id"], lives[0]["id"])
+
+    def test_card_scrolled_out_of_memory_comes_back_as_new(self):
+        _, r = self.store.live_update("a", "job", {"type": "note"})
+        with self.store.lock:
+            for _ in range(grovyd.HISTORY):
+                self.store._record("a", "Notification", {})
+        _, r2 = self.store.live_update("a", "job", {"type": "note", "text": "later"})
+        self.assertNotEqual(r2["id"], r["id"])
+        self.assertEqual(r2["rev"], 1)
+
+    def test_browser_refreshes_are_throttled_and_the_last_one_comes(self):
+        published = []
+        self.store.publish = lambda name=None: published.append(time.monotonic())
+        with mock.patch.object(grovyd, "LIVE_PUBLISH_EVERY", 0.2):
+            for v in range(20):
+                self.store.live_update("a", "job", {"type": "note", "text": str(v)})
+            self.assertEqual(len(published), 1)
+            time.sleep(0.35)
+        self.assertEqual(len(published), 2)   # the trailing refresh shows the last update
+
+    def test_follows_rename_and_goes_with_forget(self):
+        _, r = self.store.live_update("a", "job", {"type": "note"})
+        with self.store.lock:   # what rename does to the live index
+            self.store.sessions["c"] = self.store.sessions.pop("a")
+            self.store.events["c"] = self.store.events.pop("a")
+            self.store.live["c"] = self.store.live.pop("a")
+        self.assertEqual(self.store.live_update("c", "job", {"type": "note"})[1]["id"], r["id"])
+
+
+class TestLiveClient(unittest.TestCase):
+    """The library scripts use. It must never fail or block the script, and its last state must arrive."""
+
+    def setUp(self):
+        self.sent = []
+        self.fail = None
+        def fake(msg, timeout=2.0, wait_reply=True):
+            if self.fail:
+                raise self.fail
+            self.sent.append(msg)
+            return {"ok": {}}
+        self.patches = [mock.patch.object(grovy, "sock_request", fake),
+                        mock.patch.dict(os.environ, {"GROVY_SESSION": "a"}),
+                        mock.patch.object(grovy, "LIVE_EVERY", 0.1),
+                        mock.patch.dict(grovy._live, {"off_until": 0.0, "open": {}, "crash": None, "warned": set()})]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+
+    def last(self, key=None):
+        return [m for m in self.sent if key is None or m["key"] == key][-1]
+
+    def test_does_nothing_outside_grovy(self):
+        with mock.patch.dict(os.environ, {"GROVY_SESSION": "", "CCS_SESSION": ""}):
+            self.assertEqual(list(grovy.track(range(3), "t")), [0, 1, 2])
+            grovy.note("x")
+            p = grovy.progress("t", 3)
+            p.set(2)
+            p.done()
+            print("x", file=grovy.log("l"))
+        self.assertEqual(self.sent, [])
+
+    def test_track(self):
+        self.assertEqual(list(grovy.track(["a", "b", "c"], "Converting")), ["a", "b", "c"])
+        m = self.last()
+        self.assertEqual((m["type"], m["session"], m["status"]), ("live", "a", "done"))
+        self.assertEqual(m["spec"]["items"], [{"label": "", "value": 3, "max": 3}])
+        self.assertEqual(m["spec"]["title"], "Converting")
+        self.assertEqual(self.sent[0]["spec"]["items"][0]["value"], 0)   # shown at once
+        self.assertEqual(len({m["key"] for m in self.sent}), 1)
+
+    def test_unknown_total_and_early_exit(self):
+        for x in grovy.track(iter(range(10)), "gen"):
+            if x == 4:
+                break
+        import gc
+        gc.collect()
+        m = self.last()
+        self.assertEqual((m["status"], m["spec"]["items"][0]["value"]), ("stopped", 4))
+        self.assertTrue(m["spec"]["items"][0]["indeterminate"])
+
+    def test_updates_are_throttled_but_the_last_one_arrives(self):
+        p = grovy.progress("t", total=1000)
+        for i in range(1000):
+            p.set(i + 1, note=f"item {i}")
+        self.assertLess(len(self.sent), 10)
+        time.sleep(0.4)   # no more calls: the background thread sends the last state
+        m = self.last()
+        self.assertEqual((m["status"], m["spec"]["items"][0]["value"], m["spec"]["items"][0]["note"]),
+                         ("running", 1000, "item 999"))
+        p.done()
+        self.assertEqual(self.last()["status"], "done")
+        n = len(self.sent)
+        p.set(5)   # after done: ignored
+        time.sleep(0.3)
+        self.assertEqual(len(self.sent), n)
+
+    def test_exception_marks_failed(self):
+        with self.assertRaises(ZeroDivisionError):
+            with grovy.progress("t", 3) as p:
+                p.advance()
+                1 / 0
+        m = self.last()
+        self.assertEqual(m["status"], "failed")
+        self.assertIn("ZeroDivisionError", m["message"])
+
+    def test_left_open_at_exit(self):
+        p = grovy.progress("t", 3)
+        q = grovy.progress("u", 2)
+        q.set(2)
+        grovy._live_exit()
+        self.assertEqual(self.last(p.key)["status"], "stopped")
+        self.assertEqual(self.last(q.key)["status"], "done")   # complete: just never closed
+        r = grovy.show({"type": "stats", "items": []})
+        grovy._live["crash"] = "KeyError: 'x'"
+        grovy._live_exit()
+        self.assertEqual((self.last(r.key)["status"], self.last(r.key)["message"]),
+                         ("failed", "the script crashed: KeyError: 'x'"))
+
+    def test_log_lines(self):
+        lg = grovy.log("build", lines=3)
+        lg.write("one\ntw")
+        lg.write("o\r\n\x1b[31mred\x1b[0m\nprogress 10%\rprogress 90%\npart")
+        print("x", "y", file=lg)
+        lg.done()
+        self.assertEqual(self.last()["spec"], {"type": "log", "title": "build", "lines": ["red", "progress 90%", "partx y"]})
+
+    def test_note_and_show(self):
+        grovy.note("**hi**", tone="ok")
+        self.assertEqual((self.last()["spec"]["text"], self.last()["status"]), ("**hi**", "done"))
+        w = grovy.show({"type": "stats", "items": [{"label": "a", "value": 1}]}, key="mystats")
+        w.update({"type": "stats", "items": [{"label": "a", "value": 2}]})
+        w.done()
+        self.assertEqual((self.last()["key"], self.last()["spec"]["items"][0]["value"]), ("mystats", 2))
+
+    def test_daemon_down_costs_one_try(self):
+        self.fail = OSError("down")
+        calls = []
+        orig = grovy.sock_request
+        def counting(*a, **k):
+            calls.append(1)
+            return orig(*a, **k)
+        with mock.patch.object(grovy, "sock_request", counting):
+            p = grovy.progress("t", 100)
+            for i in range(100):
+                p.set(i)
+                time.sleep(0.002)
+            p.done()
+            grovy.note("x")
+        self.assertEqual(len(calls), 1)
+
+    def test_errors_are_reported_once(self):
+        with mock.patch.object(grovy, "sock_request", lambda *a, **k: {"error": "too many"}), \
+                mock.patch("sys.stderr", io.StringIO()) as err:
+            grovy.note("a")
+            grovy.note("b")
+        self.assertEqual(err.getvalue().count("too many"), 1)
+
+    def test_guide_spells_out_the_path_for_old_sessions(self):
+        with mock.patch.dict(os.environ, {"PYTHONPATH": grovy.session_pythonpath()}):
+            self.assertIn("(on PYTHONPATH;", grovy.widget_guide())
+        with mock.patch.dict(os.environ, {"PYTHONPATH": "/elsewhere"}):
+            self.assertIn(f"sys.path.insert(0, {grovy.HERE!r})", grovy.widget_guide())
+            self.assertEqual(grovy.session_pythonpath(), "/elsewhere" + os.pathsep + grovy.HERE)
+
+
+class TestLiveEndToEnd(unittest.TestCase):
+    """The real socket path: the CLI in a subprocess talking to a real SockServer."""
+
+    def setUp(self):
+        self.sdir = tempfile.mkdtemp(dir=TMP)
+        self.reg = mock.patch.object(grovy, "registry", lambda: {"a": {"cwd": "/a"}})
+        self.reg.start()
+        self.store = grovyd.Store(self.sdir, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
+        self.store.reconcile()
+        self.env = dict(os.environ, GROVY_STATE_DIR=self.sdir, GROVY_SESSION="a")
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": self.sdir}):
+            self.sock = grovyd.SockServer(grovy.sock_path(), grovyd.SockHandler)
+        self.sock.store = self.store
+        threading.Thread(target=self.sock.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.sock.shutdown()
+        self.sock.server_close()
+        self.reg.stop()
+
+    def run_cli(self, *args, stdin=""):
+        return subprocess.run([sys.executable, os.path.join(ROOT, "grovy.py"), *args], input=stdin, env=self.env,
+                              capture_output=True, text=True, timeout=20)
+
+    def lives(self):
+        return [e["data"] for e in self.store.events.get("a", ()) if e["type"] == "Live"]
+
+    def test_tail_passes_output_through(self):
+        text = "".join(f"line {i}\n" for i in range(100))
+        r = self.run_cli("tail", "--title", "make", "--lines", "5", stdin=text)
+        self.assertEqual((r.returncode, r.stdout), (0, text))
+        [d] = self.lives()
+        self.assertEqual((d["status"], d["spec"]["title"], d["spec"]["lines"]),
+                         ("done", "make", [f"line {i}" for i in range(95, 100)]))
+
+    def test_progress_note_show(self):
+        self.assertEqual(self.run_cli("progress", "job", "3", "--max", "10", "--title", "T").returncode, 0)
+        self.assertEqual(self.run_cli("progress", "job", "10", "--max", "10", "--done").returncode, 0)
+        self.assertEqual(self.run_cli("note", "hello", "world", "--tone", "ok").returncode, 0)
+        self.assertEqual(self.run_cli("show", "-", stdin='{"type":"stats","items":[]}').returncode, 0)
+        r = self.run_cli("show", "{nope")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not valid JSON", r.stderr)
+        job, note, stats = self.lives()
+        self.assertEqual((job["status"], job["rev"], job["spec"]["items"][0]["value"]), ("done", 2, 10))
+        self.assertEqual((note["spec"]["text"], note["status"]), ("hello world", "done"))
+        self.assertEqual(stats["status"], "done")
+        r2 = subprocess.run([sys.executable, os.path.join(ROOT, "grovy.py"), "progress", "j", "1"],
+                            env=dict(self.env, GROVY_SESSION="zz"), capture_output=True, text=True, timeout=20)
+        self.assertEqual(r2.returncode, 0)   # a widget problem never fails the caller
+        self.assertIn("unknown session", r2.stderr)
+
+    def test_library_in_a_script(self):
+        script = ("import grovy\nfor i in grovy.track(range(50), 'Steps'):\n    pass\n"
+                  "p = grovy.progress('Left open', total=5)\np.set(2)\n")
+        r = subprocess.run([sys.executable, "-c", script], env=dict(self.env, PYTHONPATH=ROOT),
+                           capture_output=True, text=True, timeout=20)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        steps, left = self.lives()
+        self.assertEqual((steps["status"], steps["spec"]["items"][0]["value"]), ("done", 50))
+        self.assertEqual((left["status"], left["spec"]["items"][0]["value"]), ("stopped", 2))
+
+
 class TestHttp(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1430,6 +1723,12 @@ class TestTmuxIntegration(unittest.TestCase):
         self.assertNotIn("GOT[", grovy.capture("ab1"))   # Enter never pressed
         self.assertEqual(len(calls), 2)                    # stopped right after the chunk where it changed
         grovy.kill_session("ab1")
+
+    def test_session_can_import_grovy(self):
+        grovy.start_session("py1", self.proj)
+        out = grovy.tmux("show-environment", "-t", "=grovy-py1", "PYTHONPATH", check=False).stdout
+        self.assertIn(grovy.HERE, out.strip().split("=", 1)[1].split(os.pathsep))
+        grovy.kill_session("py1")
 
     def test_widgets_opt_out_reaches_the_session(self):
         with mock.patch.dict(os.environ, {"GROVY_WIDGETS": "0"}):

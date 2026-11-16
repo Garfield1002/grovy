@@ -46,6 +46,12 @@ INPUT_STATES = ("idle", "error")  # states in which we will type into the sessio
 DUP_WINDOW = 1.0  # seconds
 FORCE_STALE = 60  # a "working" session silent this long may be force-typed into, if the user confirms
 PERM_TIMEOUT = grovy.PERMISSION_TIMEOUT
+LIVE_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
+LIVE_MAX = 64 * 1024        # bytes of JSON in one live widget
+LIVE_NEW_PER_MIN = 30       # new live cards per session per minute: a runaway loop must not flush the chat history
+LIVE_STATUS = ("running", "done", "failed", "stopped")
+LIVE_PUBLISH_EVERY = 0.5    # seconds between browser refreshes caused by live updates (per session)
+LIVE_LOG_EVERY = 2.0        # seconds between event-log writes of one running widget (the reconcile loop flushes)
 
 LABELS = {"working": "working", "needs_input": "waiting on a terminal dialog", "starting": "starting",
           "unknown": "in an unknown state"}
@@ -115,6 +121,9 @@ class Store:
         self.pages_dir = os.path.join(sdir, "pages")
         self.pages_path = os.path.join(sdir, "pages.json")
         self.pages = {}         # id -> {id, session, name, title, version, updated, size}
+        self.live = {}          # name -> {key -> {"rec": event record, "logged": time, "dirty": bool}}
+        self.live_new = {}      # name -> deque of creation times (rate limit)
+        self._pub_at, self._pub_timer = {}, {}
         self._load()
 
     # ------------------------------------------------------------ persistence
@@ -147,8 +156,18 @@ class Store:
                         if "session" not in rec and "ccs" in rec:  # pre-rename record
                             rec["session"] = rec.pop("ccs")
                         rec["session"] = self._canon(rec["session"])  # recorded under a name since renamed
-                        self.events.setdefault(rec["session"], deque(maxlen=HISTORY)).append(rec)
                         self.seq = max(self.seq, int(rec["id"]))
+                        q = self.events.setdefault(rec["session"], deque(maxlen=HISTORY))
+                        if rec.get("type") == "Live":   # a live widget is re-logged under its id on each update
+                            key = (rec.get("data") or {}).get("key")
+                            old = self.live.get(rec["session"], {}).get(key)
+                            if old and old["rec"]["id"] == rec["id"]:
+                                at = next((i for i, r in enumerate(q) if r is old["rec"]), None)
+                                if at is not None:
+                                    q[at] = old["rec"] = rec
+                                continue   # (an update of a card that has scrolled out of memory is dropped)
+                            self.live.setdefault(rec["session"], {})[key] = {"rec": rec, "logged": 0, "dirty": False}
+                        q.append(rec)
                     except (ValueError, KeyError, TypeError):
                         continue  # truncated / corrupt record: skip it
             with open(self.log_path, "rb+") as f:  # make sure a torn last line can't swallow the next record
@@ -547,6 +566,8 @@ class Store:
                     for r in q:
                         r["session"] = new
                     self.events[new] = q
+                if old in self.live:
+                    self.live[new] = self.live.pop(old)
                 for p in self.prompts + list(self.perms.values()) + list(self.pages.values()):
                     if p["session"] == old:
                         p["session"] = new
@@ -625,6 +646,7 @@ class Store:
                 return 404, "unknown session"
         with self.lock:
             self.sessions.pop(name, None)
+            self.live.pop(name, None)
             self._save_state()
             for pid in [k for k, p in self.pages.items() if p["session"] == name]:
                 self._drop_page(pid)
@@ -670,6 +692,81 @@ class Store:
             out = dict(p)
         self.publish(session)
         return 200, out
+
+    # ------------------------------------------------------------ live widgets (from scripts: `import grovy`)
+    def live_update(self, session, key, spec, status="running", message=None):
+        """Create or update, in place, a widget card a script running in the session shows on the phone.
+        The page renders and validates the widget; here we only bound it."""
+        if not isinstance(key, str) or not LIVE_KEY_RE.fullmatch(key):
+            return 400, "key: letters, digits, '.', ':', '-', '_' (max 64)"
+        if not isinstance(spec, dict) or not isinstance(spec.get("type"), str):
+            return 400, "a widget is a JSON object with a \"type\""
+        if status not in LIVE_STATUS:
+            return 400, "status: " + ", ".join(LIVE_STATUS)
+        if len(json.dumps(spec, ensure_ascii=False).encode()) > LIVE_MAX:
+            return 413, f"widget too large (max {LIVE_MAX // 1024} KB of JSON)"
+        message = message[:500] if isinstance(message, str) and message.strip() else None
+        t = now()
+        with self.lock:
+            session = self._canon(session)
+            if session not in self.sessions:
+                return 404, f"unknown session {session!r}"
+            cards = self.live.setdefault(session, {})
+            meta = cards.get(key)
+            if meta and not any(r is meta["rec"] for r in self.events.get(session, ())):
+                meta = None   # scrolled out of the history kept in memory: show it again as a new card
+            if meta is None:
+                recent = self.live_new.setdefault(session, deque())
+                while recent and t - recent[0] > 60:
+                    recent.popleft()
+                if len(recent) >= LIVE_NEW_PER_MIN:
+                    return 429, (f"too many new widgets (max {LIVE_NEW_PER_MIN} a minute per session); "
+                                 "update an existing one by key instead")
+                recent.append(t)
+                rec = self._record(session, "Live", {"key": key, "spec": spec, "status": status, "message": message,
+                                                     "rev": 1, "created": t, "updated": t})
+                cards[key] = {"rec": rec, "logged": t, "dirty": False}
+            else:
+                rec, d = meta["rec"], meta["rec"]["data"]
+                # a new dict, not d.update(): the HTTP thread may be serializing the old one outside the lock
+                rec["data"] = {**d, "spec": spec, "status": status, "message": message, "rev": d["rev"] + 1, "updated": t}
+                meta["dirty"] = True
+                if status != "running" or t - meta["logged"] >= LIVE_LOG_EVERY:
+                    self._log_live(meta)
+            out = {"key": key, "id": rec["id"], "rev": rec["data"]["rev"]}
+        self._publish_soon(session)
+        return 200, out
+
+    def _log_live(self, meta):
+        self._log.write(json.dumps(meta["rec"], ensure_ascii=False) + "\n")   # same id: the last line wins on load
+        meta["logged"], meta["dirty"] = now(), False
+
+    def flush_live(self):
+        with self.lock:
+            for cards in self.live.values():
+                for meta in cards.values():
+                    if meta["dirty"]:
+                        self._log_live(meta)
+
+    def _publish_soon(self, name):
+        """Live updates can come many times a second: refresh browsers at most every LIVE_PUBLISH_EVERY,
+        always including the last update."""
+        with self.lock:
+            wait = self._pub_at.get(name, 0) + LIVE_PUBLISH_EVERY - now()
+            if wait > 0:
+                if name not in self._pub_timer:
+                    tm = self._pub_timer[name] = threading.Timer(wait, self._publish_due, (name,))
+                    tm.daemon = True
+                    tm.start()
+                return
+            self._pub_at[name] = now()
+        self.publish(name)
+
+    def _publish_due(self, name):
+        with self.lock:
+            self._pub_timer.pop(name, None)
+            self._pub_at[name] = now()
+        self.publish(name)
 
     def share_page(self, pid, shared):
         """A shared page gets an unguessable link (/s/<token>) that works without the grovy token. Unsharing
@@ -749,6 +846,8 @@ class Store:
                         out.append(r)
         except OSError:
             return []
+        latest = {r.get("id"): r for r in out}   # a live widget appears once per logged update: keep the last
+        out = [r for r in out if latest.get(r.get("id")) is r]
         return out[::-1][:limit] if q else out[-limit:]
 
     def interrupt(self, name):
@@ -1153,6 +1252,13 @@ class SockHandler(socketserver.StreamRequestHandler):
         elif t == "rename":
             code, res = store.rename(str(msg.get("old", "")), msg.get("new"))
             self._reply({"ok": res} if code == 200 else {"error": res})
+        elif t == "live":
+            code, res = store.live_update(str(msg.get("session") or ""), msg.get("key"), msg.get("spec"),
+                                          msg.get("status", "running"), msg.get("message"))
+            try:   # the client may not wait for the answer
+                self._reply({"ok": res} if code == 200 else {"error": res})
+            except OSError:
+                pass
         elif t == "page":
             op, session = msg.get("op"), str(msg.get("session") or "")
             if op == "publish":
@@ -1711,6 +1817,7 @@ def serve(bind, port):
             time.sleep(RECONCILE_EVERY)
             try:
                 store.reconcile()
+                store.flush_live()
             except Exception as e:  # keep the daemon alive; surface the problem
                 print(f"grovyd: reconcile error: {e}", file=sys.stderr)
 

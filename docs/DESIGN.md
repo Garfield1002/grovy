@@ -216,6 +216,34 @@ you send it like any message. Claude learns the format from grovy's `SessionStar
 so a changed guide applies without a restart. `GROVY_WIDGETS=0` turns the guide off. The terminal shows the raw JSON,
 so Claude is told to keep the key facts in plain text too.
 
+**Live widgets (from scripts).** A long command Claude runs (training, a build, a batch job) can show cards in the
+chat *while it runs*, between your message and Claude's reply, and update them in place. Sessions get grovy's folder
+appended to `PYTHONPATH` (after any entries of your own), so a script can `import grovy`:
+`grovy.track(iterable, title)` (a progress bar, like tqdm), `grovy.progress(title, total)` with `.set(n, note=)` /
+`.advance()`, `grovy.note(markdown)`, `grovy.log(title)` (a file-like object showing the last lines written, ANSI
+colours stripped) and `grovy.show(widget)` → `.update(widget)` for any widget type. Shell equivalents:
+`cmd | grovy tail --title T` (copies stdin to stdout unchanged), `grovy progress KEY N --max M [--done|--failed MSG]`,
+`grovy note TEXT`, `grovy show JSON --key K`. The guide tells Claude about them, for scripts it writes to run, not
+for your code. Sessions started earlier get the path spelled out in the guide until their next start.
+* **Never hurts the script.** Outside a grovy session every call does nothing. If the daemon can't be reached the
+  library goes quiet for 30s instead of waiting on each call (1s timeout). The CLI reports problems on stderr and
+  exits 0 (except for invalid JSON), so a `set -e` pipeline doesn't die because of the phone.
+* **Throttled, last state guaranteed.** The library sends at most one update per widget every 0.5s; a background
+  thread sends the latest state if no later call comes. Each update waits for the daemon's ack, so updates arrive in
+  order. The daemon refreshes browsers at most every 0.5s per session (always including the last update).
+* **Lifecycle.** A card is `running`, `done`, `failed` (with a message) or `stopped`. Used as a context manager, an
+  exception marks it failed; widgets still open when the script exits are closed then: `done` for a complete bar,
+  `failed` after an uncaught exception, otherwise `stopped`. A `kill -9`ed script leaves its card `running`, with the
+  time of its last update shown.
+* **Storage.** One `Live` event per card (socket message `live`: session, key, spec, status, message). Updates
+  replace the event's data and bump `rev`. The event log gets the record again under the same id at most every 2s
+  while running (the reconcile loop writes the latest), and at once on a final status. Loading keeps the last line
+  per id, so history and restarts show each card once, in place. A key whose card has left the in-memory history
+  starts a new card.
+* **Limits.** 64 KB of JSON per widget, at most 30 new cards per session per minute (updates are unlimited), so a
+  runaway loop can't push the conversation out of the history. The page validates and renders the widget, as for
+  ` ```widget ` blocks; an invalid one shows "Widget not shown".
+
 **Pages.** For anything bigger than a widget (a report, a dashboard, an interactive explorer), Claude writes an HTML
 file and runs `grovy page publish FILE --title "..."` (`grovy page ls`, `grovy page rm NAME`). The session comes from
 `$GROVY_SESSION`; pass `--session` elsewhere. grovy stores a **copy** (`$STATE/pages/<id>.html`, max 5 MB) and never
@@ -282,6 +310,8 @@ session can publish pages but can't make one public.
 * **A page can still navigate its own frame** (e.g. `location = "https://…?data"`): browsers offer no way to block
   that, so a page that wants to could carry what it shows to another site. Pages are made by your own Claude
   sessions, but a session that read hostile content could be steered into it. The viewer's title bar stays grovy's.
+* Live widgets come from any process that can reach the daemon's socket (any process of yours, as with pages). A
+  card shows the key and content it's given; nothing in it is run or sent to Claude.
 * Pages are snapshots: they can't load data at view time, so Claude embeds the data and republishes to update.
 * The CDN allowlist limits where code comes from, not what it does: jsDelivr and unpkg serve any npm package or
   GitHub file. What keeps a page's data in is `connect-src`/`img-src` plus the sandbox, and self-navigation
@@ -298,7 +328,8 @@ python3 -m unittest discover -s tests -v
 These cover name validation, hook-adapter output (malformed input, daemon down, decisions), state
 transitions, duplicate events, event-log recovery, restart recovery, permission
 decide/duplicate/concurrent/timeout/hook-gone/session-exit, the prompt queue (busy, permission
-pending, one in flight, no retry, concurrency, isolation, failure, force), and HTTP
+pending, one in flight, no retry, concurrency, isolation, failure, force), live widgets (in-place updates,
+persistence, throttling, the client library's no-op/failure/exit behaviour, and the CLI over a real socket), and HTTP
 validation/CSRF/token/SSE. The integration tests run a fake `claude` in **real tmux** on a private
 server (`tmux -L`) to check lifecycle, literal delivery of quotes, `$()`, backticks, unicode and multiline text,
 isolation between sessions, and that an unrelated look-alike session is never touched.

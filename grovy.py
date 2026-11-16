@@ -10,6 +10,7 @@ Hooks are injected per managed session with `claude --settings FILE`, whose comm
 `grovy hook NAME`. The session identity therefore comes from argv, never from cwd.
 """
 import argparse
+import atexit
 import fcntl
 import ipaddress
 import json
@@ -20,7 +21,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -294,6 +297,13 @@ def _shquote(s):
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
 
+def session_pythonpath():
+    """So that `import grovy` works in scripts Claude runs (live widgets). Appended, so a project's own
+    PYTHONPATH entries win."""
+    have = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
+    return os.pathsep.join(have + ([HERE] if HERE not in have else []))
+
+
 def start_session(name, cwd, extra_args=()):
     """Create the tmux session running claude. Returns pane id. Never touches other sessions."""
     if not valid_name(name):
@@ -313,7 +323,7 @@ def start_session(name, cwd, extra_args=()):
     # Multiple trailing args => tmux execs them directly, no shell, so paths/names are never interpolated.
     r = tmux("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", tmux_name(name), "-c", cwd,
              "-x", "200", "-y", "50", "-e", f"GROVY_SESSION={name}", "-e", f"GROVY_STATE_DIR={state_dir()}",
-             "-e", f"GROVY_PERMISSION_TIMEOUT={PERMISSION_TIMEOUT}",
+             "-e", f"GROVY_PERMISSION_TIMEOUT={PERMISSION_TIMEOUT}", "-e", f"PYTHONPATH={session_pythonpath()}",
              *(["-e", f"GROVY_WIDGETS={env('WIDGETS')}"] if env("WIDGETS") is not None else []), "--", *argv)
     pane = r.stdout.strip()
     tmux("set-option", "-t", "=" + tmux_name(name) + ":", "@grovy_state", state_dir())
@@ -715,11 +725,24 @@ choices/form only prefill the user's message box; they review and send it. Limit
 Only when the user asks for a page, or the result is too big for widgets, make one: a self-contained HTML file \
 (phone-first, light/dark; inline JS/CSS, pinned libraries from cdnjs/jsdelivr/unpkg, Google Fonts, data: images; \
 no fetch, storage or cookies, so embed the data; `grovy.send(text)` prefills the message box), then run \
-`GROVY page publish FILE --title T` (same file name updates it; `page ls`, `page rm NAME`). Mention it in your reply."""
+`GROVY page publish FILE --title T` (same file name updates it; `page ls`, `page rm NAME`). Mention it in your reply.
+Commands you run that take more than ~30s (training, builds, long test runs, batch jobs) can show live cards on the \
+phone as they go. Python: `import grovy` (on PYTHONPATH; does nothing outside grovy): `for x in grovy.track(xs, "T")`; \
+`p = grovy.progress("T", total=N)` then `p.set(n, note="..")` or `p.advance()`; `grovy.note("markdown")`; \
+`lg = grovy.log("T")` then `print(.., file=lg)`; `w = grovy.show(widget_dict)` then `w.update(d)`, `w.done()`. \
+Shell: `cmd | GROVY tail --title T`, `GROVY progress KEY N --max M [--done]`, `GROVY note TEXT`. Use these in \
+scripts you write to run, not in the user's code unless asked."""
 
 
 GROVY_BIN = os.path.join(os.path.dirname(os.path.realpath(__file__)), "grovy")
-WIDGET_GUIDE = WIDGET_GUIDE.replace("GROVY page", shlex.quote(GROVY_BIN) + " page")
+WIDGET_GUIDE = WIDGET_GUIDE.replace("GROVY ", shlex.quote(GROVY_BIN) + " ")
+
+
+def widget_guide():
+    """Hooks inherit Claude's environment: a session started before PYTHONPATH was set needs the path spelled out."""
+    if HERE in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        return WIDGET_GUIDE
+    return WIDGET_GUIDE.replace("(on PYTHONPATH; ", f"(first `sys.path.insert(0, {HERE!r})`; ")
 
 
 def cmd_hook(name):
@@ -759,7 +782,7 @@ def cmd_hook(name):
             print(f"grovy hook: daemon unreachable ({e}); event not recorded", file=sys.stderr)
         if event == "SessionStart" and env("WIDGETS", "1") != "0":   # also after /clear and /compact
             sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
-                                                                "additionalContext": WIDGET_GUIDE}}))
+                                                                "additionalContext": widget_guide()}}))
             sys.stdout.flush()
         return 0
     try:
@@ -772,6 +795,259 @@ def cmd_hook(name):
         sys.stdout.write(json.dumps(permission_output(behavior, reply.get("message"), reply.get("updated_input"))))
         sys.stdout.flush()
     return 0
+
+
+# ---------------------------------------------------------------- live widgets: a library for scripts
+# Scripts Claude runs inside a grovy session can `import grovy` (the session's PYTHONPATH includes this folder)
+# and show cards in the phone chat that update in place while they run:
+#
+#     for x in grovy.track(items, "Converting"): ...       # a progress bar with an ETA
+#     p = grovy.progress("Training", total=50); p.set(7)   # or p.advance()
+#     grovy.note("**Epoch 3**: loss 0.41")                  # a markdown note
+#     lg = grovy.log("pytest"); lg.write(text)             # the last lines of some output
+#     w = grovy.show({"type": "chart", ...}); w.update({...})   # any widget, updated by replacing it
+#
+# Outside a grovy session, or when the daemon can't be reached, every call does nothing, quickly. A script must never
+# fail or slow down because of the phone.
+
+LIVE_EVERY = 0.5          # seconds between updates of one widget sent to the daemon (the last one always goes)
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]")
+_live = {"off_until": 0.0, "open": {}, "crash": None, "thread": None, "warned": set()}
+_live_lock = threading.RLock()
+
+
+def active():
+    """True inside a grovy session (whether or not the daemon is up)."""
+    return bool(env("SESSION"))
+
+
+def _live_send(key, spec, status="running", message=None):
+    """One update to the daemon, acknowledged (so one widget's updates arrive in order). Never raises."""
+    session = env("SESSION")
+    if not session or time.monotonic() < _live["off_until"]:
+        return None
+    msg = {"type": "live", "session": session, "key": key, "spec": spec, "status": status, "message": message}
+    try:
+        r = sock_request(msg, timeout=1.0)
+    except (OSError, ValueError, TypeError):
+        _live["off_until"] = time.monotonic() + 30   # daemon down or stuck: don't make every call wait
+        return None
+    if isinstance(r, dict) and "error" in r and r["error"] not in _live["warned"]:
+        _live["warned"].add(r["error"])
+        print(f"grovy: widget not shown: {r['error']}", file=sys.stderr)
+    return r
+
+
+def _live_key():
+    return "w" + os.urandom(6).hex()
+
+
+class Live:
+    """A widget card in the phone chat, updated in place. Use it as a context manager to mark it failed on an
+    exception. Widgets left open when the script exits are closed then ("stopped", or "failed" after a crash)."""
+
+    def __init__(self, spec=None, key=None):
+        self.key = key or _live_key()
+        self.status, self.message = "running", None
+        self._spec, self._sent, self._pending = spec, 0.0, False
+        self._lock = threading.Lock()   # the background thread flushes too
+        if not active():
+            return
+        _live_start()
+        with _live_lock:
+            _live["open"][self.key] = self
+        self._flush()
+
+    def render(self):
+        return self._spec
+
+    def update(self, spec):
+        """Replace the widget (any type grovy draws: chart, stats, checklist, ...)."""
+        self._spec = spec
+        self._changed()
+        return self
+
+    def done(self, message=None):
+        self._close("done", message)
+
+    def fail(self, message=None):
+        self._close("failed", message)
+
+    def _changed(self):
+        if not active() or self.status != "running":
+            return
+        if time.monotonic() - self._sent >= LIVE_EVERY:
+            self._flush()
+        else:
+            self._pending = True   # the background thread sends it, so the last state is never lost
+
+    def _flush(self):
+        with self._lock:
+            self._sent, self._pending = time.monotonic(), False
+            _live_send(self.key, self.render(), self.status, self.message)
+
+    def _close(self, status, message=None):
+        if self.status != "running":
+            return
+        self.status, self.message = status, message
+        with _live_lock:
+            _live["open"].pop(self.key, None)
+        if active():
+            self._flush()
+
+    def _at_exit(self):
+        if _live["crash"]:
+            self.fail("the script crashed: " + _live["crash"])
+        else:
+            self._close("stopped", "the script ended without finishing it")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, et, ev, tb):
+        if et is None:
+            self.done()
+        elif issubclass(et, GeneratorExit):   # the loop over track() was left early
+            self._close("stopped", "stopped early")
+        elif issubclass(et, KeyboardInterrupt):
+            self._close("stopped", "interrupted")
+        else:
+            self.fail(f"{et.__name__}: {ev}"[:300])
+        return False
+
+
+class Progress(Live):
+    """A progress bar. With total=None it shows a count and a moving bar. The phone adds the elapsed time and,
+    with a total, an estimate of the time left."""
+
+    def __init__(self, title=None, total=None, label=None, key=None):
+        self.title, self.total, self.label, self.n, self.note = title, total, label, 0, None
+        super().__init__(None, key)
+
+    def render(self):
+        item = {"label": str(self.label or ""), "value": self.n}
+        if self.total is None:
+            item["indeterminate"] = True
+        else:
+            item["max"] = self.total
+        if self.note:
+            item["note"] = str(self.note)
+        return {"type": "progress", "title": self.title, "items": [item], "eta": True}
+
+    def set(self, n, note=None, total=None, label=None):
+        self.n = n
+        if note is not None:
+            self.note = note
+        if total is not None:
+            self.total = total
+        if label is not None:
+            self.label = label
+        self._changed()
+        return self
+
+    def advance(self, k=1, note=None):
+        return self.set(self.n + k, note)
+
+    def _at_exit(self):
+        if not _live["crash"] and self.total is not None and self.n >= self.total:
+            self.done()
+        else:
+            super()._at_exit()
+
+
+class Log(Live):
+    """The last `lines` lines of some output (ANSI colours stripped). Works as a file: print(..., file=lg)."""
+
+    def __init__(self, title=None, lines=40, key=None):
+        self.title, self.lines, self.partial = title, deque(maxlen=max(1, min(int(lines), 200))), ""
+        super().__init__(None, key)
+
+    def render(self):
+        lines = list(self.lines) + ([self.partial] if self.partial else [])
+        return {"type": "log", "title": self.title, "lines": [l[:500] for l in lines[-self.lines.maxlen:]]}
+
+    def write(self, text):
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", "replace")
+        parts = (self.partial + _ANSI.sub("", str(text))).replace("\r\n", "\n").split("\n")
+        self.partial = parts.pop()
+        self.lines.extend(p.rsplit("\r", 1)[-1] for p in parts)   # \r: a redrawn line, keep what's left
+        self.partial = self.partial.rsplit("\r", 1)[-1]
+        self._changed()
+        return len(text)
+
+    def print(self, *args, sep=" "):
+        self.write(sep.join(map(str, args)) + "\n")
+
+    def flush(self):
+        pass
+
+
+def show(spec, key=None, done=False):
+    """Show any widget (a dict like the ```widget blocks). Returns a Live: .update(new_spec), .done(), .fail()."""
+    w = Live(spec, key)
+    if done:
+        w.done()
+    return w
+
+
+def progress(title=None, total=None, label=None, key=None):
+    return Progress(title, total, label, key)
+
+
+def track(iterable, title=None, total=None, label=None):
+    """Like tqdm: `for x in grovy.track(xs, "Title")` shows a live progress bar."""
+    if total is None:
+        try:
+            total = len(iterable)
+        except TypeError:
+            pass
+    with Progress(title, total, label) as p:
+        for x in iterable:
+            yield x
+            p.advance()
+
+
+def log(title=None, lines=40, key=None):
+    return Log(title, lines, key)
+
+
+def note(text, tone=None, title=None):
+    """A markdown note in the chat, now (no need to wait for Claude's reply)."""
+    if active():
+        _live_send(_live_key(), {"type": "note", "text": str(text), "tone": tone, "title": title}, "done")
+
+
+def _live_start():
+    """Once per process: a thread that sends throttled last updates, and exit/crash handlers."""
+    with _live_lock:
+        if _live["thread"]:
+            return
+        _live["thread"] = t = threading.Thread(target=_live_loop, name="grovy-live", daemon=True)
+        t.start()
+    prev = sys.excepthook
+
+    def hook(et, ev, tb):
+        _live["crash"] = f"{et.__name__}: {ev}"[:300]
+        prev(et, ev, tb)
+    sys.excepthook = hook
+    atexit.register(_live_exit)
+
+
+def _live_loop():
+    while True:
+        time.sleep(LIVE_EVERY / 2)
+        with _live_lock:
+            due = [w for w in _live["open"].values() if w._pending and time.monotonic() - w._sent >= LIVE_EVERY]
+        for w in due:
+            w._flush()
+
+
+def _live_exit():
+    with _live_lock:
+        left = list(_live["open"].values())
+    for w in left:
+        w._at_exit()
 
 
 # ---------------------------------------------------------------- CLI
@@ -1154,6 +1430,67 @@ def cmd_page(a):
     return 0
 
 
+def _live_cli(key, spec, status="running", message=None):
+    """Live widget from the command line: report problems on stderr, but never fail the caller's pipeline."""
+    if not active():
+        print("grovy: not in a grovy session; nothing shown", file=sys.stderr)
+        return 0
+    r = _live_send(key, spec, status, message)
+    if r is None:
+        print("grovy: the grovy daemon is unreachable; nothing shown", file=sys.stderr)
+    return 0
+
+
+def _status(a):
+    return ("failed", a.failed) if a.failed is not None else ("done", None) if a.done else ("running", None)
+
+
+def cmd_note(a):
+    return _live_cli(_live_key(), {"type": "note", "text": " ".join(a.text), "tone": a.tone, "title": a.title}, "done")
+
+
+def cmd_show(a):
+    src = sys.stdin.read() if a.json == "-" else a.json
+    try:
+        spec = json.loads(src)
+    except ValueError as e:
+        print(f"grovy show: not valid JSON: {e}", file=sys.stderr)
+        return 2
+    status, message = _status(a)
+    return _live_cli(a.key or _live_key(), spec, status if a.key else "done", message)
+
+
+def cmd_progress(a):
+    item = {"label": a.label or "", "value": a.value}
+    if a.max is None:
+        item["indeterminate"] = True
+    else:
+        item["max"] = a.max
+    if a.note:
+        item["note"] = a.note
+    status, message = _status(a)
+    return _live_cli(a.key, {"type": "progress", "title": a.title, "items": [item], "eta": True}, status, message)
+
+
+def cmd_tail(a):
+    """Copy stdin to stdout unchanged, showing its last lines live on the phone."""
+    w = Log(a.title, a.lines, a.key)
+    out = sys.stdout.buffer
+    try:
+        for line in iter(sys.stdin.buffer.readline, b""):
+            try:
+                out.write(line)
+                out.flush()
+            except BrokenPipeError:   # downstream closed: keep reading so the producer isn't killed by us
+                out = open(os.devnull, "wb")
+            w.write(line)
+    except KeyboardInterrupt:
+        w._close("stopped", "interrupted")
+        return 130
+    w.done()
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="grovy", description="Minimal Claude Code session manager")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1205,6 +1542,22 @@ def main(argv=None):
     for x in (pp, pr, pl):
         x.add_argument("--session", help="default: $GROVY_SESSION")
         x.set_defaults(fn=cmd_page)
+    s = sub.add_parser("note", help="show a markdown note in this session's phone chat, now")
+    s.add_argument("text", nargs="+"), s.add_argument("--title"), s.add_argument("--tone", choices=("ok", "warn", "bad"))
+    s.set_defaults(fn=cmd_note)
+    s = sub.add_parser("show", help="show a widget (JSON, or - for stdin); with --key, later calls update it")
+    s.add_argument("json"), s.add_argument("--key")
+    s = [s, sub.add_parser("progress", help="show or update a live progress bar: grovy progress KEY VALUE --max N")]
+    s[1].add_argument("key"), s[1].add_argument("value", type=float), s[1].add_argument("--max", type=float)
+    s[1].add_argument("--title"), s[1].add_argument("--label"), s[1].add_argument("--note")
+    for x, fn in zip(s, (cmd_show, cmd_progress)):
+        g = x.add_mutually_exclusive_group()
+        g.add_argument("--done", action="store_true", help="mark it finished")
+        g.add_argument("--failed", metavar="MESSAGE", help="mark it failed")
+        x.set_defaults(fn=fn)
+    s = sub.add_parser("tail", help="copy stdin to stdout, showing its last lines live on the phone")
+    s.add_argument("--title"), s.add_argument("--lines", type=int, default=40), s.add_argument("--key")
+    s.set_defaults(fn=cmd_tail)
     sub.add_parser("doctor", help="check dependencies and connectivity").set_defaults(fn=cmd_doctor)
     sub.add_parser("url", help="print the web UI link(s), including the login token").set_defaults(fn=cmd_url)
     a = p.parse_args(argv)
