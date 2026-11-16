@@ -1468,6 +1468,9 @@ async function sendNow() {
   if (text == null) return;
   if (files.length && /^[/!]/.test(text.trimStart()))   // checked on what is sent, after the extensions
     return say("Attachments can't go with a / or ! command: send them in a normal message.");
+  if (/^\/clear(\s|$)/i.test(text.trimStart()) &&   // easy to pick instead of /compact, and it can't be undone
+      !await ask("Clear the conversation? Claude starts over with an empty context; this can't be undone.\n"
+                 + "(/compact keeps a summary instead.)", "Clear", {danger: true})) return;
   const force = !!(cur && cur.can_force) &&
     await ask("Claude's state is uncertain. Type this into the terminal anyway?\nOr queue it until Claude reports idle.",
               "Type anyway", {cancel: "Queue it"});

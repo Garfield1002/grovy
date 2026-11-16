@@ -305,7 +305,8 @@ Anything else (`/model`, `/config`, `/resume`, …) opens a terminal menu or pri
 refused with a pointer to `grovy attach`. Skill names that would shadow a built-in or alias (compared case-insensitively)
 are ignored. A message starting with `!` (bash mode) is refused as well. Commands are typed followed by a space, which closes Claude Code's fuzzy menu so
 Enter can't pick a neighbour. Skills confirm through `UserPromptSubmit`; `/clear` and `/compact` emit none and confirm
-through `SessionStart(source=clear|compact)`. Typing `/` in the composer opens a picker of the allowed commands.
+through `SessionStart(source=clear|compact)`. Typing `/` in the composer opens a picker of the allowed commands. `/clear`
+asks for confirmation first (it sits next to `/compact` in the picker, and can't be undone).
 
 **Interrupt.** While a session is `working` with no pending dialog and the message box is empty, the send button
 becomes ■ (stop), which presses Esc (after a confirm); once you type, it becomes a blue steer arrow. Ctrl+Enter only
