@@ -764,13 +764,14 @@ class Store:
             return 400, f"not saved: {e}"
         return 200, {"path": path, "name": safe, "size": size}
 
-    def read_attachment(self, name, filename):
-        """An image the phone sent earlier, for its thumbnail: (content type, bytes) or None."""
+    def read_attachment(self, name, filename, images=False):
+        """An image the phone sent (thumbnails), or with images=True one Claude kept with `grovy image` (image
+        widgets): (content type, bytes) or None."""
         ext = filename.rsplit(".", 1)[-1].lower()
         if not grovy.valid_name(name) or not ATTACH_NAME.fullmatch(filename) or ext not in IMAGE_TYPES:
             return None
         try:
-            top = private_dir(grovy.attachments_dir())
+            top = os.path.join(self.dir, "images") if images else private_dir(grovy.attachments_dir())
             fd = os.open(os.path.join(top, name, filename), os.O_RDONLY | os.O_NOFOLLOW)
             with os.fdopen(fd, "rb") as f:
                 if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
@@ -1735,9 +1736,9 @@ class Http(http.server.BaseHTTPRequestHandler):
         if path == "/api/conversations":
             code, res = store.conversations(parse_qs(url.query).get("path", [""])[0])
             return self._send(code, {"conversations": res} if code == 200 else {"error": res})
-        m = re.fullmatch(r"/api/attachments/([^/]+)/([^/]+)", path)
-        if m:   # image thumbnails; only images, never rendered as anything else
-            got = store.read_attachment(m.group(1), m.group(2))
+        m = re.fullmatch(r"/api/(attachments|images)/([^/]+)/([^/]+)", path)
+        if m:   # thumbnails and image widgets; only images, never rendered as anything else
+            got = store.read_attachment(m.group(2), m.group(3), images=m.group(1) == "images")
             if not got:
                 return self._err(404, "not found")
             return self._send(200, got[1], got[0], [("Cache-Control", "private, max-age=604800"),

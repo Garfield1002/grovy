@@ -836,6 +836,7 @@ text too. Use a widget only when it clearly beats text, usually at most one per 
 - checklist: {"type":"checklist","title":"..","items":[{"label":"..","status":"done|todo|running|failed|skipped","note":".."}]}
 - choices: {"type":"choices","question":"..","multi":false,"options":[{"label":"..","description":"..","message":"text to send if picked"}]}
 - form: {"type":"form","title":"..","submit":"..","fields":[{"name":"k","label":"..","kind":"text|textarea|number|select|toggle","options":[".."],"default":".."}]}
+- image: run `GROVY image FILE [--caption T]` (png/jpg/gif/webp, e.g. a plot or screenshot you made) and put the ```widget block it prints in your reply.
 - diagram: {"type":"diagram","direction":"down|right","nodes":[{"id":"a","label":"..","tone":"ok|warn|bad"}],"edges":[{"from":"a","to":"b","label":".."}]}
 choices/form only prefill the user's message box; they review and send it. Limits: ~12 bars, 8 pie slices, 30 nodes.
 Only when the user asks for a page (they may say "local page": that means this), or the result is too big for \
@@ -1580,6 +1581,47 @@ def _status(a):
     return ("failed", a.failed) if a.failed is not None else ("done", None) if a.done else ("running", None)
 
 
+IMAGE_MAGIC = {"png": (b"\x89PNG\r\n\x1a\n",), "jpg": (b"\xff\xd8\xff",), "jpeg": (b"\xff\xd8\xff",),
+               "gif": (b"GIF87a", b"GIF89a"), "webp": (b"RIFF",)}
+MAX_IMAGE = 20 * 1024 * 1024
+
+
+def cmd_image(a):
+    """Keep a copy of an image for the phone and print the widget block that shows it in a reply."""
+    session = a.session or env("SESSION")
+    if not session or not valid_name(session):
+        print("grovy image: no session: run this inside a grovy session or pass --session NAME", file=sys.stderr)
+        return 2
+    ext = a.file.rsplit(".", 1)[-1].lower() if "." in os.path.basename(a.file) else ""
+    if ext not in IMAGE_MAGIC:
+        print("grovy image: only .png, .jpg, .gif and .webp files can be shown", file=sys.stderr)
+        return 2
+    try:
+        with open(a.file, "rb") as f:
+            data = f.read(MAX_IMAGE + 1)
+    except OSError as e:
+        print(f"grovy image: {e}", file=sys.stderr)
+        return 1
+    if len(data) > MAX_IMAGE:
+        print(f"grovy image: larger than {MAX_IMAGE // 2**20} MB; make it smaller first", file=sys.stderr)
+        return 2
+    if not data.startswith(IMAGE_MAGIC[ext]) or (ext == "webp" and data[8:12] != b"WEBP"):
+        print(f"grovy image: {a.file} is not a .{ext} image", file=sys.stderr)
+        return 2
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(a.file)).strip("._-")[:80] or "image." + ext
+    name = f"{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}-{safe}"
+    d = os.path.join(state_dir(), "images", session)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    fd = os.open(os.path.join(d, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    spec = {"type": "image", "src": f"{session}/{name}"}
+    if a.caption:
+        spec["caption"] = a.caption
+    print("```widget\n" + json.dumps(spec, ensure_ascii=False) + "\n```")
+    return 0
+
+
 def cmd_note(a):
     return _live_cli(_live_key(), {"type": "note", "text": " ".join(a.text), "tone": a.tone, "title": a.title}, "done")
 
@@ -1677,6 +1719,9 @@ def main(argv=None):
     for x in (pp, pr, pl):
         x.add_argument("--session", help="default: $GROVY_SESSION")
         x.set_defaults(fn=cmd_page)
+    s = sub.add_parser("image", help="keep a copy of an image for the phone; prints the widget block to put in a reply")
+    s.add_argument("file"), s.add_argument("--caption"), s.add_argument("--session", help="default: $GROVY_SESSION")
+    s.set_defaults(fn=cmd_image)
     s = sub.add_parser("note", help="show a markdown note in this session's phone chat, now")
     s.add_argument("text", nargs="+"), s.add_argument("--title"), s.add_argument("--tone", choices=("ok", "warn", "bad"))
     s.set_defaults(fn=cmd_note)

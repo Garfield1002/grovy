@@ -1826,6 +1826,41 @@ class TestHttp(unittest.TestCase):
             with mock.patch.object(self.httpd, "token", "secret"):
                 self.assertEqual(self.req("/api/attachments/a/" + os.path.basename(img))[0], 401)
 
+    def test_image_widget_files(self):
+        src = os.path.join(TMP, "plot.png")
+        with open(src, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\nrest")
+        sd = self.store.dir
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": sd, "GROVY_SESSION": "a"}):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(grovy.main(["image", src, "--caption", "Loss"]), 0)
+        block = out.getvalue()
+        self.assertTrue(block.startswith("```widget\n") and block.endswith("\n```\n"))
+        spec = json.loads(block.split("\n")[1])
+        self.assertEqual(spec["type"], "image")
+        self.assertEqual(spec["caption"], "Loss")
+        self.assertRegex(spec["src"], r"^a/\d{8}-\d{6}-[0-9a-f]{4}-plot\.png$")
+        code, body, h = self.req("/api/images/" + spec["src"])
+        self.assertEqual((code, body, h["Content-Type"]), (200, b"\x89PNG\r\n\x1a\nrest", "image/png"))
+        self.assertEqual(self.req("/api/images/a/..%2Fstate.json")[0], 404)
+        with mock.patch.object(self.httpd, "token", "secret"):
+            self.assertEqual(self.req("/api/images/" + spec["src"])[0], 401)
+
+    def test_image_command_refuses_non_images(self):
+        fake = os.path.join(TMP, "notes.png")
+        with open(fake, "wb") as f:
+            f.write(b"just text")
+        txt = os.path.join(TMP, "notes.txt")
+        open(txt, "w").close()
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": self.store.dir, "GROVY_SESSION": "a"}), \
+                redirect_stdout(io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(grovy.main(["image", fake]), 2)      # the extension lies
+            self.assertEqual(grovy.main(["image", txt]), 2)       # not an image type
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": self.store.dir}), mock.patch("sys.stderr", io.StringIO()):
+            os.environ.pop("GROVY_SESSION", None); os.environ.pop("CCS_SESSION", None)
+            self.assertEqual(grovy.main(["image", fake]), 2)      # no session
+
     def test_attachments_never_written_through_a_planted_dir(self):
         """Anyone can create names in /tmp: a symlink or someone else's open directory there must be refused."""
         base = tempfile.mkdtemp(dir=TMP)

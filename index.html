@@ -32,15 +32,15 @@ button, .u .st, .wg .lf { -webkit-user-select:none; user-select:none; }
 
 /* header */
 header { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:8px;
-  padding:8px 12px; padding-top:calc(8px + env(safe-area-inset-top)); background:var(--bg);
-  border-bottom:1px solid var(--line); min-height:56px; }
-#back { border:0; background:none; font-size:28px; line-height:1; padding:4px 10px 6px 2px; min-height:44px; }
-header h1 { font-size:18px; margin:0; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.pill { display:inline-flex; align-items:center; gap:7px; font-size:14px; font-weight:600; padding:5px 11px;
+  padding:3px 10px; padding-top:calc(3px + env(safe-area-inset-top)); background:var(--bg);
+  border-bottom:1px solid var(--line); min-height:46px; }
+#back { border:0; background:none; font-size:26px; line-height:1; padding:2px 8px 4px 2px; min-height:40px; }
+header h1 { font-size:17px; margin:0; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pill { display:inline-flex; align-items:center; gap:6px; font-size:13px; font-weight:600; padding:3px 10px;
   border-radius:99px; background:var(--card); border:1px solid var(--line); white-space:nowrap; }
 header { flex-wrap:wrap; }
 /* context bar: a thin full-width line along the header's bottom edge; its tap area is taller than it looks */
-#meta { flex-basis:100%; align-self:stretch; margin:0 -12px -8px; padding:8px 0 0; border:0; background:none;
+#meta { flex:0 0 calc(100% + 20px); align-self:stretch; margin:0 -10px -3px; padding:5px 0 0; border:0; background:none;
   cursor:pointer; display:block; }
 #meta i { display:block; height:3px; background:var(--line); }
 #meta b { display:block; height:100%; background:var(--ok); transition:width .4s ease; }
@@ -97,7 +97,8 @@ body.home #backdrop { display:block; }
 @keyframes found { from { box-shadow:0 0 0 4px color-mix(in srgb, var(--busy) 45%, transparent); } to { box-shadow:0 0 0 4px transparent; } }
 .attimg { display:block; width:fit-content; margin:4px 0; } .attimg img { display:block; max-width:100%; max-height:260px; border-radius:12px; }
 .attc img { width:22px; height:22px; object-fit:cover; border-radius:5px; margin-right:4px; flex:none; }
-.acts { display:flex; flex-wrap:wrap; gap:2px; margin:2px 0 0 -8px; -webkit-user-select:none; user-select:none; }
+.acts .ar { margin-left:auto; display:flex; gap:2px; }
+.acts { display:flex; flex-wrap:wrap; gap:2px; margin:2px -8px 0 -8px; -webkit-user-select:none; user-select:none; }
 .acts button { border:0; background:none; color:var(--mut); font-size:13px; font-weight:600; padding:6px 8px; min-height:34px; border-radius:8px; }
 .acts button:active { background:var(--code); }
 .acts .wkb { font-weight:400; } span.wkb { font-size:13px; color:var(--mut); padding:6px 8px; align-self:center; }
@@ -170,7 +171,7 @@ body.home #backdrop { display:block; }
 .btn.deny { color:var(--bad); border-color:var(--bad); }
 .btn:disabled { opacity:.45; }
 
-#err { position:fixed; left:12px; right:12px; top:calc(64px + env(safe-area-inset-top)); z-index:30; background:var(--bad);
+#err { position:fixed; left:12px; right:12px; top:calc(54px + env(safe-area-inset-top)); z-index:30; background:var(--bad);
   color:#fff; border-radius:10px; padding:10px 12px; font-size:14px; }
 /* bottom sheet (switcher, menu, new session, search) */
 #sheet { position:fixed; inset:0; z-index:40; display:flex; align-items:flex-end; background:rgba(0,0,0,.35);
@@ -197,7 +198,7 @@ body.home #backdrop { display:block; }
 .hit .w { font-size:12px; color:var(--mut); } .hit .s { overflow:hidden; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; }
 mark { background:color-mix(in srgb, var(--warn) 35%, transparent); color:inherit; border-radius:3px; }
 #title.tap { cursor:pointer; } #title.tap::after { content:" ▾"; font-size:13px; color:var(--mut); }
-.hbtn { border:0; background:none; font-size:24px; line-height:1; min-width:44px; min-height:44px; padding:0 6px; color:var(--fg); }
+.hbtn { border:0; background:none; font-size:22px; line-height:1; min-width:40px; min-height:40px; padding:0 6px; color:var(--fg); }
 .earlier { display:block; margin:6px auto 10px; border:1px solid var(--line); background:var(--card); border-radius:99px;
   padding:6px 16px; font-size:14px; min-height:36px; }
 #quick { display:flex; gap:8px; margin:0 0 8px; flex-wrap:wrap; }
@@ -296,6 +297,8 @@ textarea:focus { border-color:var(--mut); }
 .wg.werr { color:var(--bad); font-size:14px; border-style:dashed; }
 .wt { font-weight:650; margin:0 0 10px; }
 .wn { font-size:13px; color:var(--mut); }
+.wg-image { padding:6px; } .wg-image .wt { margin:4px 6px 8px; } .wcap { margin:6px 6px 2px; }
+.wimg { display:block; } .wimg img { display:block; max-width:100%; max-height:70vh; margin:0 auto; border-radius:8px; }
 .lg { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:13px; color:var(--mut); margin:0 0 8px; }
 .lg span { display:inline-flex; align-items:center; gap:6px; } .lg i { width:10px; height:10px; border-radius:3px; background:var(--c); flex:none; }
 .lg.col { flex-direction:column; gap:6px; color:var(--fg); font-size:14px; } .lg em { font-style:normal; color:var(--mut); margin-left:auto; padding-left:10px; }
@@ -672,6 +675,16 @@ const WIDGETS = {
   },
 
   note(s) { return [wtitle(s.title), md(wtext(s.text, 20000))]; },
+  image(s) {   // src: what `grovy image FILE` printed (a copy kept by grovy); tap for full size
+    const src = wtext(s.src, 300);
+    if (!/^[A-Za-z0-9_-]+\/\d{8}-\d{6}-[0-9a-f]{4}-[A-Za-z0-9._-]+$/.test(src))
+      throw new Error("src must be what `grovy image FILE` printed");
+    const url = "/api/images/" + src.split("/").map(encodeURIComponent).join("/");
+    const link = h("a", {class: "wimg", href: url, target: "_blank", rel: "noopener"});
+    link.append(h("img", {src: url, alt: wtext(s.caption, 300), loading: "lazy",
+      onerror: () => link.replaceWith(h("div", {class: "wn"}, "This image is no longer available."))}));
+    return [wtitle(s.title), link, s.caption ? h("div", {class: "wn wcap"}, wtext(s.caption, 300)) : null];
+  },
 
   log(s) {
     const lines = Array.isArray(s.lines) ? s.lines : (() => { throw new Error("lines must be a list"); })();
@@ -985,8 +998,8 @@ function eventNode(e, isLatestReply) {
       }
       if (d.background_tasks) el.append(sysLine(d.background_tasks + " background task(s) still running"));
       const copy = h("button", {onclick: () => copyText(text, copy)}, "Copy");
-      el.append(h("div", {class: "acts"}, ...(wk ? [wk.label] : []), copy,
-        h("button", {onclick: () => quoteInto(el.querySelector(".md").innerText, "Claude")}, "Quote")), ...(wk && wk.list ? [wk.list] : []));
+      el.append(h("div", {class: "acts"}, ...(wk ? [wk.label] : []), h("span", {class: "ar"}, copy,
+        h("button", {onclick: () => quoteInto(el.querySelector(".md").innerText, "Claude")}, "Quote"))), ...(wk && wk.list ? [wk.list] : []));
       return el;
     }
     case "StopFailure": return h("div", {class: "err"}, "⚠ " + (d.error || "error") + (d.last_assistant_message ? "\n" + d.last_assistant_message : ""));
@@ -1262,7 +1275,8 @@ async function renderDetail(name) {
     : s.state === "needs_input" ? "Claude is waiting on a terminal dialog (grovy attach " + s.name + "). Messages will queue."
     : s.state === "starting" && serverNow() - (s.last_event || 0) > 20 ? "Still starting: Claude is probably showing "
         + "the workspace-trust dialog for this folder. Accept it once in the terminal: grovy attach " + s.name + "."
-    : "Claude is working. A message goes to it at its next step (or when it finishes).";
+    : "";   // working: the placeholder says it (a message reaches Claude at its next step)
+  input.placeholder = s.state === "working" ? "Steer Claude…" : "Message Claude…";   // working: it gets it at its next step
   $("send").disabled = s.state === "exited";
   $("resume").classList.toggle("hidden", s.state !== "exited");
   document.querySelector("#composer .cr").classList.toggle("hidden", s.state === "exited");
@@ -1331,7 +1345,8 @@ setInterval(tick, 1000);
 const input = $("input");
 const draftKey = () => "grovy-draft:" + view;
 function autosize() {   // also swaps the text box's paperclip (empty) for its clear cross (anything typed)
-  input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight + 2, innerHeight * .4) + "px";
+  input.style.height = "auto";   // empty: one line (Chrome counts a wrapped placeholder in scrollHeight)
+  if (input.value) input.style.height = Math.min(input.scrollHeight + 2, innerHeight * .4) + "px";
   $("attach").classList.toggle("hidden", input.value !== "");
   $("clear").classList.toggle("hidden", input.value === "");
 }

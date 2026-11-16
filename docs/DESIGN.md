@@ -244,13 +244,19 @@ must not get its command run without Claude's trust dialog. Sessions started bef
 their next start.
 
 **Widgets.** Claude's reply can contain ` ```widget ` blocks holding one JSON object: `chart` (bar, line, pie),
-`stats`, `progress`, `checklist`, `choices`, `form` or `diagram`. The page draws them itself with DOM and SVG;
+`stats`, `progress`, `checklist`, `choices`, `form`, `diagram` or `image`. The page draws them itself with DOM and SVG;
 nothing from Claude is run or parsed as HTML. Invalid JSON or an unknown type shows "Widget not shown: <reason>"
 followed by the raw block. `choices` and `form` only fill your message box (asking first if it already holds a draft);
 you send it like any message. Claude learns the format from grovy's `SessionStart` hook (`additionalContext`, the
 `WIDGET_GUIDE` text in `grovy.py`), on every start, resume, `/clear` and `/compact`. Hooks run the current `grovy.py`,
 so a changed guide applies without a restart. `GROVY_WIDGETS=0` turns the guide off. The terminal shows the raw JSON,
 so Claude is told to keep the key facts in plain text too.
+
+**Image widget.** `grovy image FILE [--caption T]` checks the file is a real png/jpg/gif/webp (extension and magic
+bytes, ≤ 20 MB), copies it to `STATE/images/SESSION/DATE-TIME-RAND-NAME` (mode 600, kept like pages, never pruned)
+and prints a ` ```widget ` block `{"type":"image","src":"SESSION/FILE"}` for Claude to put in its reply. The page
+fetches it from `GET /api/images/SESSION/FILE` (logged in; name pattern and image types only; `O_NOFOLLOW`; served
+as an image with `default-src 'none'`), so a widget can only show images grovy copied, never an arbitrary path.
 
 **Live widgets (from scripts).** A long command Claude runs (training, a build, a batch job) can show cards in the
 chat *while it runs*, between your message and Claude's reply, and update them in place. Sessions get grovy's folder
