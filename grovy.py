@@ -656,6 +656,22 @@ def permission_output(behavior, message=None, updated_input=None):
     return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
 
 
+WIDGET_GUIDE = """\
+You are running inside grovy: the user may be reading you on a phone, which renders the final message of each \
+turn as markdown. That message can include widgets: a fenced code block with language `widget` whose body is one \
+JSON object. grovy draws them itself (no HTML or scripts). Use one when it genuinely helps (numbers, progress, a \
+decision, structure), not by default. The terminal shows the raw JSON, so keep the key facts in plain text too.
+- chart: {"type":"chart","kind":"bar|line|pie","title":"..","labels":["a","b"],"series":[{"name":"..","values":[1,2]}],"unit":"ms"}
+- stats: {"type":"stats","title":"..","items":[{"label":"Tests","value":"88/88","note":"..","tone":"ok|warn|bad"}]}
+- progress: {"type":"progress","title":"..","items":[{"label":"..","value":3,"max":10}]}
+- checklist: {"type":"checklist","title":"..","items":[{"label":"..","status":"done|todo|running|failed|skipped","note":".."}]}
+- choices: {"type":"choices","question":"..","multi":false,"options":[{"label":"..","description":"..","message":"text to send if picked"}]}
+- form: {"type":"form","title":"..","submit":"..","fields":[{"name":"k","label":"..","kind":"text|textarea|number|select|toggle","options":[".."],"default":".."}]}
+- diagram: {"type":"diagram","direction":"down|right","nodes":[{"id":"a","label":"..","tone":"ok|warn|bad"}],"edges":[{"from":"a","to":"b","label":".."}]}
+choices and form only fill the user's message box; the user reviews it and sends it as an ordinary prompt. \
+Prefer them to asking the user to type out a pick. Keep widgets small: about 12 bars, 8 pie slices, 30 diagram nodes."""
+
+
 def cmd_hook(name):
     """Read one hook event from stdin. stdout is reserved for protocol output; diagnostics -> stderr.
 
@@ -691,6 +707,10 @@ def cmd_hook(name):
             sock_request(msg, timeout=2.0, wait_reply=False)
         except OSError as e:
             print(f"grovy hook: daemon unreachable ({e}); event not recorded", file=sys.stderr)
+        if event == "SessionStart" and env("WIDGETS", "1") != "0":   # also after /clear and /compact
+            sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                                                "additionalContext": WIDGET_GUIDE}}))
+            sys.stdout.flush()
         return 0
     try:
         reply = sock_request(msg, timeout=PERMISSION_TIMEOUT + 10)

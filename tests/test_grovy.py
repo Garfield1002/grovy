@@ -130,6 +130,17 @@ class TestHookAdapter(unittest.TestCase):
         self.assertEqual(self.run_hook(json.dumps(ev("Bogus"))), (0, ""))
         self.assertEqual(self.run_hook(json.dumps(ev("Stop")), name="bad name"), (0, ""))
 
+    def test_session_start_adds_widget_guide(self):
+        for src in ("startup", "resume", "clear", "compact"):
+            rc, out = self.run_hook(json.dumps(ev("SessionStart", source=src)), exc=OSError("daemon down"))
+            ctx = json.loads(out)["hookSpecificOutput"]
+            self.assertEqual(ctx["hookEventName"], "SessionStart")
+            self.assertIn("`widget`", ctx["additionalContext"])
+            self.assertIn('"type":"chart"', ctx["additionalContext"])
+        self.assertEqual(self.run_hook(json.dumps(ev("Stop")))[1], "")
+        with mock.patch.dict(os.environ, {"GROVY_WIDGETS": "0"}):
+            self.assertEqual(self.run_hook(json.dumps(ev("SessionStart", source="startup")))[1], "")
+
     def test_daemon_down_permission_falls_back(self):
         rc, out = self.run_hook(json.dumps(ev("PermissionRequest", tool_name="Bash")), exc=OSError("nope"))
         self.assertEqual((rc, out), (0, ""))  # no output => Claude's terminal dialog

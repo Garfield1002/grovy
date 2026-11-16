@@ -103,6 +103,7 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 | `GROVY_NOTIFY_CMD` | unset | command run with a short message on stdin (see below) |
 | `GROVY_PUBLIC_URL` | unset | appended to notifications as a link |
 | `GROVY_DEBUG` | unset | log HTTP requests |
+| `GROVY_WIDGETS` | `1` | `0` = don't tell Claude sessions about widgets |
 
 ### Notifications (Telegram or anything else)
 
@@ -231,6 +232,15 @@ alias can't be taken by another session until the renamed one is removed.
 context use to the daemon (shown under the session header and as "context N%" in the list), then prints your own
 configured status line, so the terminal looks the same. Sessions started before this existed report it after their next
 start.
+
+**Widgets.** Claude's reply can contain ` ```widget ` blocks holding one JSON object: `chart` (bar, line, pie),
+`stats`, `progress`, `checklist`, `choices`, `form` or `diagram`. The page draws them itself with DOM and SVG;
+nothing from Claude is run or parsed as HTML. Invalid JSON or an unknown type shows "Widget not shown: <reason>"
+followed by the raw block. `choices` and `form` only fill your message box (asking first if it already holds a draft);
+you send it like any message. Claude learns the format from grovy's `SessionStart` hook (`additionalContext`, the
+`WIDGET_GUIDE` text in `grovy.py`), on every start, resume, `/clear` and `/compact`. Hooks run the current `grovy.py`,
+so a changed guide applies without a restart. `GROVY_WIDGETS=0` turns the guide off. The terminal shows the raw JSON,
+so Claude is told to keep the key facts in plain text too.
 
 ## Failure modes
 
