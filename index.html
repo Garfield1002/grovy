@@ -28,6 +28,15 @@ header { position:sticky; top:0; z-index:5; display:flex; align-items:center; ga
 header h1 { font-size:18px; margin:0; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .pill { display:inline-flex; align-items:center; gap:7px; font-size:14px; font-weight:600; padding:5px 11px;
   border-radius:99px; background:var(--card); border:1px solid var(--line); white-space:nowrap; }
+header { flex-wrap:wrap; }
+/* context bar: a thin full-width line along the header's bottom edge; its tap area is taller than it looks */
+#meta { flex-basis:100%; align-self:stretch; margin:0 -12px -8px; padding:8px 0 0; border:0; background:none;
+  cursor:pointer; display:block; }
+#meta i { display:block; height:3px; background:var(--line); }
+#meta b { display:block; height:100%; background:var(--ok); transition:width .4s ease; }
+#meta.warn b { background:var(--warn); } #meta.bad b { background:var(--bad); }
+.kv2 { display:flex; justify-content:space-between; gap:12px; padding:11px 2px; border-bottom:1px solid var(--line); }
+.kv2 span:first-child { color:var(--mut); }
 #live { font-size:12px; font-weight:600; color:var(--warn); white-space:nowrap; flex:none; }
 #live.on { display:none; }
 
@@ -217,6 +226,7 @@ textarea:focus { border-color:var(--mut); }
   <span id="pill" class="pill hidden"><span id="pdot" class="dot"></span><span id="ptext"></span></span>
   <span id="live" title="live updates disconnected">offline</span>
   <button id="menu" class="hbtn hidden" aria-label="Menu">⋯</button>
+  <button id="meta" class="hidden" aria-label="Context used: tap for details"><i><b></b></i></button>
 </header>
 <main id="main"></main>
 <div id="typing" class="hidden">
@@ -406,7 +416,8 @@ async function renderList() {
           s.pending_permissions ? h("span", {class: "badge"}, s.pending_permissions + " waiting") : null,
           h("span", {class: "when"}, ago(s.last_event))),
         h("div", {class: "sub"}, base(s.cwd), " · ", LABEL[s.state] || s.state,
-          s.queued_prompts ? ` · ${s.queued_prompts} queued` : "", s.background ? ` · ${s.background} bg` : ""),
+          s.queued_prompts ? ` · ${s.queued_prompts} queued` : "", s.background ? ` · ${s.background} bg` : "",
+          s.meta && s.meta.context != null && s.state !== "exited" ? ` · context ${s.meta.context}%` : ""),
         s.activity ? h("div", {class: "prev"}, s.activity) : null),
       s.state === "exited" ? h("span", {class: "rm", role: "button", "aria-label": "Remove " + s.name,
         onclick: ev => { ev.stopPropagation(); removeSessions([s.name]); }}, "Remove") : null);
@@ -659,6 +670,7 @@ async function renderDetail(name) {
   const nearBottom = innerHeight + scrollY >= document.documentElement.scrollHeight - 160;
   const stalled = s.state === "working" && Date.now() / 1000 - s.last_event > STALL;
   $("pdot").className = "dot " + s.state + (stalled ? " stalled" : "");
+  renderMeta(s.meta);
   $("ptext").textContent = LABEL[s.state] || s.state;
 
   firstId = d.events.length ? d.events[0].id : 0;
@@ -742,6 +754,28 @@ async function quickSend(text) {
   try { await api(`/api/sessions/${encodeURIComponent(view)}/prompts`, {text}); first = true; } catch (e) { alert(e.message); }
   refresh();
 }
+const ctxLevel = c => c > 75 ? "bad" : c > 25 ? "warn" : "";   // green ≤25%, amber ≤75%, red above
+function renderMeta(m) {   // the context line; the rest of the terminal's status info is one tap away
+  const el = $("meta");
+  meta = m || null;
+  if (!m || m.context == null) return el.classList.add("hidden");
+  el.className = ctxLevel(m.context);
+  el.querySelector("b").style.width = m.context + "%";
+  el.setAttribute("aria-label", m.context + "% of the context window used: tap for details");
+}
+let meta = null;
+$("meta").onclick = () => {
+  const m = meta || {};
+  const row = (k, v) => v == null || v === "" ? null : h("div", {class: "kv2"}, h("span", {}, k), h("span", {}, v));
+  const bar = m.context == null ? null : h("div", {style: "margin:4px 0 14px"},
+    h("div", {style: "height:6px;border-radius:3px;background:var(--line);overflow:hidden"},
+      h("div", {style: `height:100%;width:${m.context}%;background:var(--${ctxLevel(m.context) === "bad" ? "bad" : ctxLevel(m.context) === "warn" ? "warn" : "ok"})`})));
+  openSheet(h("h2", {}, "Session status"), bar,
+    row("Context used", m.context == null ? null : m.context + "%"), row("Model", m.model), row("Effort", m.effort),
+    row("Fast mode", m.fast ? "on" : "off"),
+    h("div", {class: "note", style: "margin-top:10px;color:var(--mut);font-size:13px"},
+      "Near 100% Claude compacts the conversation to free up context."));
+};
 function tick() {
   if (turnStart && !$("typing").classList.contains("hidden")) {
     const idle = cur ? Date.now() / 1000 - cur.last_event : 0;
@@ -821,6 +855,9 @@ function sessionMenu() {
   openSheet(h("h2", {}, name),
     h("button", {class: "item", onclick: searchSheet}, "Search this conversation"),
     h("button", {class: "item", onclick: () => renameSheet(name)}, "Rename"),
+    s.state !== "exited" ? h("button", {class: "item", onclick: () => {
+        if (confirm(`Restart "${name}"? Claude exits and resumes the same conversation (only while it's idle).`)) act("restart");
+      }}, "Restart session", h("div", {class: "sub"}, "Picks up new grovy settings; only while idle")) : null,
     s.state === "exited"
       ? [h("button", {class: "item", onclick: () => act("resume")}, "Resume session"),
          h("button", {class: "item danger", onclick: () => { closeSheet(); removeSessions([name]); }}, "Remove from list")]
@@ -976,7 +1013,7 @@ function route() {
   view = m ? m[1] : null; lastEventId = 0; cur = null; first = true; lastTool = ""; cache.clear();
   older = []; noMore = false; closeSheet(); $("quick").replaceChildren();
   $("add").classList.toggle("hidden", !!view); $("menu").classList.toggle("hidden", !view);
-  $("title").classList.toggle("tap", !!view); $("resume").classList.add("hidden");
+  $("title").classList.toggle("tap", !!view); $("resume").classList.add("hidden"); $("meta").classList.add("hidden");
   $("back").classList.toggle("hidden", !view);
   $("pill").classList.toggle("hidden", !view);
   $("composer").classList.toggle("hidden", !view);

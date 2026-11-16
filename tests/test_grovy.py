@@ -731,6 +731,71 @@ class TestRename(StoreCase):
         self.assertEqual(regs["jean"]["claude_session_id"], "NEW")
 
 
+class TestStatusLine(StoreCase):
+    SAMPLE = {"model": {"id": "claude-opus-5-5", "display_name": "Opus 5.5"}, "effort": {"level": "medium"},
+              "fast_mode": False, "context_window": {"remaining_percentage": 66.4, "used_percentage": 30}}
+
+    def test_meta_and_change_only_notifications(self):
+        sent = []
+        self.store.publish = lambda name=None: sent.append(name)
+        self.store.status("a", self.SAMPLE)
+        self.assertEqual(self.store.sessions["a"]["meta"],
+                         {"model": "Opus 5.5", "effort": "medium", "fast": False, "context": 34})
+        self.store.status("a", self.SAMPLE)                      # unchanged: no browser update
+        self.assertEqual(sent, ["a"])
+        self.store.status("a", {**self.SAMPLE, "context_window": {"used_percentage": 12.9}})
+        self.assertEqual(self.store.sessions["a"]["meta"]["context"], 12)
+        self.store.status("a", {**self.SAMPLE, "context_window": {"current_usage": None}, "model": "junk"})
+        self.assertEqual(self.store.sessions["a"]["meta"]["context"], None)
+        self.assertEqual(self.store.sessions["a"]["meta"]["model"], None)
+        self.store.status("zz", self.SAMPLE)                     # unknown session: ignored
+
+    def test_command_forwards_and_prints_users_statusline(self):
+        home = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(home, "settings.json"), "w") as f:
+            json.dump({"statusLine": {"type": "command", "command": "cat >/dev/null; echo my-own-status-line", "padding": 2}}, f)
+        msgs, out = [], io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}), \
+                mock.patch.object(grovy, "sock_request", lambda m, **k: msgs.append(m)), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps({**self.SAMPLE, "transcript_path": "/secret"}))), \
+                redirect_stdout(out):
+            grovy.cmd_statusline("a")
+            settings = json.load(open(grovy.hook_settings("sl")))
+        self.assertEqual(out.getvalue(), "my-own-status-line\n")
+        self.assertEqual(msgs[0]["type"], "statusline")
+        self.assertNotIn("transcript_path", msgs[0]["data"])     # only the fields grovy uses are forwarded
+        self.assertEqual(settings["statusLine"]["padding"], 2)
+        self.assertTrue(settings["statusLine"]["command"].endswith("'statusline' 'sl'"))
+
+    def test_no_recursion_into_our_own_statusline(self):
+        home = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(home, "settings.json"), "w") as f:
+            json.dump({"statusLine": {"type": "command", "command": "python3 grovy.py statusline x"}}, f)
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+            self.assertIsNone(grovy.user_statusline())
+
+
+class TestRestart(StoreCase):
+    def test_restart_only_when_nothing_is_cut_off(self):
+        calls = []
+
+        class Fake:
+            kill = staticmethod(lambda n: calls.append(("kill", n)))
+            resume = staticmethod(lambda n: calls.append(("resume", n)) or f"resumed {n}")
+        self.store.lifecycle = Fake()
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="work"))
+        self.assertEqual(self.store.restart("a")[0], 409)                     # working
+        self.store.ingest("a", ev("Stop", last_assistant_message="x", background_tasks=[{"id": 1}]))
+        code, msg = self.store.restart("a")
+        self.assertEqual(code, 409)                                           # background task running
+        self.assertIn("background", msg)
+        self.store.ingest("a", ev("Stop", last_assistant_message="y"))
+        self.assertEqual(calls, [])
+        self.assertEqual(self.store.restart("a")[0], 200)
+        self.assertEqual(calls, [("kill", "a"), ("resume", "a")])
+
+
 class TestInterrupt(StoreCase):
     def test_only_while_working(self):
         keys = []

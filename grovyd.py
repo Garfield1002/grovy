@@ -543,6 +543,55 @@ class Store:
         self.publish(new)
         return 200, new
 
+    def status(self, name, d):
+        """Status-line data (model, effort, context). Claude refreshes it often: keep it in memory and
+        only notify browsers when something visible changed."""
+        def num(v):
+            return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+        cw = d.get("context_window") if isinstance(d.get("context_window"), dict) else {}
+        used = None
+        if num(cw.get("remaining_percentage")) is not None:  # accounts for the compaction reserve
+            used = 100 - int(cw["remaining_percentage"])
+        elif num(cw.get("used_percentage")) is not None:
+            used = int(cw["used_percentage"])
+        model = d.get("model") if isinstance(d.get("model"), dict) else {}
+        effort = d.get("effort") if isinstance(d.get("effort"), dict) else {}
+        meta = {"model": str(model.get("display_name") or model.get("id") or "")[:40] or None,
+                "effort": str(effort.get("level") or "")[:20] or None,
+                "fast": d.get("fast_mode") is True,
+                "context": max(0, min(100, used)) if used is not None else None}
+        with self.lock:
+            name = self._canon(name)
+            s = self.sessions.get(name)
+            if not s or s.get("meta") == meta:
+                return
+            s["meta"] = meta
+            self._save_state()
+        self.publish(name)
+
+    def restart(self, name):
+        """Stop + resume in one step (picks up new grovy settings, e.g. the status line). Only when nothing can be
+        cut off: Claude idle, no background tasks, no pending request, no prompt in flight."""
+        with self.lock:
+            s = self.sessions.get(name)
+            if not s:
+                return 404, "unknown session"
+            busy = [why for why, cond in (
+                (f"Claude is {s['state']}", s["state"] not in ("idle", "error")),
+                (f"{s.get('background')} background task(s) are running", s.get("background")),
+                ("a request is waiting for an answer", self._pending(name)),
+                ("a prompt is being sent", any(p["session"] == name and p["status"] in ("queued", "injected")
+                                               for p in self.prompts))) if cond]
+            if busy:
+                return 409, "not now: " + "; ".join(busy)
+        try:
+            self.lifecycle.kill(name)
+        except (ValueError, RuntimeError) as e:
+            return 409, str(e)
+        self.reconcile()
+        code, msg = self.resume(name)
+        return (200, "restarted: " + msg) if code == 200 else (code, "stopped, but resume failed: " + msg)
+
     def forget(self, name):
         """Remove an ended session from the list (its conversation stays resumable from ＋)."""
         if name in self.tmux_live():
@@ -965,6 +1014,10 @@ class SockHandler(socketserver.StreamRequestHandler):
             self._reply({"sessions": {s["name"]: s for s in store.list_sessions()}, "url": self.server.url})
         elif t == "refresh":
             store.reconcile()
+        elif t == "statusline":
+            name = msg.get("session")
+            if grovy.valid_name(name) and isinstance(msg.get("data"), dict):
+                store.status(name, msg["data"])
         elif t == "rename":
             code, res = store.rename(str(msg.get("old", "")), msg.get("new"))
             self._reply({"ok": res} if code == 200 else {"error": res})
@@ -1215,7 +1268,7 @@ class Http(http.server.BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/sessions/([^/]+)/rename", path)
         if m and grovy.valid_name(m.group(1)):
             return wrap(*store.rename(m.group(1), body.get("name")))
-        m = re.fullmatch(r"/api/sessions/([^/]+)/(resume|kill|forget|interrupt)", path)
+        m = re.fullmatch(r"/api/sessions/([^/]+)/(resume|kill|forget|interrupt|restart)", path)
         if m and grovy.valid_name(m.group(1)):
             return wrap(*getattr(store, m.group(2))(m.group(1)))
         m = re.fullmatch(r"/api/prompts/([^/]+)/cancel", path)

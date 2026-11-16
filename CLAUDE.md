@@ -74,7 +74,12 @@ Put scratch files in your scratchpad, not the repo.
 ## Verified Claude Code behaviour (2.1.325). Don't re-derive this
 
 - Hooks are injected per session with `claude --settings FILE`; hook arrays merge with the user's settings.
-  Hooks inherit the environment. **All hooks are held back until the workspace-trust dialog is accepted.**
+  **The `--settings` file is read once at start**: editing it doesn't affect a running Claude (verified with a
+  statusLine marker). Changes to it reach a session on its next start, i.e. Stop + Resume.
+- The status line (`statusLine` in the same file → `grovy statusline NAME`) gets JSON on stdin: `model.display_name`,
+  `effort.level`, `fast_mode`, `context_window.{used,remaining}_percentage` (null until the first message), `cost.*`,
+  `cwd`, `session_id`. grovy forwards a trimmed copy and prints the user's own status line, so the terminal is unchanged.
+- Hooks inherit the environment. **All hooks are held back until the workspace-trust dialog is accepted.**
   Trust (`~/.claude.json` `projects[path].hasTrustDialogAccepted`): a plain folder inherits it from any trusted
   ancestor, but a **git repo is its own boundary**: inside trusted `~/dev`, an untrusted repo still gets the dialog.
 - `PermissionRequest`: the terminal dialog is shown *while* the hook waits. Answering it in the terminal kills

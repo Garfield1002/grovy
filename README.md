@@ -221,9 +221,14 @@ emits no hook, so grovy records the interrupt itself and sets the state to `unkn
   Go ahead chips appear when Claude's last reply ends with a question.
 
 **Renaming.** Works while Claude runs: the tmux session is renamed live, and the registry keeps the old name as an
-*alias*. The running Claude keeps reporting its hook events under the old name until its next start (its hooks file is
-rewritten as well), so the daemon routes alias → current name. Old history records are shown under the new name. An
+*alias*. The running Claude keeps reporting its hook events under the old name until its next start (Claude reads its
+settings file only at start), so the daemon routes alias → current name. Old history records are shown under the new name. An
 alias can't be taken by another session until the renamed one is removed.
+
+**Status info.** Each session's status line runs `grovy statusline NAME`. It forwards model, effort, fast mode and
+context use to the daemon (shown under the session header and as "context N%" in the list), then prints your own
+configured status line, so the terminal looks the same. Sessions started before this existed report it after their next
+start.
 
 ## Failure modes
 

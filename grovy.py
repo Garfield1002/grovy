@@ -225,8 +225,52 @@ def hook_settings(name, file_name=None):
     hooks["PostToolUse"] = [{"matcher": "*", **entry(10)[0]}]
     path = os.path.join(state_dir(), "hooks", f"{file_name or name}.json")
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    atomic_write_json(path, {"hooks": hooks})
+    # The status line feeds the phone (model, effort, context) and then shows the user's own status line.
+    status = {"type": "command", "command": " ".join(_shquote(a) for a in grovy_cmd() + ["statusline", name])}
+    own = user_statusline()
+    if own and isinstance(own.get("padding"), int):
+        status["padding"] = own["padding"]
+    atomic_write_json(path, {"hooks": hooks, "statusLine": status})
     return path
+
+
+def user_statusline(cwd=None):
+    """The status line the user configured (local > project > user settings), unless it is ours."""
+    paths = []
+    if cwd:
+        paths += [os.path.join(cwd, ".claude", "settings.local.json"), os.path.join(cwd, ".claude", "settings.json")]
+    paths.append(os.path.join(claude_home(), "settings.json"))
+    for p in paths:
+        sl = read_json(p, {}).get("statusLine") if isinstance(read_json(p, {}), dict) else None
+        if isinstance(sl, dict) and sl.get("type") == "command" and isinstance(sl.get("command"), str) \
+                and " statusline " not in sl["command"]:
+            return sl
+    return None
+
+
+STATUS_FIELDS = ("model", "effort", "fast_mode", "context_window", "cwd", "session_id")
+
+
+def cmd_statusline(name):
+    """Called by Claude Code (often) with its status JSON on stdin. Forward a trimmed copy to the daemon,
+    then print the user's own status line for the same input. Never fails loudly."""
+    raw = sys.stdin.read()
+    try:
+        data = json.loads(raw)
+        if valid_name(name) and isinstance(data, dict):
+            msg = {"type": "statusline", "session": name, "data": {k: data.get(k) for k in STATUS_FIELDS}}
+            sock_request(msg, timeout=0.3, wait_reply=False)
+    except (ValueError, OSError):
+        data = {}
+    own = user_statusline((data or {}).get("cwd") if isinstance(data, dict) else None)
+    if own:
+        try:
+            r = subprocess.run(["/bin/sh", "-c", own["command"]], input=raw, capture_output=True, text=True,
+                               timeout=5, cwd=(data or {}).get("cwd") or None)
+            sys.stdout.write(r.stdout)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return 0
 
 
 def _shquote(s):
@@ -854,6 +898,9 @@ def main(argv=None):
     s.add_argument("--bind", default=env("BIND", "127.0.0.1"))
     s.add_argument("--port", type=int, default=env_int("PORT", 7333))
     s.set_defaults(fn=cmd_serve)
+    s = sub.add_parser("statusline", help="(called by Claude Code) forward status info, print the user's status line")
+    s.add_argument("name")
+    s.set_defaults(fn=lambda a: cmd_statusline(a.name))
     s = sub.add_parser("hook", help="(called by Claude Code) process one hook event from stdin")
     s.add_argument("name")
     s.set_defaults(fn=lambda a: cmd_hook(a.name))
