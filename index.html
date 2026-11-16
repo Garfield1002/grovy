@@ -7,6 +7,9 @@
 <meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#161615" media="(prefers-color-scheme: dark)">
 <title>grovy</title>
+<link rel="icon" type="image/png" href="/assets/icon-64.png">
+<link rel="apple-touch-icon" href="/assets/icon-180.png">
+<link rel="manifest" href="/manifest.webmanifest">
 <style>
 :root { --bg:#f7f6f3; --fg:#1d1d1b; --mut:#77756e; --faint:#a9a69e; --card:#fff; --line:#e4e2dc;
   --acc:#c96442; --user:#dfe8fb; --code:#efede7; --ok:#2f8a4c; --warn:#c27c0e; --bad:#c2402f; --busy:#3a6fd8; }
@@ -65,6 +68,13 @@ main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px
   border-radius:99px; padding:6px 12px; background:var(--card); }
 .sess .badge { font-size:12px; font-weight:700; color:#fff; background:var(--warn); border-radius:99px; padding:1px 8px; }
 .empty { text-align:center; color:var(--mut); padding:48px 10px; }
+/* the grove backdrop (from grove, the same author's tmux agent manager), only on the session list */
+#backdrop { display:none; position:fixed; right:-6vw; bottom:0; height:min(72vh, 640px); aspect-ratio:941/1672;
+  background:var(--faint); opacity:.22; pointer-events:none; z-index:0;
+  -webkit-mask:url(/assets/backdrop.svg) center bottom / contain no-repeat; mask:url(/assets/backdrop.svg) center bottom / contain no-repeat; }
+body.home #backdrop { display:block; }
+#main { position:relative; z-index:1; }
+#logo { display:none; border-radius:7px; flex:none; } body.home #logo { display:block; }
 
 /* conversation */
 .u { margin:18px 0 6px auto; max-width:86%; width:fit-content; background:var(--user); padding:9px 13px;
@@ -291,6 +301,7 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
 <body>
 <header>
   <button id="back" class="hidden" aria-label="Back">‹</button>
+  <img id="logo" src="/assets/icon-64.png" alt="" width="26" height="26">
   <h1 id="title">Sessions</h1>
   <button id="add" class="hbtn" aria-label="New session">＋</button>
   <span id="pill" class="pill hidden"><span id="pdot" class="dot"></span><span id="ptext"></span></span>
@@ -298,6 +309,7 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
   <button id="menu" class="hbtn hidden" aria-label="Menu">⋯</button>
   <button id="meta" class="hidden" aria-label="Context used: tap for details"><i><b></b></i></button>
 </header>
+<div id="backdrop" aria-hidden="true"></div>
 <main id="main"></main>
 <div id="typing" class="hidden">
   <span class="dots"><i></i><i></i><i></i></span>
@@ -735,6 +747,7 @@ function md(src) {
 // ---------------------------------------------------------------- session list
 let showAllPages = false;
 async function renderList() {
+  document.body.classList.add("home");
   const [{sessions}, {pages: all}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
   if (view !== null) return;
   pages = Object.fromEntries(all.map(p => [p.id, p]));
@@ -1011,6 +1024,7 @@ function cached(key, make) {
 
 let renderSeq = 0;
 async function renderDetail(name) {
+  document.body.classList.remove("home");
   const seq = ++renderSeq;   // overlapping refreshes: only the newest response may paint
   let d;
   try { d = await api("/api/sessions/" + encodeURIComponent(name)); }

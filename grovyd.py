@@ -1212,6 +1212,17 @@ def custom_css():
     return css
 
 
+ASSETS_DIR = os.path.join(grovy.HERE, "assets")
+# Public static files: an allowlist, never a path from the request.
+ASSETS = {"icon-64.png": "image/png", "icon-180.png": "image/png", "icon-192.png": "image/png",
+          "icon-512.png": "image/png", "backdrop.svg": "image/svg+xml"}
+MANIFEST = json.dumps({
+    "name": "grovy", "short_name": "grovy", "start_url": "/", "display": "standalone",
+    "background_color": "#161615", "theme_color": "#161615",
+    "icons": [{"src": "/assets/icon-192.png", "sizes": "192x192", "type": "image/png"},
+              {"src": "/assets/icon-512.png", "sizes": "512x512", "type": "image/png"}]}).encode()
+
+
 def load_index():
     with open(INDEX_PATH, "rb") as f:
         html = f.read()
@@ -1221,7 +1232,8 @@ def load_index():
     scripts = re.findall(rb"<script>(.*?)</script>", html, re.S)
     hashes = " ".join("'sha256-%s'" % base64.b64encode(hashlib.sha256(s).digest()).decode() for s in scripts)
     csp = (f"default-src 'none'; script-src {hashes}; style-src 'unsafe-inline'; connect-src 'self'; "
-           "img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+           "img-src 'self' data:; frame-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; "
+           "frame-ancestors 'none'")
     return html, csp
 
 
@@ -1272,9 +1284,11 @@ class Http(http.server.BaseHTTPRequestHandler):
         if not isinstance(body, bytes):
             body = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(code)
-        self.send_header("Content-Type", ctype + "; charset=utf-8")
+        textual = ctype.startswith("text/") or ctype.endswith(("json", "+xml", "javascript"))
+        self.send_header("Content-Type", ctype + ("; charset=utf-8" if textual else ""))
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        if not any(k == "Cache-Control" for k, _ in extra):
+            self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", frame)
         self.send_header("Referrer-Policy", "no-referrer")
@@ -1359,6 +1373,18 @@ class Http(http.server.BaseHTTPRequestHandler):
                 return self._send(303, b"", "text/plain", [
                     ("Location", "/"),
                     ("Set-Cookie", f"grovy_token={q}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")])
+        if path.startswith("/assets/") and path[8:] in ASSETS:   # icons and backdrop: nothing private
+            try:
+                with open(os.path.join(ASSETS_DIR, path[8:]), "rb") as f:
+                    data = f.read()
+            except OSError:
+                return self._err(404, "not found")
+            ctype = ASSETS[path[8:]]
+            return self._send(200, data, ctype, [("Cache-Control", "max-age=86400")] +
+                              ([("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")]
+                               if ctype == "image/svg+xml" else []))
+        if path == "/manifest.webmanifest":
+            return self._send(200, MANIFEST, "application/manifest+json")
         m = re.fullmatch(r"/s/([0-9a-f]{32})", path)
         if m:   # a shared page: its link is the credential, and it grants nothing but this page
             got = self.server.store.shared_page_html(m.group(1))

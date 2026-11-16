@@ -15,6 +15,7 @@ claude ──hooks──► grovy hook NAME ──unix socket──► grovyd �
 | `index.html` | the whole UI (vanilla JS, no innerHTML) |
 | `tests/test_grovy.py` | unit + tmux integration tests (`python3 -m unittest discover -s tests`) |
 | `examples/` | systemd unit, Telegram notify script, the generated hook config |
+| `assets/` | icon sizes and the home-screen backdrop, from [grove](https://github.com/Garfield1002/grove); served without the token from an allowlist (`ASSETS` in `grovyd.py`) |
 
 > **Renamed from `ccs`.** On first run, `~/.local/state/ccs` moves to `~/.local/state/grovy`, and a symlink is
 > left behind for sessions started before the rename. `CCS_*` environment variables are still accepted, and

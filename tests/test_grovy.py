@@ -1222,6 +1222,21 @@ class TestHttp(unittest.TestCase):
         self.assertIn(b"GROVY_HOSTS=box.&lt;b&gt;tail&lt;/b&gt;.ts.net", body)
         self.assertNotIn(b"<b>tail", body)
 
+    def test_public_assets_are_an_allowlist(self):
+        with mock.patch.object(self.httpd, "token", "secret"):
+            code, body, h = self.req("/assets/icon-192.png")                 # no token needed: nothing private
+            self.assertEqual((code, h["Content-Type"]), (200, "image/png"))
+            self.assertTrue(body.startswith(b"\x89PNG"))
+            self.assertEqual(h["Cache-Control"], "max-age=86400")
+            code, _, h = self.req("/assets/backdrop.svg")
+            self.assertEqual(code, 200)
+            self.assertIn("default-src 'none'", h["Content-Security-Policy"])  # an SVG opened directly can't run script
+            for bad in ("/assets/README.md", "/assets/../grovy.py", "/assets/%2e%2e/token", "/assets/"):
+                self.assertIn(self.req(bad)[0], (401, 404), bad)
+            self.assertEqual(json.loads(self.req("/manifest.webmanifest")[1])["name"], "grovy")
+            self.assertEqual(self.req("/api/sessions")[0], 401)
+        self.assertIn("manifest-src 'self'", self.req("/")[2]["Content-Security-Policy"])
+
     def test_slowloris_deadline_and_connection_cap(self):
         class Small(grovyd.HttpServer):
             MAX_CONNECTIONS = 3
