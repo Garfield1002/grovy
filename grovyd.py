@@ -78,6 +78,10 @@ def norm(text):
 
 PASTE_TAG = re.compile(r"</?pasted_content[^>]*>")
 MACHINE_PROMPT = re.compile(r"\s*<(agent-message|task-notification)\b")
+# The background task a machine prompt reports on: a subagent's report, or a task's notification (it has finished).
+MACHINE_TASK = re.compile(r'\s*<agent-message from="([\w-]{1,64})"|\s*<task-notification>\s*<task-id>([\w-]{1,64})</task-id>')
+TASK_EVENTS = ("SubagentStart", "SubagentStop")
+MAX_TASKS = 50
 
 
 def squash(text):
@@ -316,84 +320,171 @@ class Store:
             if len(self.seen) > 1000:
                 self.seen = {k: v for k, v in self.seen.items() if t - v < DUP_WINDOW}
             s = self._session(name)
-            if payload.get("cwd"):
-                s["cwd"] = str(payload["cwd"])
-            if ev != "PostToolUse":
-                data = {k: clip(payload[k]) for k in KEEP.get(ev, ()) if k in payload}
-                if ev == "Stop":
-                    data["background_tasks"] = _count(payload.get("background_tasks"))
-                    turn = s.pop("turn", None)
-                    if turn:   # "Worked for …": how long the turn took and what it ran
-                        data["worked"] = round(t - turn["start"], 1)
-                        data["tools"], data["tool_count"] = turn["tools"], turn["count"]
-                if ev == "UserPromptSubmit":
-                    p = self._confirm_prompt(name, payload.get("prompt", ""))
-                    if p:
-                        data["sent"] = p["created"]  # when the user sent it; the event's ts is when Claude read it
-                self._record(name, ev, data, sid)
-            if ev == "SessionStart":
-                s["claude_session_id"] = sid
-                s["last_error"] = None
-                src = payload.get("source")
-                ours = False
-                for p in self.prompts:  # /clear and /compact emit no UserPromptSubmit; this is their receipt
-                    if p["session"] == name and p["status"] == "injected" and p.get("command") == src \
-                            and now() - p["updated"] < COMMAND_TIMEOUT:  # a stale one must not turn auto-compaction into "idle"
-                        p["status"], p["updated"], ours = "submitted", now(), True
-                        self._save_prompts()
-                if src == "compact" and not ours and s["state"] == "working":
-                    s["last_event"] = now()  # automatic compaction mid-turn: Claude is still working
-                else:
-                    self._set(name, "idle", f"session {src or 'start'}")
-            elif ev == "UserPromptSubmit":
-                text = norm(payload.get("prompt", ""))
-                m = MACHINE_PROMPT.match(text)  # injected by Claude Code itself, not typed by the user
-                self._set(name, "working", ("subagent report" if m.group(1) == "agent-message" else "task notification")
-                          if m else "prompt: " + text[:120])
-                s["turn"] = {"start": t, "tools": [], "count": 0}
-            elif ev == "PostToolUse":
-                turn = s.get("turn")
-                if turn is not None:
-                    turn["count"] += 1
-                    if len(turn["tools"]) < TURN_TOOLS:
-                        turn["tools"].append(tool_summary(payload.get("tool_name"), payload.get("tool_input")))
-                if s["state"] != "exited" and not self._pending(name):
-                    self._set(name, "working", f"ran {payload.get('tool_name', 'tool')}")
-            elif ev == "Stop":
-                s["background"] = _count(payload.get("background_tasks"))
-                msg = norm(payload.get("last_assistant_message") or "")
-                # With background tasks Claude still accepts input, so "idle" stays truthful; the UI shows the count.
-                self._set(name, "idle", msg[:200] or "turn finished")
-                self._notify(name, "done", "finished: " + (msg[:80] or "turn complete"))
-            elif ev == "StopFailure":
-                err = str(payload.get("error") or "error")
-                s["last_error"] = err
-                self._set(name, "error", f"failed: {err}")
-                self._notify(name, "error", f"error: {err}")
-            elif ev == "Notification":
-                nt = payload.get("notification_type")
-                if nt == "permission_prompt" and not self._pending(name):
-                    # A terminal dialog we have no hook for (or a hook that gave up): only the terminal can answer.
-                    self._set(name, "needs_input", "waiting in terminal: " + str(payload.get("message", ""))[:120])
-                    self._notify(name, "input", "needs attention in terminal")
-                elif nt in ("elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"):
-                    self._set(name, "needs_input", str(payload.get("message", ""))[:160])
-                    self._notify(name, "input", "needs input in terminal")
-                elif nt == "idle_prompt" and s["state"] not in ("needs_input",):
-                    self._set(name, "idle")
-                else:
-                    s["last_event"] = now()
-            elif ev == "SessionEnd":
-                if payload.get("reason") in ("clear", "resume"):
-                    s["last_event"] = now()  # same process continues with a new conversation (SessionStart)
-                else:
-                    self._expire_perms(name, "Claude session ended")
-                    self._set(name, "exited", f"conversation ended ({payload.get('reason', '')})")
-                    self._fail_queued(name, "Claude exited before it was sent")
-            self._save_state()
+            if ev in TASK_EVENTS or (ev == "PostToolUse" and payload.get("agent_id")):
+                # Fired inside a subagent, or about one: it updates the list of background work and nothing else.
+                # A subagent's tool calls aren't the session's state (they can even arrive after the parent's Stop).
+                self._track_tasks(s, ev, payload, t)
+                if ev != "PostToolUse":   # a subagent's every tool call isn't worth a state write
+                    self._save_state()
+            else:
+                self._apply(name, s, ev, payload, sid, t)
+                self._save_state()
         self.publish(name)
         self.try_deliver(name)
         return True
+
+    def _apply(self, name, s, ev, payload, sid, t):
+        """One hook event of the session itself (not of a subagent), under the lock."""
+        if payload.get("cwd"):
+            s["cwd"] = str(payload["cwd"])
+        if ev != "PostToolUse":
+            data = {k: clip(payload[k]) for k in KEEP.get(ev, ()) if k in payload}
+            if ev == "Stop":
+                data["background_tasks"] = _count(payload.get("background_tasks"))
+                names = [x["description"] or x["type"] for x in self._task_snapshot(s, payload.get("background_tasks"), t)]
+                if names:
+                    data["background_names"] = names[:10]
+                turn = s.pop("turn", None)
+                if turn:   # "Worked for …": how long the turn took and what it ran
+                    data["worked"] = round(t - turn["start"], 1)
+                    data["tools"], data["tool_count"] = turn["tools"], turn["count"]
+            if ev == "UserPromptSubmit":
+                p = self._confirm_prompt(name, payload.get("prompt", ""))
+                if p:
+                    data["sent"] = p["created"]  # when the user sent it; the event's ts is when Claude read it
+            self._record(name, ev, data, sid)
+        if ev == "SessionStart":
+            s["claude_session_id"] = sid
+            s["last_error"] = None
+            src = payload.get("source")
+            ours = False
+            for p in self.prompts:  # /clear and /compact emit no UserPromptSubmit; this is their receipt
+                if p["session"] == name and p["status"] == "injected" and p.get("command") == src \
+                        and now() - p["updated"] < COMMAND_TIMEOUT:  # a stale one must not turn auto-compaction into "idle"
+                    p["status"], p["updated"], ours = "submitted", now(), True
+                    self._save_prompts()
+            if src in ("startup", "resume"):
+                self._task_snapshot(s, [], t)   # a new Claude process: whatever the old one ran is gone
+            if src == "compact" and not ours and s["state"] == "working":
+                s["last_event"] = now()  # automatic compaction mid-turn: Claude is still working
+            else:
+                self._set(name, "idle", f"session {src or 'start'}")
+        elif ev == "UserPromptSubmit":
+            text = norm(payload.get("prompt", ""))
+            m = MACHINE_PROMPT.match(text)  # injected by Claude Code itself, not typed by the user
+            self._set(name, "working", ("subagent report" if m.group(1) == "agent-message" else "task notification")
+                      if m else "prompt: " + text[:120])
+            done = MACHINE_TASK.match(text)
+            if done:   # that task has finished (Claude Code's next list will agree)
+                self._drop_task(s, done.group(1) or done.group(2))
+            s["turn"] = {"start": t, "tools": [], "count": 0}
+        elif ev == "PostToolUse":
+            self._task_launched(s, payload, t)
+            turn = s.get("turn")
+            if turn is not None:
+                turn["count"] += 1
+                if len(turn["tools"]) < TURN_TOOLS:
+                    turn["tools"].append(tool_summary(payload.get("tool_name"), payload.get("tool_input")))
+            if s["state"] != "exited" and not self._pending(name):
+                self._set(name, "working", f"ran {payload.get('tool_name', 'tool')}")
+        elif ev == "Stop":
+            msg = norm(payload.get("last_assistant_message") or "")
+            # With background tasks Claude still accepts input, so "idle" stays truthful; the UI shows the tasks.
+            self._set(name, "idle", msg[:200] or "turn finished")
+            bg = f" ({s['background']} still running)" if s.get("background") else ""
+            self._notify(name, "done", "finished: " + (msg[:80] or "turn complete") + bg)
+        elif ev == "StopFailure":
+            err = str(payload.get("error") or "error")
+            s["last_error"] = err
+            self._set(name, "error", f"failed: {err}")
+            self._notify(name, "error", f"error: {err}")
+        elif ev == "Notification":
+            nt = payload.get("notification_type")
+            if nt == "permission_prompt" and not self._pending(name):
+                # A terminal dialog we have no hook for (or a hook that gave up): only the terminal can answer.
+                self._set(name, "needs_input", "waiting in terminal: " + str(payload.get("message", ""))[:120])
+                self._notify(name, "input", "needs attention in terminal")
+            elif nt in ("elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"):
+                self._set(name, "needs_input", str(payload.get("message", ""))[:160])
+                self._notify(name, "input", "needs input in terminal")
+            elif nt == "idle_prompt" and s["state"] not in ("needs_input",):
+                self._set(name, "idle")
+            else:
+                s["last_event"] = now()
+        elif ev == "SessionEnd":
+            if payload.get("reason") in ("clear", "resume"):
+                s["last_event"] = now()  # same process continues with a new conversation (SessionStart)
+            else:
+                self._expire_perms(name, "Claude session ended")
+                self._set(name, "exited", f"conversation ended ({payload.get('reason', '')})")
+                self._task_snapshot(s, [], t)
+                self._fail_queued(name, "Claude exited before it was sent")
+
+
+    # ------------------------------------------------------------ background work
+    # s["tasks"] (id -> task) mirrors Claude Code's own list of background shells and subagents. Every Stop and
+    # SubagentStop carries that whole list and replaces ours; between them, launches, SubagentStart and finish
+    # notices keep it current. A SubagentStop alone doesn't end a subagent: it also fires when one pauses for its
+    # own background work (verified), so only Claude Code's list, or the subagent's report, says it is done.
+    def _task_snapshot(self, s, tasks, t):
+        """Replace the list with Claude Code's (Stop, SubagentStop); keeps when we first saw each and what it did.
+        Returns the new list. Anything but a list (an older Claude Code sent a count) clears it, keeping the count."""
+        old, new = s.get("tasks") or {}, {}
+        for i, x in enumerate(tasks if isinstance(tasks, list) else []):
+            x = x if isinstance(x, dict) else {}   # anything listed counts, even malformed: never hide running work
+            tid = str(x["id"])[:64] if isinstance(x.get("id"), (str, int)) and str(x["id"]) else f"#{i}"
+            if len(new) < MAX_TASKS:
+                new[tid] = {**old.get(tid, {"since": t, "last": None, "tools": 0}), "id": tid,
+                            "type": str(x.get("type") or "task")[:20], "status": str(x.get("status") or "")[:20],
+                            "description": " ".join(str(x.get("description") or "").split())[:120],
+                            "agent_type": str(x.get("agent_type") or "")[:60] or None,
+                            "command": " ".join(str(x.get("command") or "").split())[:200] or None}
+        s["tasks"] = new
+        s["background"] = _count(tasks)
+        return list(new.values())
+
+    def _add_task(self, s, tid, t, **fields):
+        tasks = s.setdefault("tasks", {})
+        if tid not in tasks and len(tasks) >= MAX_TASKS:
+            return
+        tasks[tid] = {**tasks.get(tid, {"id": tid, "since": t, "last": None, "tools": 0, "status": "running",
+                                        "command": None, "agent_type": None, "description": ""}),
+                      **{k: v for k, v in fields.items() if v}}
+        s["background"] = len(tasks)
+
+    def _drop_task(self, s, tid):
+        if (s.get("tasks") or {}).pop(tid, None) is not None:
+            s["background"] = len(s["tasks"])
+
+    def _task_launched(self, s, payload, t):
+        """A PostToolUse that started background work: a shell (backgroundTaskId) or an async subagent."""
+        resp, inp = payload.get("tool_response"), payload.get("tool_input")
+        resp, inp = resp if isinstance(resp, dict) else {}, inp if isinstance(inp, dict) else {}
+        bid = resp.get("backgroundTaskId")
+        if isinstance(bid, str) and bid:
+            self._add_task(s, bid[:64], t, type="shell",
+                           description=" ".join(str(inp.get("description") or "").split())[:120],
+                           command=" ".join(str(inp.get("command") or "").split())[:200] or None)
+        aid = resp.get("agentId")
+        if isinstance(aid, str) and aid and resp.get("isAsync") is True:
+            self._add_task(s, aid[:64], t, type="subagent",
+                           description=" ".join(str(resp.get("description") or inp.get("description") or "").split())[:120],
+                           agent_type=str(inp.get("subagent_type") or "")[:60])
+
+    def _track_tasks(self, s, ev, payload, t):
+        aid = payload.get("agent_id")
+        aid = aid[:64] if isinstance(aid, str) and aid else None
+        if ev == "SubagentStart" and aid and payload.get("agent_type"):   # (unnamed internal agents are skipped)
+            self._add_task(s, aid, t, type="subagent", status="running", agent_type=str(payload["agent_type"])[:60])
+        elif ev == "SubagentStop" and "background_tasks" in payload:
+            self._task_snapshot(s, payload.get("background_tasks"), t)
+        elif ev == "PostToolUse" and aid:
+            task = (s.get("tasks") or {}).get(aid)
+            if task is not None:   # never re-adds one Claude Code's list has dropped (a late PostToolUse)
+                task["last"] = tool_summary(payload.get("tool_name"), payload.get("tool_input"))
+                task["tools"] = task.get("tools", 0) + 1
+                task["active"] = t
+            self._task_launched(s, payload, t)   # a subagent's own background shell
 
     # ------------------------------------------------------------ permissions
     def _pending(self, name):
@@ -1222,6 +1313,9 @@ class Store:
         s["queued_prompts"] = sum(p["status"] in ("queued", "injected") for p in mine)
         s["accepts_input"] = s["state"] in INPUT_STATES and not s["pending_permissions"]
         s["can_force"] = self._forceable(s) and not s["pending_permissions"]
+        # background work, oldest first (none once Claude has exited, even if its end went unreported)
+        s["tasks"] = [] if s["state"] == "exited" else sorted(
+            (dict(x) for x in (s.get("tasks") or {}).values()), key=lambda x: x.get("since") or 0)
         return s
 
     def list_sessions(self):

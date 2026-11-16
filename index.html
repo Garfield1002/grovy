@@ -239,6 +239,20 @@ mark { background:color-mix(in srgb, var(--warn) 35%, transparent); color:inheri
   background:var(--acc); border:2px solid var(--card); }
 #composer .inner { max-width:760px; margin:0 auto; }
 #hint { font-size:12.5px; color:var(--mut); margin:0 4px 6px; }
+/* background work (shells, subagents) still running after Claude's turn ended */
+#bg { margin:0 0 6px; font-size:13px; color:var(--mut); }
+#bg:empty { display:none; }
+#bg > button { display:flex; align-items:center; gap:8px; width:100%; border:0; background:none; color:inherit; font:inherit;
+  text-align:left; padding:4px; min-height:32px; }
+#bg > button span:nth-child(2) { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#bg > button b { color:var(--fg); font-weight:650; }
+.spin { width:9px; height:9px; flex:none; border-radius:50%; background:var(--busy); animation:breathe 2s ease-in-out infinite; }
+#bg ul { list-style:none; margin:2px 0 4px; padding:0 4px; max-height:38vh; overflow-y:auto; }
+#bg li { padding:6px 0; border-top:1px solid var(--line); }
+#bg li .t { display:flex; gap:8px; align-items:baseline; } #bg li .t b { color:var(--fg); font-weight:650; flex:1; min-width:0;
+  overflow-wrap:anywhere; } #bg .el { font-variant-numeric:tabular-nums; flex:none; }
+#bg li .d { font:12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap:anywhere; margin-top:2px; }
+.dot.idle.bg { box-shadow:0 0 0 2.5px color-mix(in srgb, var(--busy) 55%, transparent); }
 #hint:empty { display:none; }
 .cr { display:flex; gap:8px; align-items:flex-end; }
 textarea { flex:1; font:inherit; font-size:16px; padding:11px 14px; border-radius:22px; border:1px solid var(--line);
@@ -370,6 +384,7 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
 </div>
 <div id="composer" class="hidden"><button id="tobottom" class="hidden" aria-label="Scroll to the latest message"><svg viewBox="0 0 24 24"
   fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7l6 6 6-6M6 13l6 6 6-6"/></svg></button><div class="inner">
+  <div id="bg"></div>
   <div id="hint"></div>
   <div id="picker"></div>
   <div id="quick"></div>
@@ -911,13 +926,13 @@ async function renderList() {
   main.replaceChildren(...(sessions.length ? sessions.map(s => {
     const stalled = s.state === "working" && serverNow() - s.last_event > STALL;
     return h("button", {class: "sess", onclick: () => go("#/s/" + s.name)},
-      h("span", {class: "dot " + s.state + (stalled ? " stalled" : "")}),
+      h("span", {class: "dot " + s.state + (stalled ? " stalled" : "") + (s.background && s.state === "idle" ? " bg" : "")}),
       h("div", {class: "body"},
         h("div", {class: "top"}, h("span", {class: "name"}, s.name),
           s.pending_permissions ? h("span", {class: "badge"}, s.pending_permissions + " waiting") : null,
           h("span", {class: "when"}, ago(s.last_event))),
         h("div", {class: "sub"}, base(s.cwd), " · ", LABEL[s.state] || s.state,
-          s.queued_prompts ? ` · ${s.queued_prompts} queued` : "", s.background ? ` · ${s.background} bg` : "",
+          s.queued_prompts ? ` · ${s.queued_prompts} queued` : "", s.background && s.state !== "exited" ? ` · ${s.background} running` : "",
           s.meta && s.meta.context != null && s.state !== "exited" ? ` · context ${s.meta.context}%` : ""),
         s.activity ? h("div", {class: "prev"}, s.activity) : null),
       s.state === "exited" ? h("span", {class: "rm", role: "button", "aria-label": "Remove " + s.name,
@@ -996,7 +1011,8 @@ function eventNode(e, isLatestReply) {
         btn.onclick = () => { el.classList.toggle("collapsed"); btn.textContent = el.classList.contains("collapsed") ? "Show more" : "Show less"; };
         el.append(btn);
       }
-      if (d.background_tasks) el.append(sysLine(d.background_tasks + " background task(s) still running"));
+      if (d.background_tasks) el.append(sysLine(d.background_tasks + " still running in background" +
+        (Array.isArray(d.background_names) ? ": " + d.background_names.join(", ") : "")));
       const copy = h("button", {onclick: () => copyText(text, copy)}, "Copy");
       el.append(h("div", {class: "acts"}, ...(wk ? [wk.label] : []), h("span", {class: "ar"}, copy,
         h("button", {onclick: () => quoteInto(el.querySelector(".md").innerText, "Claude")}, "Quote"))), ...(wk && wk.list ? [wk.list] : []));
@@ -1220,9 +1236,11 @@ async function renderDetail(name) {
   if (typeof d.now === "number") skew = d.now - Date.now() / 1000;
   const nearBottom = innerHeight + scrollY >= document.documentElement.scrollHeight - 160;
   const stalled = s.state === "working" && serverNow() - s.last_event > STALL;
-  $("pdot").className = "dot " + s.state + (stalled ? " stalled" : "");
+  const bgn = s.state !== "exited" ? s.background || 0 : 0;
+  $("pdot").className = "dot " + s.state + (stalled ? " stalled" : "") + (bgn && s.state === "idle" ? " bg" : "");
   renderMeta(s.meta);
-  $("ptext").textContent = LABEL[s.state] || s.state;
+  $("ptext").textContent = (LABEL[s.state] || s.state) + (bgn ? ` · ${bgn} running` : "");
+  renderTasks(s, bgn);
 
   pages = d.pages || {};
   if (viewing && !pages[viewing.id]) closeViewer();                       // deleted while open
@@ -1333,7 +1351,29 @@ $("meta").onclick = () => {
     h("div", {class: "note", style: "margin-top:10px;color:var(--mut);font-size:13px"},
       "Near 100% Claude compacts the conversation to free up context."));
 };
+// Background work: Claude Code's own list (see Store._task_snapshot). Collapsed to one line; tap for each task.
+let tasksOpen = false, taskClocks = [];
+function renderTasks(s, n) {
+  const tasks = s.tasks || [];
+  taskClocks = [];
+  if (!n) { $("bg").replaceChildren(); return; }
+  const name = t => t.description || (t.type === "subagent" ? t.agent_type || "subagent" : t.command || "task");
+  const el = since => { const x = h("span", {class: "el"}); if (since) { taskClocks.push([x, since]); x.textContent = dur(serverNow() - since); } return x; };
+  const head = h("button", {"aria-expanded": String(tasksOpen), onclick: () => { tasksOpen = !tasksOpen; renderTasks(s, n); }},
+    h("span", {class: "spin"}),
+    h("span", {}, h("b", {}, `${n} running in background`), tasks.length ? " · " + tasks.map(name).join(", ") : ""),
+    h("span", {}, tasksOpen ? "⌃" : "⌄"));
+  const rows = tasksOpen ? h("ul", {}, ...tasks.map(t => h("li", {},
+    h("div", {class: "t"}, t.type === "subagent" ? "🤖" : "⌘", h("b", {}, name(t)), el(t.since)),
+    h("div", {class: "d"}, ...[
+      t.type === "subagent" ? (t.agent_type || "subagent") + (t.tools ? ` · ${t.tools} tool${t.tools > 1 ? "s" : ""}` : "")
+        : t.command && t.command !== t.description ? t.command : "shell",
+      t.last ? h("div", {}, "last: ", h("b", {}, String(t.last.tool)), t.last.arg ? " " + t.last.arg : "",
+        t.active ? " · " + (ago(t.active) === "now" ? "just now" : ago(t.active) + " ago") : "") : null].filter(Boolean))))) : null;
+  $("bg").replaceChildren(head, ...(rows ? [rows] : []));
+}
 function tick() {
+  for (const [x, since] of taskClocks) x.textContent = dur(serverNow() - since);
   if (turnStart && !$("typing").classList.contains("hidden")) {
     const idle = cur ? serverNow() - cur.last_event : 0;
     $("elapsed").textContent = idle > STALL ? "quiet for " + mmss(idle) + " (a long command may still be running)" : mmss(serverNow() - turnStart);

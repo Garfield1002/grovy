@@ -69,7 +69,7 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 | `GROVY_DEBUG` | unset | log HTTP requests |
 | `GROVY_WIDGETS` | `1` | `0` = don't tell Claude sessions about widgets and pages (applies to sessions started afterwards) |
 | `GROVY_OOM_AVOID` | `1` | `0` = don't move sessions out of systemd-oomd's way (see "Out of memory") |
-| `GROVY_SUBAGENT_HOOKS` | `0` | `1` = also forward the tool events of subagents (normally only their permission requests and notifications) |
+| `GROVY_SUBAGENT_HOOKS` | `0` | `1` = forward every hook of subagents (normally only permission requests, notifications, start/stop and tool calls, which feed the background list) |
 
 ## Notifications (Telegram or anything else)
 
@@ -91,11 +91,13 @@ in a background thread with a 15s timeout, so a failing bot never blocks hooks o
   The hook command line is `grovy hook api`, so events are attributed from argv, not from cwd.
 
   **Subagents** run under the same settings, so their hooks call `grovy hook api` too, with the parent's
-  `session_id` plus `agent_id`/`agent_type` (verified, Claude Code 2.1.325). The adapter drops those events except
-  `PermissionRequest` and `Notification`, which wait on you: a subagent's tool calls aren't the session's state, and a
+  `session_id` plus `agent_id`/`agent_type` (verified, Claude Code 2.1.325). The adapter forwards only
+  `PermissionRequest` and `Notification` (they wait on you), `SubagentStart`/`SubagentStop`, and the subagent's
+  `PostToolUse` (sent without waiting, never steered, its `tool_response` cut to `backgroundTaskId`). The daemon
+  routes those last three to the background list only (see *Background work*), never to the session's state: a
   background subagent's `PostToolUse` can arrive after the parent's `Stop`, which would show an idle session as
-  working. `SubagentStart` isn't registered, so subagents never get grovy's guide (a forked subagent inherits its
-  parent's context, guide included). `GROVY_SUBAGENT_HOOKS=1` forwards everything.
+  working. Nothing is printed for `SubagentStart`, so subagents never get grovy's guide (a forked subagent inherits
+  its parent's context, guide included). `GROVY_SUBAGENT_HOOKS=1` forwards everything.
   Several sessions can share a project. A `claude` started inside a session (e.g. by a tool) does not
   inherit `--settings`, so it can't pose as the session.
 
@@ -108,7 +110,7 @@ in a background thread with a 15s timeout, so a failing bot never blocks hooks o
 | `UserPromptSubmit`, `PostToolUse` | `working` |
 | `PermissionRequest` | `needs_input` (with a pending request) |
 | `Notification` `permission_prompt`/elicitation without our pending request | `needs_input` (terminal-only dialog) |
-| `Stop` | `idle`; `background_tasks` count shown (Claude accepts input meanwhile) |
+| `Stop` | `idle`, even with background work running (Claude accepts input meanwhile); the work is listed separately |
 | `StopFailure` | `error` (input allowed) |
 | `SessionEnd` or tmux session gone | `exited` |
 | anything we can't vouch for | `unknown` |
@@ -161,7 +163,22 @@ Longer prompts take the literal bracketed-paste path, with control characters st
 * Scroll to latest: a round ⌄⌄ button above the composer shows when you're more than 300px from the bottom; it gets a dot when a render brought new events while you were scrolled up (auto-scroll only follows when you were already near the bottom).
 * Selection: the page is `user-select:none` except message text, code, tool input and widgets, so long-pressing a card or button doesn't start a selection. Selecting conversation text shows a "Quote selection" button docked above the message box; it appends the text as `> ` lines to the draft, and user bubbles render `>` lines as a quote block. Copy is left to the system's menu. A page can't hide or extend that menu on phones (cancelling `contextmenu` on a touch long-press doesn't stop Chrome on Android showing it, tested), so a floating bar of ours only stacked a second menu next to it. Each Claude reply also has Copy (its markdown) and Quote (its rendered text, first 1000 chars). Quotes start with a `> Claude:` or `> You:` line; the bubble shows that as a label, and tapping the quote scrolls to the loaded message containing its first 60 characters (otherwise it says to load earlier messages).
 * Attachments: the paperclip inside the empty text box (files come before the message; once anything is typed it becomes a ✕ that clears the box) uploads each picked file at once (`POST /api/sessions/NAME/attachments`, raw `application/octet-stream` body, which still forces a CORS preflight; name in `X-Filename`; ≤ `MAX_UPLOAD` 100 MB, streamed to disk). Files go to `grovy.attachments_dir()` = `$TMPDIR/grovy-UID[-hash of a non-default state dir]/attachments/SESSION/DATE-TIME-RAND-NAME` (name sanitised, mode 600, `O_EXCL|O_NOFOLLOW`). The `grovy-UID` folder lives in shared `/tmp`, so `private_dir` refuses to write unless it is a real directory owned by us with mode 700 (no planted symlink or open dir). Each upload prunes files older than 7 days. The message names them as `Attached: /path` lines (bubbles render those as chips); `/` and `!` commands can't carry attachments. Sessions get `permissions.additionalDirectories: [attachments_dir()]` in their `--settings` (verified: Read there is allowed without asking, denied in `-p` without it), so sessions started before this need ⋯ → Update session or will ask permission. Uploaded-but-unsent files are kept per session in the browser with the draft. Pictures (png/jpg/gif/webp) show as thumbnails via `GET /api/attachments/SESSION/FILE` (logged-in only; the name must match what `save_attachment` writes; opened `O_NOFOLLOW`, regular files only, under the same `private_dir` check; `Content-Security-Policy: default-src 'none'`, nosniff). Other files, and files already pruned, show as chips.
-* "Worked for …" (in the reply's action row, before Copy and Quote; tap for the list): `UserPromptSubmit` starts `s["turn"]`; each main-agent `PostToolUse` appends `tool_summary` (tool name + its most telling argument, ≤120 chars; first `TURN_TOOLS`=100 kept, all counted); `Stop` records `worked`, `tools`, `tool_count` and ends the turn. In memory only: a daemon restart mid-turn loses that turn's list. Subagents' tools aren't listed (their hooks are dropped by the adapter).
+* Background work (shells started with `run_in_background`, async subagents): `s["tasks"]` mirrors Claude Code's own
+  list. Every `Stop` and `SubagentStop` carries the whole list as `background_tasks` (`[{id, type: shell|subagent,
+  status, description, command | agent_type}]`, verified 2.1.325) and replaces ours, keeping when we first saw each
+  task and what it last did. Between those, a main `PostToolUse` whose `tool_response` has `backgroundTaskId` (a
+  shell) or `isAsync`+`agentId` (a subagent) adds it at once, `SubagentStart` adds/refreshes a subagent (unnamed
+  internal agents, `agent_type` "", are skipped), a subagent's `PostToolUse` sets its `last` tool and count (never
+  re-adding one the list dropped), and a `<task-notification><task-id>X` or `<agent-message from="X">` prompt
+  removes X. **A `SubagentStop` doesn't mean the subagent is done**: it also fires when the subagent ends a turn to
+  wait on its own background shell, and the same id later fires `SubagentStart` again (verified). Only the list or
+  the report ends it. Malformed list entries still count (never hide running work); at most `MAX_TASKS`=50 are
+  detailed. The list is cleared by `SessionStart` startup/resume and `SessionEnd`, and not shown once exited. The UI
+  shows "idle · N running" (pill and session list, with a ring on the dot) and a collapsed strip above the message
+  box; tapping it lists each task with how long it has run, its command or agent type, and the subagent's last tool.
+  `Stop` events also log `background_names`. Limitation: a background shell started by a *paused* subagent can't be
+  attributed to it (the list has no owner field).
+* "Worked for …" (in the reply's action row, before Copy and Quote; tap for the list): `UserPromptSubmit` starts `s["turn"]`; each main-agent `PostToolUse` appends `tool_summary` (tool name + its most telling argument, ≤120 chars; first `TURN_TOOLS`=100 kept, all counted); `Stop` records `worked`, `tools`, `tool_count` and ends the turn. In memory only: a daemon restart mid-turn loses that turn's list. Subagents' tools aren't listed there (they show in the background list).
   Claude Code has it; for `/compact` the UI says "compacting…"); blue ✓✓ on the chat bubble (`UserPromptSubmit`
   or `Steered`: Claude read it). `typed` is only set after a send that wasn't aborted. Bubbles show the time the user sent the message: `UserPromptSubmit` and `Steered` events from a grovy prompt carry `sent` (its `created`), since the event's own `ts` is when Claude read it; prompts typed in the terminal fall back to `ts`.
 * Typing re-checks between chunks and before Enter. If Claude starts something on its own meanwhile (a background

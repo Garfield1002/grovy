@@ -154,23 +154,32 @@ class TestHookAdapter(unittest.TestCase):
 
     def test_subagent_events_stay_out_of_the_session(self):
         """Hooks fired inside a subagent carry agent_id (verified, Claude Code 2.1.325). A background subagent's
-        PostToolUse arrived after the parent's Stop and showed an idle session as working."""
+        PostToolUse arrived after the parent's Stop and showed an idle session as working: its tool calls now
+        only feed the background list (never waited on, never steered) and the rest stays out."""
         sent = []
         def fake(msg, timeout=2.0, wait_reply=True):
-            sent.append(msg["event"]["hook_event_name"])
-            return {"decision": "allow"} if wait_reply else None
+            sent.append((msg["event"]["hook_event_name"], wait_reply, msg["event"].get("tool_response")))
+            return {"decision": "allow", "steer": "hijack"} if wait_reply else None
         sub = {"agent_id": "ab4c", "agent_type": "general-purpose"}
         with mock.patch.object(grovy, "sock_request", fake), mock.patch("sys.stderr", io.StringIO()):
-            for name in ("PostToolUse", "UserPromptSubmit", "Stop", "PermissionRequest", "Notification"):
-                with mock.patch("sys.stdin", io.StringIO(json.dumps(ev(name, **sub)))), redirect_stdout(io.StringIO()):
+            for name in ("PostToolUse", "UserPromptSubmit", "Stop", "PermissionRequest", "Notification",
+                         "SubagentStart", "SubagentStop"):
+                out = io.StringIO()
+                payload = ev(name, **sub, tool_response={"stdout": "x" * 9999, "backgroundTaskId": "b1"})
+                with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), redirect_stdout(out):
                     grovy.cmd_hook("x")
-            self.assertEqual(sent, ["PermissionRequest", "Notification"])   # what waits on the user still shows
+                if name == "PostToolUse":
+                    self.assertEqual(out.getvalue(), "")                    # a subagent is never steered
+            self.assertEqual([x[0] for x in sent], ["PostToolUse", "PermissionRequest", "Notification",
+                                                    "SubagentStart", "SubagentStop"])
+            self.assertEqual(sent[0], ("PostToolUse", False, {"backgroundTaskId": "b1"}))   # output not shipped
             with mock.patch("sys.stdin", io.StringIO(json.dumps(ev("PostToolUse")))):
-                grovy.cmd_hook("x")                                        # the main agent's own tool calls do
+                grovy.cmd_hook("x")                                        # the main agent's own tool calls
+            self.assertEqual(sent[-1][:2], ("PostToolUse", True))           # wait for steering
             with mock.patch.dict(os.environ, {"GROVY_SUBAGENT_HOOKS": "1"}), \
-                    mock.patch("sys.stdin", io.StringIO(json.dumps(ev("PostToolUse", **sub)))):
+                    mock.patch("sys.stdin", io.StringIO(json.dumps(ev("Stop", **sub)))):
                 grovy.cmd_hook("x")
-        self.assertEqual(sent[2:], ["PostToolUse", "PostToolUse"])
+        self.assertEqual(sent[-1][0], "Stop")
 
     def test_auto_mode_hints_in_session_settings(self):
         with open(grovy.hook_settings("am")) as f:
@@ -1182,6 +1191,74 @@ class TestSteering(StoreCase):
                     mock.patch("sys.stdin", io.StringIO(json.dumps(ev("PostToolUse")))), redirect_stdout(out):
                 self.assertEqual(grovy.cmd_hook("a"), 0)
             self.assertEqual(out.getvalue(), "")
+
+
+class TestBackgroundTasks(StoreCase):
+    """The list of background work follows Claude Code's own (payloads as captured from 2.1.325)."""
+    SUB = {"agent_id": "a51", "agent_type": "general-purpose"}
+    SHELL = {"id": "bre", "type": "shell", "status": "running", "description": "Sleep for 70 seconds", "command": "sleep 70"}
+    AGENT = {"id": "a51", "type": "subagent", "status": "running", "description": "sleeper", "agent_type": "general-purpose"}
+
+    def tasks(self):
+        return {t["id"]: t for t in self.store.summary("a")["tasks"]}
+
+    def test_subagent_listed_until_it_has_reported(self):
+        st = lambda: self.store.sessions["a"]["state"]
+        self.store.ingest("a", ev("SessionStart", source="startup"))
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="go"))
+        self.store.ingest("a", ev("PostToolUse", tool_name="Bash", tool_input={"command": "sleep 70",
+                          "description": "Sleep for 70 seconds", "run_in_background": True},
+                          tool_response={"stdout": "", "backgroundTaskId": "bre"}))
+        self.store.ingest("a", ev("PostToolUse", tool_name="Agent", tool_input={"description": "sleeper",
+                          "prompt": "p", "subagent_type": "general-purpose", "run_in_background": True},
+                          tool_response={"isAsync": True, "status": "async_launched", "agentId": "a51",
+                                         "description": "sleeper"}))
+        self.store.ingest("a", ev("SubagentStart", **self.SUB))
+        self.assertEqual(set(self.tasks()), {"bre", "a51"})                    # listed as soon as launched
+        self.assertEqual(self.tasks()["a51"]["description"], "sleeper")
+        self.store.ingest("a", ev("Stop", last_assistant_message="started", background_tasks=[self.SHELL, self.AGENT]))
+        self.assertEqual(st(), "idle")                                         # Claude takes input: truthful
+        self.assertEqual(self.store.events["a"][-1]["data"]["background_names"], ["Sleep for 70 seconds", "sleeper"])
+        # the subagent works on: its tool calls show what it does, without making the session "working"
+        self.store.ingest("a", ev("PostToolUse", **self.SUB, tool_name="Bash", tool_input={"command": "sleep 45",
+                          "run_in_background": True, "description": "Wait"}, tool_response={"backgroundTaskId": "b5k"}))
+        self.assertEqual(st(), "idle")
+        self.assertEqual(self.tasks()["a51"]["last"], {"tool": "Bash", "arg": "sleep 45"})
+        self.assertEqual(self.tasks()["a51"]["tools"], 1)
+        self.assertIn("b5k", self.tasks())                                     # its own background shell
+        n = len(self.store.events["a"])
+        # it pauses on that shell: SubagentStop fires, but Claude Code still lists it as running
+        self.store.ingest("a", ev("SubagentStop", **self.SUB, background_tasks=[self.SHELL, self.AGENT,
+                          {"id": "b5k", "type": "shell", "status": "running", "description": "Wait"}]))
+        self.assertIn("a51", self.tasks())                                     # not "done": it is still working
+        self.assertEqual(len(self.store.events["a"]), n)                       # nothing in the conversation
+        # its report: done
+        self.store.ingest("a", ev("UserPromptSubmit", prompt='<agent-message from="a51">\n[Subagent hand-back] done'))
+        self.assertNotIn("a51", self.tasks())
+        # the shell's notification: done too
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="<task-notification>\n<task-id>bre</task-id>\n<status>completed"))
+        self.assertNotIn("bre", self.tasks())
+        self.store.ingest("a", ev("Stop", last_assistant_message="ok", background_tasks=[]))
+        self.assertEqual(self.tasks(), {})
+        self.assertEqual(self.store.summary("a")["background"], 0)
+        # a late tool call of a finished subagent neither revives it nor touches the state
+        self.store.ingest("a", ev("PostToolUse", **self.SUB, tool_name="Read", tool_input={"file_path": "/x"}))
+        self.assertEqual((self.tasks(), st()), ({}, "idle"))
+
+    def test_first_seen_time_kept_and_list_cleared_on_exit(self):
+        self.store.ingest("a", ev("SessionStart", source="startup"))
+        self.store.ingest("a", ev("Stop", background_tasks=[self.SHELL]))
+        since = self.tasks()["bre"]["since"]
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="more"))
+        self.store.ingest("a", ev("Stop", last_assistant_message="x", background_tasks=[self.SHELL, "junk"]))
+        self.assertEqual(self.tasks()["bre"]["since"], since)                  # how long it has run, not since when re-listed
+        self.assertEqual(self.store.summary("a")["background"], 2)             # malformed entries still count
+        self.store.ingest("a", ev("SubagentStart", agent_id="zz", agent_type=""))   # unnamed internal agent
+        self.assertNotIn("zz", self.tasks())
+        self.store.ingest("a", ev("SessionEnd", reason="other"))
+        self.assertEqual(self.tasks(), {})
+        self.store.ingest("a", ev("SessionStart", source="startup"))
+        self.assertEqual(self.tasks(), {})
 
 
 class TestTurnTools(StoreCase):

@@ -32,9 +32,10 @@ TMUX_PREFIX = "grovy-"
 
 # Events the adapter forwards. Anything else is ignored (exit 0, no output).
 HOOK_EVENTS = ("SessionStart", "SessionEnd", "UserPromptSubmit", "PermissionRequest",
-               "Notification", "Stop", "StopFailure", "PostToolUse")
-# The ones still forwarded when fired inside a subagent: requests waiting on the user (GROVY_SUBAGENT_HOOKS=1: all).
-SUBAGENT_EVENTS = ("PermissionRequest", "Notification")
+               "Notification", "Stop", "StopFailure", "PostToolUse", "SubagentStart", "SubagentStop")
+# The ones still forwarded when fired inside a subagent (GROVY_SUBAGENT_HOOKS=1: all): requests waiting on the
+# user, and what the phone's list of background work needs. The daemon never takes session state from them.
+SUBAGENT_EVENTS = ("PermissionRequest", "Notification", "SubagentStart", "SubagentStop", "PostToolUse")
 
 
 def env(name, default=None):
@@ -885,9 +886,13 @@ def cmd_hook(name):
         return 0
     if payload.get("agent_id") and event not in SUBAGENT_EVENTS and env("SUBAGENT_HOOKS", "0") != "1":
         # Fired inside a subagent (verified: such hooks carry agent_id/agent_type, and the parent's session_id).
-        # Its tool calls aren't the session's state: a background subagent's PostToolUse can even arrive after
-        # the parent's Stop and would show an idle session as working. Only what needs the user goes through.
         return 0
+    if payload.get("agent_id") and event == "PostToolUse":
+        # A subagent's tool call: only "what is it doing" for the background list, never session state (a
+        # background subagent's PostToolUse can arrive after the parent's Stop). The bulky output isn't needed.
+        resp = payload.get("tool_response")
+        bid = resp.get("backgroundTaskId") if isinstance(resp, dict) else None
+        payload = {**payload, "tool_response": {"backgroundTaskId": bid} if isinstance(bid, str) else None}
     if event == "SessionStart" and isinstance(payload.get("session_id"), str):
         # Recorded here, not only in the daemon, so `grovy resume` works even if grovyd was down.
         try:

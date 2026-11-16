@@ -32,6 +32,9 @@ Each Claude session runs in its own tmux session on your computer, exactly as if
 in a terminal. grovy listens to Claude's hooks and shows everything on a phone-friendly page:
 
 - **Sessions:** a list with live status (working, idle, needs you), context used, and the last activity.
+- **Background work:** subagents and commands Claude left running show as "idle · 2 running"; tap the strip above the
+  message box to see each one, how long it has run and what it is doing. Sessions started before you updated grovy
+  get this after ⋯ → Update session.
 - **Chat:** Claude's replies, rendered properly (tables, code, lists), plus what's happening now.
 - **Approvals:** when Claude wants to run a command or edit a file, you see the full command or diff and
   tap Allow or Deny. Questions Claude asks you show up as cards you answer with a tap.
