@@ -557,6 +557,22 @@ class TestReviewRegressions(StoreCase):
 
 
 class TestSecondPassRegressions(StoreCase):
+    def test_slow_phone_compact_is_not_unconfirmed(self):
+        """A /compact from the phone took 87s; its receipt (SessionStart) only comes when it finishes."""
+        self.store.paste = lambda n, t, command=False: self.pasted.append((n, t))
+        self.store.ingest("a", ev("SessionStart"))
+        self.assertEqual(self.store.enqueue("a", "/compact")[0], 200)
+        self.wait_pasted(1)
+        self.assertEqual(self.store.sessions["a"]["activity"], "compacting conversation")
+        later = time.time() + 90
+        with mock.patch.object(grovyd, "now", lambda: later):
+            self.store.reconcile()
+            self.assertEqual(self.store.prompts[0]["status"], "injected")
+            self.assertEqual(self.store.sessions["a"]["state"], "working")
+            self.store.ingest("a", ev("SessionStart", source="compact"))
+        self.assertEqual(self.store.prompts[0]["status"], "submitted")
+        self.assertEqual(self.store.sessions["a"]["state"], "idle")
+
     def test_stale_phone_compact_does_not_end_a_turn(self):
         self.store.ingest("a", ev("SessionStart"))
         self.store.prompts.append({"id": "c" * 32, "session": "a", "text": "/compact", "command": "compact",

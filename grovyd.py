@@ -35,6 +35,9 @@ MAX_BODY = 256 * 1024
 MAX_REVIEW = 512 * 1024
 SSE_PER_CLIENT = 4  # live-update streams kept per client IP (older ones are closed)  # bytes of tool input shown for approval; beyond that, approve in the terminal
 CONFIRM_TIMEOUT = 30     # seconds for UserPromptSubmit to confirm an injected prompt
+DELIVERY_ACTIVITY = {None: "sending prompt from web", "compact": "compacting conversation",
+                     "clear": "clearing conversation"}
+COMMAND_TIMEOUT = 600    # /clear, /compact: their receipt is SessionStart, sent only once they finish
 RECONCILE_EVERY = 10
 INPUT_STATES = ("idle", "error")  # states in which we will type into the session
 DUP_WINDOW = 1.0  # seconds
@@ -244,7 +247,7 @@ class Store:
                 ours = False
                 for p in self.prompts:  # /clear and /compact emit no UserPromptSubmit; this is their receipt
                     if p["session"] == name and p["status"] == "injected" and p.get("command") == src \
-                            and now() - p["updated"] < 600:  # a stale one must not turn auto-compaction into "idle"
+                            and now() - p["updated"] < COMMAND_TIMEOUT:  # a stale one must not turn auto-compaction into "idle"
                         p["status"], p["updated"], ours = "submitted", now(), True
                         self._save_prompts()
                 if src == "compact" and not ours and s["state"] == "working":
@@ -707,7 +710,7 @@ class Store:
                 return
             # Persist "injected" BEFORE typing: a crash after this point can never cause a second send.
             p["status"], p["updated"] = "injected", now()
-            self._set(name, "working", "sending prompt from web")
+            self._set(name, "working", DELIVERY_ACTIVITY.get(p.get("command"), DELIVERY_ACTIVITY[None]))
             self._save_prompts()
             self._save_state()
         self.publish(name)
@@ -763,12 +766,13 @@ class Store:
                         if p["status"] not in ("pending", "deciding") and now() - p["created"] > 3600]:
                 del self.perms[pid]
             for p in self.prompts:
-                if p["status"] == "injected" and now() - p["updated"] > CONFIRM_TIMEOUT:
+                limit = COMMAND_TIMEOUT if p.get("command") in ("clear", "compact") else CONFIRM_TIMEOUT
+                if p["status"] == "injected" and now() - p["updated"] > limit:
                     p["status"], p["updated"] = "unconfirmed", now()
                     p["error"] = "no UserPromptSubmit seen; check the terminal"
                     changed.add(p["session"])
                     s = self.sessions.get(p["session"])
-                    if s and s["state"] == "working" and s["activity"] == "sending prompt from web":
+                    if s and s["state"] == "working" and s["activity"] in DELIVERY_ACTIVITY.values():
                         self._set(p["session"], "unknown", "prompt not confirmed")
                 elif p["status"] == "queued" and p["session"] not in live:  # incl. forgotten sessions: never
                     # deliver into a future session that merely reuses the name

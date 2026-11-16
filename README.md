@@ -179,7 +179,9 @@ Longer prompts take the literal bracketed-paste path, with control characters st
   belongs to that session (re-checked just before pasting), and no other web prompt is in flight.
   Otherwise they **queue**, survive daemon restarts (`prompts.json`), and are typed on the next `Stop`.
 * Lifecycle: `queued` → `injected` (typed) → `submitted` (only when a matching `UserPromptSubmit` hook arrives).
-  With no confirmation within 30s the prompt becomes `unconfirmed`. **Prompts are never retried
+  With no confirmation within 30s the prompt becomes `unconfirmed`. `/clear` and `/compact` emit no
+  `UserPromptSubmit`; their receipt is `SessionStart` once they finish, so they get 10 minutes (compaction can
+  take over a minute). **Prompts are never retried
   automatically**, and `injected` is persisted *before* typing, so a crash can't cause a double send.
 * `unknown` state blocks automatic typing. Send then asks "type anyway?" and only that prompt is forced.
 
