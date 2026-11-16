@@ -1232,6 +1232,35 @@ class TestPromptQueue(StoreCase):
         self.store.ingest("a", ev("UserPromptSubmit", prompt="one\r\ntwo\n"))
         self.assertEqual(self.statuses(), ["submitted"])
 
+    def test_receipts_typed_then_read(self):
+        """A prompt shows ✓✓ once Enter is pressed, before Claude's hook confirms it (a /compact takes minutes)."""
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.enqueue("a", "/compact")
+        self.wait_pasted(1)
+        p = self.store.prompts[-1]
+        for _ in range(100):
+            if p.get("typed"):
+                break
+            time.sleep(0.01)
+        self.assertEqual(p["status"], "injected")
+        self.assertTrue(p.get("typed"))
+        self.store.ingest("a", ev("SessionStart", source="compact"))
+        self.assertEqual(p["status"], "submitted")
+
+    def test_aborted_paste_is_not_typed(self):
+        def abort(*a, **k):
+            raise grovy.PasteAborted("stopped")
+        self.store.paste = abort
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.enqueue("a", "x")
+        p = self.store.prompts[-1]
+        for _ in range(100):
+            if p["status"] != "injected":
+                break
+            time.sleep(0.01)
+        self.assertEqual(p["status"], "failed")
+        self.assertFalse(p.get("typed"))
+
     def test_wrapped_paste_confirms(self):
         """Regression: long prompts came back wrapped in <pasted_content> and showed as duplicates."""
         self.store.ingest("a", ev("SessionStart"))

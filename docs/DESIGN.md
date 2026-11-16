@@ -157,6 +157,9 @@ Longer prompts take the literal bracketed-paste path, with control characters st
   `UserPromptSubmit`; their receipt is `SessionStart` once they finish, so they get 10 minutes (compaction can
   take over a minute). **Prompts are never retried
   automatically**, and `injected` is persisted *before* typing, so a crash can't cause a double send.
+* Receipts, WhatsApp-style: ✓ `queued` (grovy has it); ✓✓ `injected` with `typed` set (Enter was pressed, so
+  Claude Code has it; for `/compact` the UI says "compacting…"); blue ✓✓ on the chat bubble (`UserPromptSubmit`
+  or `Steered`: Claude read it). `typed` is only set after a send that wasn't aborted.
 * Typing re-checks between chunks and before Enter. If Claude starts something on its own meanwhile (a background
   task finishing) or opens a permission request, grovy stops **without pressing Enter**, so the Enter can't answer
   a dialog, and marks the prompt failed. Part of it may be left in the terminal input.

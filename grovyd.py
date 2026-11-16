@@ -982,6 +982,8 @@ class Store:
         except Exception as e:  # tmux failure, session gone, pane reused...
             err = str(e)
         with self.lock:
+            if not err and p["status"] == "injected":
+                p["typed"] = now()  # Enter pressed: Claude Code has it; its hook (the read receipt) may come much later
             if err and p["status"] == "injected":
                 p["status"], p["updated"] = "failed", now()
                 p["error"] = (err + ". Enter was not pressed; part of it may be left in the terminal input "

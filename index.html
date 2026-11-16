@@ -80,7 +80,7 @@ body.home #backdrop { display:block; }
 .u { margin:18px 0 6px auto; max-width:86%; width:fit-content; background:var(--user); padding:9px 13px;
   border-radius:18px 18px 4px 18px; white-space:pre-wrap; overflow-wrap:anywhere; }
 .u .st { display:block; font-size:12px; color:var(--mut); margin-top:3px; text-align:right; }
-.u .st.bad { color:var(--bad); } .u .st.warn { color:var(--warn); }
+.u .st.bad { color:var(--bad); } .u .st.warn { color:var(--warn); } .u .rd { color:var(--busy); letter-spacing:-2px; }
 .u.pending { opacity:.75; }
 .u button.link { border:0; background:none; color:var(--acc); padding:0 0 0 6px; font-size:12px; }
 .a { margin:6px 0 4px; overflow-wrap:anywhere; }
@@ -862,7 +862,7 @@ function eventNode(e, isLatestReply) {
     case "UserPromptSubmit": {
       const m = String(d.prompt || "").match(MACHINE);
       if (m) return machineNode(m[1], d.prompt);      // not typed by you: subagent reports, task notices
-      return h("div", {class: "u"}, unwrap(d.prompt));
+      return h("div", {class: "u"}, unwrap(d.prompt), h("span", {class: "st"}, READ()));
     }
     case "Stop": {
       const text = d.last_assistant_message || "";
@@ -881,7 +881,7 @@ function eventNode(e, isLatestReply) {
     case "SessionStart": return sysLine(SOURCE[d.source] || "session started");
     case "SessionEnd": return sysLine("Claude exited", d.reason && d.reason !== "other" ? " (" + d.reason.replace(/_/g, " ") + ")" : "");
     case "Exited": return sysLine("terminal closed");
-    case "Steered": return h("div", {class: "u"}, unwrap(d.prompt), h("span", {class: "st"}, "sent while Claude worked"));
+    case "Steered": return h("div", {class: "u"}, unwrap(d.prompt), h("span", {class: "st"}, "sent while Claude worked ", READ()));
     case "Killed": return h("div", {class: "err"}, "⚠ Killed by the system's out-of-memory killer: memory ran short on this machine, "
       + "probably because of a big job (here or elsewhere). Resume continues the conversation.");
     case "Interrupted": return sysLine("■ interrupted from the phone");
@@ -1060,10 +1060,15 @@ function permNode(p) {
   return h("div", {class: "perm"}, h("div", {class: "h"}, "🔐 Claude wants to use " + p.tool_name), ...toolBody(p), note,
     h("div", {class: "row"}, deny, allow));
 }
-const PSTATUS = {queued: ["waiting: Claude gets it at its next step, or when it's done", ""], injected: ["sending…", ""],
+// WhatsApp-style receipts: ✓ grovy has it, ✓✓ typed into Claude Code, blue ✓✓ Claude read it (its hook fired).
+const PSTATUS = {queued: ["✓ waiting: Claude gets it at its next step, or when it's done", ""], injected: ["sending…", ""],
   unconfirmed: ["not confirmed: check the terminal", "warn"], failed: ["failed", "bad"], cancelled: ["cancelled", ""]};
+const TYPED = {compact: "✓✓ compacting…", clear: "✓✓ clearing…"};
+const READ = () => h("span", {class: "rd", title: "Claude read it"}, "✓✓");
 function promptNode(p) {
-  const [label, cls] = PSTATUS[p.status] || [p.status, ""];
+  const [label, cls] = p.status === "injected" && p.typed ? [TYPED[p.command] || "✓✓ delivered", ""]
+    : p.status === "unconfirmed" && p.typed ? ["✓✓ typed, but Claude never confirmed it: check the terminal", "warn"]
+    : PSTATUS[p.status] || [p.status, ""];
   const cancel = p.status === "queued" ? h("button", {class: "link", onclick: async () => {
     try { await api(`/api/prompts/${p.id}/cancel`, {}); } catch (e) { say(e.message); } refresh(); }}, "cancel") : null;
   return h("div", {class: "u pending"}, p.text,
@@ -1116,7 +1121,7 @@ async function renderDetail(name) {
   items.sort((a, b) => a[0] - b[0]);
   const earlier = d.events.length >= 100 && !noMore ? cached("earlier", () => h("button", {class: "earlier", onclick: loadEarlier}, "Load earlier")) : null;
   main.replaceChildren(...(earlier ? [earlier] : []), ...(items.length ? items.map(x => x[1]) : [h("div", {class: "empty"}, "No activity yet.")]),
-    ...outgoing.filter(live).map(p => cached("p" + p.id + p.status, () => promptNode(p))),
+    ...outgoing.filter(live).map(p => cached("p" + p.id + p.status + (p.typed ? "t" : ""), () => promptNode(p))),
     ...d.permissions.map(p => cached("perm" + p.id + p.status, () => permNode(p))));
 
   // typing indicator
