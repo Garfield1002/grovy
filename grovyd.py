@@ -20,6 +20,7 @@ import select
 import shlex
 import shutil
 import socketserver
+import stat
 import subprocess
 import sys
 import threading
@@ -27,7 +28,7 @@ import time
 import uuid
 from collections import deque
 from html import escape as html_escape
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit, parse_qs, unquote
 
 import grovy
 
@@ -36,6 +37,12 @@ MAX_FIELD = 20000        # chars kept of any one text field in the event log
 MAX_PROMPT = 100_000     # chars accepted for a browser prompt
 MAX_BODY = 256 * 1024
 MAX_REVIEW = 512 * 1024
+MAX_UPLOAD = 100 * 1024 * 1024   # bytes per attachment sent from the phone
+ATTACH_TTL = 7 * 86400          # attachments older than this are deleted
+ATTACH_NAME = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}-[A-Za-z0-9._-]{1,80}")   # what save_attachment names files
+IMAGE_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
+TURN_TOOLS = 100   # tool calls listed per turn ("Worked for …"); beyond that only counted
+TOOL_ARG = ("command", "file_path", "notebook_path", "path", "pattern", "url", "query", "description", "skill", "prompt")
 SSE_PER_CLIENT = 4  # live-update streams kept per client IP (older ones are closed)  # bytes of tool input shown for approval; beyond that, approve in the terminal
 CONFIRM_TIMEOUT = 30     # seconds for UserPromptSubmit to confirm an injected prompt
 DELIVERY_ACTIVITY = {None: "sending prompt from web", "compact": "compacting conversation",
@@ -99,6 +106,45 @@ KEEP = {
     "Stop": ("last_assistant_message",),
     "StopFailure": ("error", "error_details", "last_assistant_message"),
 }
+
+
+def tool_summary(name, inp):
+    """One short line for a tool call: its name and its most telling argument."""
+    arg = ""
+    if isinstance(inp, dict):
+        arg = next((str(inp[k]) for k in TOOL_ARG if isinstance(inp.get(k), (str, int)) and str(inp[k]).strip()), "")
+    arg = " ".join(arg.split())
+    return {"tool": str(name or "tool")[:60], "arg": arg[:117] + "…" if len(arg) > 120 else arg}
+
+
+def private_dir(path):
+    """Create PATH (mode 700) under a shared temp dir. Its parent must be ours, a real directory and private:
+    anyone can create names in /tmp, so a planted symlink or open directory there is refused, never written into."""
+    top = os.path.dirname(path)
+    os.makedirs(top, mode=0o700, exist_ok=True)
+    st = os.lstat(top)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise OSError(f"{top} is not a private directory of this user")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def prune_attachments(top, ttl=ATTACH_TTL):
+    """Delete attachments older than ttl, and session folders left empty."""
+    cutoff = time.time() - ttl
+    for d in os.scandir(top):
+        if not d.is_dir(follow_symlinks=False):
+            continue
+        for f in os.scandir(d.path):
+            try:
+                if f.stat(follow_symlinks=False).st_mtime < cutoff:
+                    os.unlink(f.path)
+            except OSError:
+                pass
+        try:
+            os.rmdir(d.path)   # only succeeds when empty
+        except OSError:
+            pass
 
 
 class Store:
@@ -276,6 +322,10 @@ class Store:
                 data = {k: clip(payload[k]) for k in KEEP.get(ev, ()) if k in payload}
                 if ev == "Stop":
                     data["background_tasks"] = _count(payload.get("background_tasks"))
+                    turn = s.pop("turn", None)
+                    if turn:   # "Worked for …": how long the turn took and what it ran
+                        data["worked"] = round(t - turn["start"], 1)
+                        data["tools"], data["tool_count"] = turn["tools"], turn["count"]
                 if ev == "UserPromptSubmit":
                     p = self._confirm_prompt(name, payload.get("prompt", ""))
                     if p:
@@ -300,7 +350,13 @@ class Store:
                 m = MACHINE_PROMPT.match(text)  # injected by Claude Code itself, not typed by the user
                 self._set(name, "working", ("subagent report" if m.group(1) == "agent-message" else "task notification")
                           if m else "prompt: " + text[:120])
+                s["turn"] = {"start": t, "tools": [], "count": 0}
             elif ev == "PostToolUse":
+                turn = s.get("turn")
+                if turn is not None:
+                    turn["count"] += 1
+                    if len(turn["tools"]) < TURN_TOOLS:
+                        turn["tools"].append(tool_summary(payload.get("tool_name"), payload.get("tool_input")))
                 if s["state"] != "exited" and not self._pending(name):
                     self._set(name, "working", f"ran {payload.get('tool_name', 'tool')}")
             elif ev == "Stop":
@@ -669,6 +725,60 @@ class Store:
         return 200, "stopped"
 
     # ------------------------------------------------------------ pages (local "artifacts")
+    def save_attachment(self, name, filename, read, size):
+        """Write a file sent from the phone where the session's Claude may read it. read(n) yields the body."""
+        with self.lock:
+            if name not in self.sessions:
+                return 404, "no such session"
+        if size > MAX_UPLOAD:
+            return 413, f"too large (the limit is {MAX_UPLOAD // 2**20} MB)"
+        if size <= 0:
+            return 400, "empty file"
+        try:
+            top = private_dir(grovy.attachments_dir())
+            prune_attachments(top)
+            d = os.path.join(top, name)
+            os.makedirs(d, mode=0o700, exist_ok=True)
+        except OSError as e:
+            return 500, f"can't use the attachments folder: {e}"
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(filename or "")).strip("._-")[:80] or "file"
+        path = os.path.join(d, f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}-{safe}")
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except OSError as e:
+            return 500, f"can't save it: {e}"
+        try:
+            with os.fdopen(fd, "wb") as f:
+                left = size
+                while left:
+                    chunk = read(min(left, 1 << 16))
+                    if not chunk:
+                        raise OSError("upload cut short")
+                    f.write(chunk)
+                    left -= len(chunk)
+        except OSError as e:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            return 400, f"not saved: {e}"
+        return 200, {"path": path, "name": safe, "size": size}
+
+    def read_attachment(self, name, filename):
+        """An image the phone sent earlier, for its thumbnail: (content type, bytes) or None."""
+        ext = filename.rsplit(".", 1)[-1].lower()
+        if not grovy.valid_name(name) or not ATTACH_NAME.fullmatch(filename) or ext not in IMAGE_TYPES:
+            return None
+        try:
+            top = private_dir(grovy.attachments_dir())
+            fd = os.open(os.path.join(top, name, filename), os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as f:
+                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                    return None
+                return IMAGE_TYPES[ext], f.read(MAX_UPLOAD + 1)
+        except OSError:
+            return None
+
     def publish_page(self, session, name, title, html):
         """Store a copy of an HTML page Claude made (`grovy page publish`). Same session + name = new version."""
         if not isinstance(name, str) or not PAGE_NAME_RE.fullmatch(name):
@@ -1625,6 +1735,13 @@ class Http(http.server.BaseHTTPRequestHandler):
         if path == "/api/conversations":
             code, res = store.conversations(parse_qs(url.query).get("path", [""])[0])
             return self._send(code, {"conversations": res} if code == 200 else {"error": res})
+        m = re.fullmatch(r"/api/attachments/([^/]+)/([^/]+)", path)
+        if m:   # image thumbnails; only images, never rendered as anything else
+            got = store.read_attachment(m.group(1), m.group(2))
+            if not got:
+                return self._err(404, "not found")
+            return self._send(200, got[1], got[0], [("Cache-Control", "private, max-age=604800"),
+                                                    ("Content-Security-Policy", "default-src 'none'")])
         m = re.fullmatch(r"/api/sessions/([^/]+)/history", path)
         if m and grovy.valid_name(m.group(1)):
             qs = parse_qs(url.query)
@@ -1668,6 +1785,9 @@ class Http(http.server.BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin and urlsplit(origin).netloc != self.headers.get("Host"):
             return self._err(403, "cross-origin request rejected")
+        m = re.fullmatch(r"/api/sessions/([^/]+)/attachments", urlsplit(self.path).path)
+        if m:   # a raw file body, streamed to disk; octet-stream still forces a CORS preflight
+            return self._upload(m.group(1))
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
             return self._err(415, "Content-Type must be application/json")
         try:
@@ -1706,6 +1826,20 @@ class Http(http.server.BaseHTTPRequestHandler):
         elif not entry["ev"].wait(60):
             return self._err(503, "the original request is still running")
         return self._send(*entry["res"])
+
+    def _upload(self, name):
+        self.close_connection = True   # an error leaves the body unread
+        if not grovy.valid_name(name):
+            return self._err(404, "no such session")
+        if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/octet-stream":
+            return self._err(415, "Content-Type must be application/octet-stream")
+        try:
+            n = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return self._err(411, "Content-Length required")
+        code, res = self.server.store.save_attachment(name, unquote(self.headers.get("X-Filename", "")),
+                                                      self.rfile.read, n)
+        return self._send(code, res if code == 200 else {"error": res})
 
     def _route_post(self, path, body):
         """Run one POST action; returns (status, JSON body). Never sends anything itself."""

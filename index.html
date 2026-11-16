@@ -90,6 +90,20 @@ body.home #backdrop { display:block; }
 .u .st.bad { color:var(--bad); } .u .st.warn { color:var(--warn); } .tk { display:inline-flex; margin-right:5px; font-size:14px; font-weight:600; }
 .tk i { font-style:normal; display:inline-block; transform:scaleY(.75); } .tk i+i { margin-left:-.45em; } .tk.rd { color:var(--busy); } .u .tm { margin-right:4px; }
 .u.pending { opacity:.75; }
+.u { display:flow-root; }
+.u .st.in { float:right; margin:7px -3px -6px 14px; }   /* on the last line when it fits, as in WhatsApp */
+.uq b { display:block; font-size:12.5px; color:var(--busy); } .uq.claude, .uq.you { cursor:pointer; }
+.found { animation:found 1.6s ease-out; }
+@keyframes found { from { box-shadow:0 0 0 4px color-mix(in srgb, var(--busy) 45%, transparent); } to { box-shadow:0 0 0 4px transparent; } }
+.attimg { display:block; width:fit-content; margin:4px 0; } .attimg img { display:block; max-width:100%; max-height:260px; border-radius:12px; }
+.attc img { width:22px; height:22px; object-fit:cover; border-radius:5px; margin-right:4px; flex:none; }
+.acts { display:flex; flex-wrap:wrap; gap:2px; margin:2px 0 0 -8px; -webkit-user-select:none; user-select:none; }
+.acts button { border:0; background:none; color:var(--mut); font-size:13px; font-weight:600; padding:6px 8px; min-height:34px; border-radius:8px; }
+.acts button:active { background:var(--code); }
+.acts .wkb { font-weight:400; } span.wkb { font-size:13px; color:var(--mut); padding:6px 8px; align-self:center; }
+.wkb.more-t::after { content:" ›"; } .wkb.more-t[aria-expanded="true"]::after { content:" ⌄"; }
+.wkl { margin:4px 0 0; padding-left:1.6em; font:12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--mut);
+  overflow-wrap:anywhere; } .wkl li b { font-weight:650; color:var(--fg); } .wkl .wn { list-style:none; font-family:inherit; }
 .uq { display:block; border-left:3px solid var(--busy); padding:1px 0 1px 9px; margin:2px 0 6px; color:var(--mut); font-size:14.5px; }
 .u button.link { border:0; background:none; color:var(--acc); padding:0 0 0 6px; font-size:12px; }
 .a { margin:6px 0 4px; overflow-wrap:anywhere; }
@@ -216,6 +230,12 @@ mark { background:color-mix(in srgb, var(--warn) 35%, transparent); color:inheri
 /* composer */
 #composer { position:sticky; bottom:0; z-index:4; background:var(--bg); border-top:1px solid var(--line);
   padding:8px 12px calc(8px + env(safe-area-inset-bottom)); }
+/* shown when scrolled away from the latest message; the dot means something new arrived meanwhile */
+#tobottom { position:absolute; right:14px; top:-58px; width:44px; height:44px; border-radius:50%; border:1px solid var(--line);
+  background:var(--card); color:var(--mut); box-shadow:0 2px 10px rgba(0,0,0,.18); display:grid; place-items:center; padding:0;
+  animation:fadein .15s ease-out; } #tobottom svg { width:22px; height:22px; }
+#tobottom.new::after { content:""; position:absolute; top:1px; right:1px; width:11px; height:11px; border-radius:50%;
+  background:var(--acc); border:2px solid var(--card); }
 #composer .inner { max-width:760px; margin:0 auto; }
 #hint { font-size:12.5px; color:var(--mut); margin:0 4px 6px; }
 #hint:empty { display:none; }
@@ -226,6 +246,18 @@ textarea:focus { border-color:var(--mut); }
 #send { width:46px; height:46px; border-radius:50%; border:0; background:var(--acc); color:#fff; flex:none;
   display:grid; place-items:center; }
 #send:disabled { opacity:.35; }
+.tbox { position:relative; flex:1; display:flex; min-width:0; } .tbox textarea { padding-right:46px; }
+/* in the text box: the paperclip while it's empty (files go before the words), then a cross to clear it */
+.tbtn { position:absolute; right:3px; bottom:3px; width:40px; height:40px; border:0; border-radius:50%; background:none;
+  color:var(--mut); display:grid; place-items:center; padding:0; } .tbtn svg { width:21px; height:21px; }
+.tbtn:active { background:var(--code); }
+#atts { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 8px; } #atts:empty { display:none; }
+.attc { display:inline-flex; align-items:center; gap:2px; max-width:100%; font-size:13px; background:var(--card);
+  border:1px solid var(--line); border-radius:99px; padding:2px 2px 2px 10px; }
+.attc span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .attc.busy { opacity:.6; padding-right:10px; }
+.attc button { border:0; background:none; color:var(--mut); min-width:30px; min-height:30px; flex:none; }
+.attl { display:flex; width:fit-content; max-width:100%; margin:4px 0; font-size:13.5px; padding:3px 10px; border-radius:8px;
+  background:color-mix(in srgb, var(--fg) 7%, transparent); overflow-wrap:anywhere; }
 #stop { width:46px; height:46px; border-radius:50%; border:1px solid var(--line); background:var(--card); flex:none;
   display:grid; place-items:center; color:var(--bad); }
 #stop i { width:14px; height:14px; border-radius:3px; background:currentColor; }
@@ -333,14 +365,22 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
   <span id="tool" class="tool hidden"></span>
   <span id="elapsed" class="elapsed"></span>
 </div>
-<div id="composer" class="hidden"><div class="inner">
+<div id="composer" class="hidden"><button id="tobottom" class="hidden" aria-label="Scroll to the latest message"><svg viewBox="0 0 24 24"
+  fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7l6 6 6-6M6 13l6 6 6-6"/></svg></button><div class="inner">
   <div id="hint"></div>
   <div id="picker"></div>
   <div id="quick"></div>
   <button id="resume" class="resume hidden">Resume session</button>
+  <div id="atts"></div>
   <div class="cr">
     <button id="stop" class="hidden" aria-label="Interrupt Claude"><i></i></button>
-    <textarea id="input" rows="1" placeholder="Message Claude…" enterkeyhint="enter"></textarea>
+    <div class="tbox">
+      <textarea id="input" rows="1" placeholder="Message Claude…" enterkeyhint="enter"></textarea>
+      <button id="attach" class="tbtn" aria-label="Attach files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+      <button id="clear" class="tbtn hidden" aria-label="Clear the message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="2.2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div><input id="file" type="file" multiple class="hidden">
     <button id="send" aria-label="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
       stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
   </div>
@@ -385,15 +425,49 @@ const LABEL = {needs_input: "needs you", idle: "idle", working: "working", start
                exited: "exited", unknown: "unknown", error: "error"};
 const unwrap = t => String(t || "").replace(/<\/?pasted_content[^>]*>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 const STALL = 60;
+const ATTACHED = /^Attached: (\/\S.*)$/;   // how a message names a file sent from the phone (see the composer)
+const attName = p => p.split("/").pop().replace(/^\d{8}-\d{6}-[0-9a-f]{4}-/, "");
+const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
+const attUrl = p => { const [s, f] = p.split("/").slice(-2); return `/api/attachments/${encodeURIComponent(s)}/${encodeURIComponent(f)}`; };
+function attNode(path) {   // a picture shows as a thumbnail (tap: full size); anything else, or a gone file, as a chip
+  const chip = () => h("span", {class: "attl", title: path}, "📎 " + attName(path));
+  if (!IMAGE.test(path)) return chip();
+  const a = h("a", {class: "attimg", href: attUrl(path), target: "_blank", rel: "noopener"});
+  a.append(h("img", {src: attUrl(path), alt: attName(path), loading: "lazy", onerror: () => a.replaceWith(chip())}));
+  return a;
+}
+const QUOTE_WHO = /^(Claude|You):$/;   // first line of a quote made by Quote: whose words follow
+const squashText = t => String(t).replace(/\s+/g, " ").trim();
+function jumpTo(quoted, from) {   // scroll to the message a quote came from, if it's loaded
+  const needle = squashText(quoted).slice(0, 60);
+  const hit = needle && [...main.querySelectorAll(".a .md, .u")].reverse()
+    .find(el => !el.contains(from) && !from.contains(el) && squashText(el.innerText || el.textContent).includes(needle));
+  if (!hit) return say("The original isn't loaded: scroll up and tap \"Show earlier\" to load more.");
+  const box = hit.closest(".a, .u");
+  box.scrollIntoView({block: "center", behavior: "smooth"});
+  box.classList.remove("found"); void box.offsetWidth; box.classList.add("found");
+}
+function quoteNode(lines) {
+  const who = lines.length > 1 && lines[0].match(QUOTE_WHO);
+  const body = (who ? lines.slice(1) : lines).join("\n");
+  const el = h("span", {class: "uq" + (who ? " " + who[1].toLowerCase() : "")}, ...(who ? [h("b", {}, who[1])] : []), body);
+  if (who) el.onclick = () => jumpTo(body, el);
+  return el;
+}
 function userText(t) {   // a user message; its "> " lines (from Quote) show as a quote block
   const out = []; let q = [], txt = [];
   const flush = () => {
-    if (q.length) out.push(h("span", {class: "uq"}, q.join("\n")));
-    if (txt.length) { const t = txt.join("\n"); out.push(out.length ? t.replace(/^\n/, "") : t); }   // the block already breaks the line
+    if (q.length) out.push(quoteNode(q));
+    if (txt.length) {   // blocks already break the line
+      const t = txt.join("\n").replace(/\n+$/, "");
+      if (t) out.push(out.length ? t.replace(/^\n/, "") : t);
+    }
     q = []; txt = [];
   };
   for (const l of String(t).split("\n")) {
-    if (/^>/.test(l)) { if (txt.length) flush(); q.push(l.replace(/^> ?/, "")); }
+    const att = l.match(ATTACHED);
+    if (att) { flush(); out.push(attNode(att[1])); }
+    else if (/^>/.test(l)) { if (txt.length) flush(); q.push(l.replace(/^> ?/, "")); }
     else { if (q.length) flush(); txt.push(l); }
   }
   flush();
@@ -878,6 +952,17 @@ function liveNode(d) {   // a widget a script in the session shows and updates i
   if (foot) node.append(h("div", {class: "lf " + (d.status || "")}, foot));
   return node;
 }
+function workedNode(d) {   // "Worked for 2m 10s · 14 tools ›" in the reply's action row; tap for the turn's tool calls
+  if (typeof d.worked !== "number" || (!d.tool_count && d.worked < 10)) return null;
+  const n = d.tool_count || 0, tools = Array.isArray(d.tools) ? d.tools : [];
+  const text = "Worked for " + dur(d.worked) + (n ? ` · ${n} tool${n > 1 ? "s" : ""}` : "");
+  if (!tools.length) return {label: h("span", {class: "wkb"}, text), list: null};
+  const list = h("ol", {class: "wkl hidden"}, ...tools.map(x => h("li", {}, h("b", {}, String(x.tool || "")), x.arg ? " " + x.arg : "")),
+    ...(n > tools.length ? [h("li", {class: "wn"}, `…and ${n - tools.length} more`)] : []));
+  const label = h("button", {class: "wkb more-t", "aria-expanded": "false",
+    onclick: () => { const open = list.classList.toggle("hidden") === false; label.setAttribute("aria-expanded", String(open)); }}, text);
+  return {label, list};
+}
 function sysLine(...t) { return h("div", {class: "sys"}, h("span", {}, ...t)); }
 function eventNode(e, isLatestReply) {
   const d = e.data || {};
@@ -885,11 +970,12 @@ function eventNode(e, isLatestReply) {
     case "UserPromptSubmit": {
       const m = String(d.prompt || "").match(MACHINE);
       if (m) return machineNode(m[1], d.prompt);      // not typed by you: subagent reports, task notices
-      return h("div", {class: "u"}, ...userText(unwrap(d.prompt)), h("span", {class: "st"}, sent(d.sent || e.ts), READ()));
+      return h("div", {class: "u"}, ...userText(unwrap(d.prompt)), h("span", {class: "st in"}, sent(d.sent || e.ts), READ()));
     }
     case "Stop": {
       const text = d.last_assistant_message || "";
-      if (!text.trim()) return null;
+      const wk = workedNode(d);
+      if (!text.trim()) return wk && h("div", {class: "a"}, h("div", {class: "acts"}, wk.label), wk.list);
       const el = h("div", {class: "a"}, md(text));
       if (!isLatestReply && text.split("\n").length > 40) {
         el.classList.add("collapsed");
@@ -898,13 +984,16 @@ function eventNode(e, isLatestReply) {
         el.append(btn);
       }
       if (d.background_tasks) el.append(sysLine(d.background_tasks + " background task(s) still running"));
+      const copy = h("button", {onclick: () => copyText(text, copy)}, "Copy");
+      el.append(h("div", {class: "acts"}, ...(wk ? [wk.label] : []), copy,
+        h("button", {onclick: () => quoteInto(el.querySelector(".md").innerText, "Claude")}, "Quote")), ...(wk && wk.list ? [wk.list] : []));
       return el;
     }
     case "StopFailure": return h("div", {class: "err"}, "⚠ " + (d.error || "error") + (d.last_assistant_message ? "\n" + d.last_assistant_message : ""));
     case "SessionStart": return sysLine(SOURCE[d.source] || "session started");
     case "SessionEnd": return sysLine("Claude exited", d.reason && d.reason !== "other" ? " (" + d.reason.replace(/_/g, " ") + ")" : "");
     case "Exited": return sysLine("terminal closed");
-    case "Steered": return h("div", {class: "u"}, ...userText(unwrap(d.prompt)), h("span", {class: "st"}, sent(d.sent || e.ts), READ(), "sent while Claude worked"));
+    case "Steered": return h("div", {class: "u"}, ...userText(unwrap(d.prompt)), h("span", {class: "st in", title: "sent while Claude worked: it read it at its next step"}, sent(d.sent || e.ts), READ()));
     case "Killed": return h("div", {class: "err"}, "⚠ Killed by the system's out-of-memory killer: memory ran short on this machine, "
       + "probably because of a big job (here or elsewhere). Resume continues the conversation.");
     case "Interrupted": return sysLine("■ interrupted from the phone");
@@ -1189,7 +1278,9 @@ async function renderDetail(name) {
   const newReply = lastEventId && lastStop && lastStop.id > lastEventId;
   if (newReply) cache.get("e" + lastStop.id + "L")?.scrollIntoView({block: "start", behavior: "smooth"});
   else if (first || nearBottom) scrollTo(0, document.documentElement.scrollHeight);
+  else if (lastEventId && maxId > lastEventId) $("tobottom").classList.add("new");   // arrived while you read further up
   first = false; lastEventId = maxId;
+  syncToBottom();
 }
 let older = [], noMore = false, firstId = 0;
 async function loadEarlier() {
@@ -1239,11 +1330,23 @@ setInterval(tick, 1000);
 // ---------------------------------------------------------------- composer
 const input = $("input");
 const draftKey = () => "grovy-draft:" + view;
-function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight + 2, innerHeight * .4) + "px"; }
+function autosize() {   // also swaps the text box's paperclip (empty) for its clear cross (anything typed)
+  input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight + 2, innerHeight * .4) + "px";
+  $("attach").classList.toggle("hidden", input.value !== "");
+  $("clear").classList.toggle("hidden", input.value === "");
+}
+$("clear").onclick = () => {
+  input.value = ""; try { localStorage.removeItem(draftKey()); } catch (e) {}
+  autosize(); picker(); input.focus();
+};
 input.addEventListener("input", () => { try { localStorage.setItem(draftKey(), input.value); } catch (e) {} autosize(); });
 $("send").onclick = async () => {
-  const text = input.value;
-  if (!text.trim() || !view) return;
+  if (atts.some(a => a.busy)) return say("Wait for the attachments to finish uploading.");
+  const files = atts.filter(a => a.path), typed = input.value;
+  if ((!typed.trim() && !files.length) || !view) return;
+  if (files.length && /^[/!]/.test(typed.trimStart()))
+    return say("Attachments can't go with a / or ! command: send them in a normal message.");
+  const text = [typed.trim(), files.map(a => "Attached: " + a.path).join("\n")].filter(Boolean).join("\n\n");
   const force = !!(cur && cur.can_force) &&
     await ask("Claude's state is uncertain. Type this into the terminal anyway?\nOr queue it until Claude reports idle.",
               "Type anyway", {cancel: "Queue it"});
@@ -1251,10 +1354,59 @@ $("send").onclick = async () => {
   try {
     await api(`/api/sessions/${encodeURIComponent(view)}/prompts`, {text, force});
     input.value = ""; try { localStorage.removeItem(draftKey()); } catch (e) {} autosize(); $("picker").replaceChildren();
+    atts = []; saveAtts(); drawAtts();
     first = true;   // jump to the bottom to show the outgoing message
   } catch (e) { say("Not sent: " + e.message); }
   $("send").disabled = false;
   refresh();
+};
+
+// ---------------------------------------------------------------- scroll to the latest
+function syncToBottom() {
+  const far = !!view && innerHeight + scrollY < document.documentElement.scrollHeight - 300;
+  $("tobottom").classList.toggle("hidden", !far);
+  if (!far) $("tobottom").classList.remove("new");
+}
+addEventListener("scroll", syncToBottom, {passive: true});
+addEventListener("resize", syncToBottom);
+$("tobottom").onclick = () => scrollTo({top: document.documentElement.scrollHeight, behavior: "smooth"});
+
+// ---------------------------------------------------------------- attachments
+// Each file is uploaded as soon as it's picked, into a private temp folder every session may read; the message
+// then names their paths ("Attached: /path"), and Claude opens them with its own tools.
+let atts = [];   // {name, path, size} once uploaded, {name, busy: true} while uploading; per session, kept with the draft
+const attKey = () => "grovy-att:" + view;
+function saveAtts() { try { localStorage.setItem(attKey(), JSON.stringify(atts.filter(a => a.path))); } catch (e) {} }
+function loadAtts() {
+  try { atts = JSON.parse(localStorage.getItem(attKey()) || "[]"); } catch (e) { atts = []; }
+  if (!Array.isArray(atts)) atts = [];
+  drawAtts();
+}
+const fmtSize = n => n < 1048576 ? Math.max(1, Math.round(n / 1024)) + " KB" : (n / 1048576).toFixed(1) + " MB";
+function drawAtts() {
+  $("atts").replaceChildren(...atts.map(a => h("span", {class: "attc" + (a.busy ? " busy" : "")},
+    ...(a.path && IMAGE.test(a.path) ? [h("img", {src: attUrl(a.path), alt: ""})] : []),
+    h("span", {}, (a.path && IMAGE.test(a.path) ? "" : "📎 ") + a.name + (a.busy ? " · uploading…" : " · " + fmtSize(a.size))),
+    ...(a.busy ? [] : [h("button", {"aria-label": "Remove " + a.name,
+      onclick: () => { atts = atts.filter(x => x !== a); saveAtts(); drawAtts(); }}, "✕")]))));
+}
+$("attach").onclick = () => { if (!input.value) $("file").click(); };   // attachments come before the message
+$("file").onchange = () => {
+  const files = [...$("file").files], target = view;
+  $("file").value = "";
+  for (const f of files) {
+    const a = {name: f.name, busy: true};
+    atts.push(a); drawAtts();
+    fetch(`/api/sessions/${encodeURIComponent(target)}/attachments`, {method: "POST", body: f,
+      headers: {"Content-Type": "application/octet-stream", "X-Filename": encodeURIComponent(f.name)}})
+      .then(async r => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || r.statusText);
+        Object.assign(a, {busy: false, path: j.path, size: j.size});
+      })
+      .catch(e => { atts = atts.filter(x => x !== a); say(`${f.name} not attached: ${e.message}`); })
+      .finally(() => { if (view === target) { saveAtts(); drawAtts(); } });
+  }
 };
 
 // ---------------------------------------------------------------- quoting a selection
@@ -1262,13 +1414,16 @@ $("send").onclick = async () => {
 // own menu: a page can't hide or extend it on phones, so a floating bar of ours only stacked menus on menus.
 const quoteBtn = h("button", {id: "quotesel", class: "hidden"}, "❝ Quote selection");
 $("hint").before(quoteBtn);
-let selText = "", selHide = null;
+let selText = "", selWho = "Claude", selHide = null;
 const QUOTABLE = ".u, .a, .agent, .wg, .err, .perm";
 function selectedText() {
   const sel = getSelection();
   if (!sel || sel.isCollapsed || !sel.rangeCount || !view) return "";
   const inMsg = n => { const el = n && (n.nodeType === 1 ? n : n.parentElement); return el && $("main").contains(el) && el.closest(QUOTABLE); };
-  return inMsg(sel.anchorNode) && inMsg(sel.focusNode) ? sel.toString().trim() : "";
+  const box = inMsg(sel.anchorNode);
+  if (!box || !inMsg(sel.focusNode)) return "";
+  selWho = box.closest(".u") ? "You" : "Claude";
+  return sel.toString().trim();
 }
 document.addEventListener("selectionchange", () => {
   const t = selectedText();
@@ -1277,16 +1432,24 @@ document.addEventListener("selectionchange", () => {
   else selHide = setTimeout(() => quoteBtn.classList.add("hidden"), 250);   // let a tap on the button land first
 });
 for (const ev of ["pointerdown", "mousedown"]) quoteBtn.addEventListener(ev, e => e.preventDefault());   // keep the selection
-quoteBtn.onclick = () => {
-  if (!selText) return;
-  const q = selText.split("\n").map(l => l.trim() ? "> " + l : ">").join("\n") + "\n\n";
+const QUOTE_MAX = 1000;   // a whole long reply is quoted in part: Claude has the rest in its context
+function quoteInto(text, who) {   // add "> Who:" and the quoted lines to the draft
+  text = String(text).trim();
+  if (text.length > QUOTE_MAX) text = text.slice(0, QUOTE_MAX).trimEnd() + "…";
+  const q = [who + ":", ...text.split("\n")].map(l => l.trim() ? "> " + l : ">").join("\n") + "\n\n";
   const had = input.value;
   input.value = had + (had && !had.endsWith("\n\n") ? (had.endsWith("\n") ? "\n" : "\n\n") : "") + q;
   try { localStorage.setItem(draftKey(), input.value); } catch (e) {}
-  selText = ""; quoteBtn.classList.add("hidden"); getSelection().removeAllRanges();
+  getSelection().removeAllRanges();
   autosize(); picker();
   input.focus(); input.setSelectionRange(input.value.length, input.value.length);
   input.classList.remove("flash"); void input.offsetWidth; input.classList.add("flash");
+}
+quoteBtn.onclick = () => {
+  if (!selText) return;
+  const t = selText;
+  selText = ""; quoteBtn.classList.add("hidden");
+  quoteInto(t, selWho);
 };
 
 $("stop").onclick = async () => {
@@ -1407,6 +1570,8 @@ function renameSheet(old) {
       try {   // carry the unsent draft over
         const d = localStorage.getItem("grovy-draft:" + old);
         if (d) { localStorage.setItem("grovy-draft:" + nw, d); localStorage.removeItem("grovy-draft:" + old); }
+        const at = localStorage.getItem("grovy-att:" + old);
+        if (at) { localStorage.setItem("grovy-att:" + nw, at); localStorage.removeItem("grovy-att:" + old); }
       } catch (e) {}
       closeSheet();
       go("#/s/" + nw);
@@ -1540,7 +1705,7 @@ function route() {
   $("title").textContent = view || "Sessions";
   main.replaceChildren();
   $("picker").replaceChildren(); commands = [];
-  if (view) { try { input.value = localStorage.getItem(draftKey()) || ""; } catch (e) { input.value = ""; } autosize(); loadCommands(); }
+  if (view) { try { input.value = localStorage.getItem(draftKey()) || ""; } catch (e) { input.value = ""; } autosize(); loadAtts(); loadCommands(); }
   refresh();
 }
 function refresh() {

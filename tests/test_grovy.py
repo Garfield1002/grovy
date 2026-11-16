@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 import urllib.request
 from contextlib import redirect_stdout
 from unittest import mock
@@ -84,6 +85,16 @@ class TestValidation(unittest.TestCase):
         self.assertEqual(set(hooks), set(grovy.HOOK_EVENTS))
         self.assertGreater(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], grovy.PERMISSION_TIMEOUT)
         self.assertTrue(hooks["Stop"][0]["hooks"][0]["command"].endswith("'hook' 'x'"))
+
+
+class TestAttachmentsDir(unittest.TestCase):
+    def test_sessions_may_read_attachments(self):
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": os.path.join(TMP, "sd1"), "TMPDIR": "/tmp"}):
+            d = grovy.attachments_dir()
+            self.assertTrue(d.startswith(f"/tmp/grovy-{os.getuid()}-"))   # a scratch daemon gets its own
+            self.assertEqual(grovy.session_settings("x")["permissions"]["additionalDirectories"], [d])
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": os.path.join(TMP, "sd2")}):
+            self.assertNotEqual(grovy.attachments_dir(), d)
 
 
 class TestRenameMigration(unittest.TestCase):
@@ -1173,6 +1184,33 @@ class TestSteering(StoreCase):
             self.assertEqual(out.getvalue(), "")
 
 
+class TestTurnTools(StoreCase):
+    def test_stop_lists_the_turns_tools(self):
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.ingest("a", ev("PostToolUse", tool_name="Bash", tool_input={"command": "ls"}))   # before any turn
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="go"))
+        self.store.ingest("a", ev("PostToolUse", tool_name="Bash", tool_input={"command": "git  status\n-s"}))
+        self.store.ingest("a", ev("PostToolUse", tool_name="Read", tool_input={"file_path": "/x/y.py", "limit": 5}))
+        self.store.ingest("a", ev("PostToolUse", tool_name="TodoWrite", tool_input={"todos": []}))
+        self.store.ingest("a", ev("Stop", last_assistant_message="done"))
+        d = self.store.events["a"][-1]["data"]
+        self.assertEqual(d["tools"], [{"tool": "Bash", "arg": "git status -s"}, {"tool": "Read", "arg": "/x/y.py"},
+                                      {"tool": "TodoWrite", "arg": ""}])
+        self.assertEqual(d["tool_count"], 3)
+        self.assertGreaterEqual(d["worked"], 0)
+        self.store.ingest("a", ev("Stop", last_assistant_message="again"))   # no new turn: nothing to report
+        self.assertNotIn("worked", self.store.events["a"][-1]["data"])
+
+    def test_long_turns_are_capped(self):
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="go"))
+        for i in range(grovyd.TURN_TOOLS + 5):
+            self.store.ingest("a", ev("PostToolUse", tool_name="Bash", tool_input={"command": f"echo {i} " + "x" * 300}))
+        self.store.ingest("a", ev("Stop", last_assistant_message="done"))
+        d = self.store.events["a"][-1]["data"]
+        self.assertEqual((len(d["tools"]), d["tool_count"]), (grovyd.TURN_TOOLS, grovyd.TURN_TOOLS + 5))
+        self.assertEqual(len(d["tools"][0]["arg"]), 118)
+
+
 class TestRestart(StoreCase):
     def test_restart_only_when_nothing_is_cut_off(self):
         calls = []
@@ -1744,6 +1782,74 @@ class TestHttp(unittest.TestCase):
             self.assertNotEqual(self.store.share_page(p["id"], True)[1]["share"], tok)   # new link
         self.assertEqual(self.req(f"/api/pages/{p['id']}/share", {"shared": "yes"})[0], 400)
         self.assertEqual(self.req(f"/api/pages/{p['id']}/share", {"shared": False})[0], 200)
+
+    def upload(self, name, data, filename="x.txt", ctype="application/octet-stream"):
+        return self.req(f"/api/sessions/{name}/attachments", raw=data,
+                        headers={"Content-Type": ctype, "X-Filename": urllib.parse.quote(filename)})
+
+    def test_attachment_upload(self):
+        top = os.path.join(tempfile.mkdtemp(dir=TMP), "grovy-u", "attachments")
+        with mock.patch.object(grovy, "attachments_dir", lambda: top):
+            code, body, _ = self.upload("a", b"\x89PNG data", "../My photo (1).png")
+            self.assertEqual(code, 200, body)
+            res = json.loads(body)
+            self.assertEqual(os.path.dirname(res["path"]), os.path.join(top, "a"))
+            self.assertTrue(os.path.basename(res["path"]).endswith("-My_photo_1_.png"))
+            self.assertEqual(res["size"], 9)
+            with open(res["path"], "rb") as f:
+                self.assertEqual(f.read(), b"\x89PNG data")
+            self.assertEqual(os.stat(res["path"]).st_mode & 0o777, 0o600)
+            self.assertEqual(os.stat(os.path.dirname(top)).st_mode & 0o777, 0o700)
+            self.assertEqual(self.upload("a", b"x", ctype="application/json")[0], 415)
+            self.assertEqual(self.upload("nope", b"x")[0], 404)
+            self.assertEqual(self.upload("a", b"")[0], 400)
+            with mock.patch.object(grovyd, "MAX_UPLOAD", 4):
+                self.assertEqual(self.upload("a", b"12345")[0], 413)
+            with mock.patch.object(self.httpd, "token", "secret"):
+                self.assertEqual(self.upload("a", b"x")[0], 401)
+        self.assertEqual(sorted(os.listdir(os.path.join(top, "a"))), [os.path.basename(res["path"])])
+
+    def test_attachment_thumbnails(self):
+        top = os.path.join(tempfile.mkdtemp(dir=TMP), "grovy-t", "attachments")
+        with mock.patch.object(grovy, "attachments_dir", lambda: top):
+            img = json.loads(self.upload("a", b"\x89PNG", "p.png")[1])["path"]
+            txt = json.loads(self.upload("a", b"secret", "notes.txt")[1])["path"]
+            code, body, h = self.req("/api/attachments/a/" + os.path.basename(img))
+            self.assertEqual((code, body, h["Content-Type"]), (200, b"\x89PNG", "image/png"))
+            self.assertEqual(h["Content-Security-Policy"], "default-src 'none'")
+            self.assertEqual(self.req("/api/attachments/a/" + os.path.basename(txt))[0], 404)   # images only
+            self.assertEqual(self.req("/api/attachments/a/..%2F..%2Fstate.png")[0], 404)
+            outside = os.path.join(TMP, "secret.png")
+            open(outside, "wb").write(b"no")
+            os.symlink(outside, os.path.join(top, "a", "20260101-000000-abcd-link.png"))
+            self.assertEqual(self.req("/api/attachments/a/20260101-000000-abcd-link.png")[0], 404)   # no symlinks
+            with mock.patch.object(self.httpd, "token", "secret"):
+                self.assertEqual(self.req("/api/attachments/a/" + os.path.basename(img))[0], 401)
+
+    def test_attachments_never_written_through_a_planted_dir(self):
+        """Anyone can create names in /tmp: a symlink or someone else's open directory there must be refused."""
+        base = tempfile.mkdtemp(dir=TMP)
+        elsewhere = tempfile.mkdtemp(dir=TMP)
+        os.symlink(elsewhere, os.path.join(base, "grovy-s"))
+        os.makedirs(os.path.join(base, "grovy-o"), mode=0o777)
+        os.chmod(os.path.join(base, "grovy-o"), 0o777)
+        for d in ("grovy-s", "grovy-o"):
+            top = os.path.join(base, d, "attachments")
+            with mock.patch.object(grovy, "attachments_dir", lambda: top):
+                code, body, _ = self.upload("a", b"secret")
+                self.assertEqual(code, 500, body)
+        self.assertEqual(os.listdir(elsewhere), [])
+
+    def test_old_attachments_pruned(self):
+        top = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(top, "s1")); os.makedirs(os.path.join(top, "s2"))
+        old, new = os.path.join(top, "s1", "old"), os.path.join(top, "s2", "new")
+        for p in (old, new):
+            open(p, "w").close()
+        os.utime(old, (time.time() - grovyd.ATTACH_TTL - 60,) * 2)
+        grovyd.prune_attachments(top)
+        self.assertEqual(sorted(os.listdir(top)), ["s2"])   # the emptied folder goes too
+        self.assertTrue(os.path.exists(new))
 
     def test_idle_connections_cannot_lock_out_the_phone(self):
         class Small(grovyd.HttpServer):

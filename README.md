@@ -44,7 +44,10 @@ in a terminal. grovy listens to Claude's hooks and shows everything on a phone-f
   with a link.
 - **Steering:** a message you send while Claude is working reaches it at its next step, so you can correct course
   without waiting or interrupting.
-- **Quote:** select part of Claude's reply and tap Quote to reply to just that.
+- **Quote and copy:** each reply has Copy and Quote buttons; or select part of it and tap Quote selection. Tap a quote
+  to jump back to where it came from. "Worked for 2m · 14 tool calls" under a reply lists what Claude ran.
+- **Attachments:** tap the paperclip in the empty message box to send photos or files; Claude gets them as files it can open (kept for 7 days). Photos
+  show in your message.
 - **Live progress:** when Claude runs something long (a build, training, a batch job), its script can show a progress
   bar, notes or the latest output lines in the chat while it runs. Sessions started before you updated grovy get
   this after ⋯ → Update session.

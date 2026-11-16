@@ -80,6 +80,17 @@ def state_dir():
     return d
 
 
+def attachments_dir():
+    """Files sent from the phone. They're transient, so under the temp dir, in a directory private to the user
+    (the daemon checks that before writing). Each session may read it without asking (session_settings)."""
+    base = os.path.join(os.environ.get("TMPDIR") or "/tmp", f"grovy-{os.getuid()}")
+    sd = env("STATE_DIR")
+    if sd and os.path.realpath(sd) != os.path.realpath(default_state_dir()):   # a scratch daemon gets its own
+        import hashlib
+        base += "-" + hashlib.sha256(os.path.realpath(sd).encode()).hexdigest()[:8]
+    return os.path.join(base, "attachments")
+
+
 def token_path():
     return os.path.join(state_dir(), "token")
 
@@ -327,7 +338,8 @@ def session_settings(name):
     own = user_statusline()
     if own and isinstance(own.get("padding"), int):
         status["padding"] = own["padding"]
-    return {"hooks": hooks, "statusLine": status, "autoMode": auto_mode_hints()}
+    return {"hooks": hooks, "statusLine": status, "autoMode": auto_mode_hints(),
+            "permissions": {"additionalDirectories": [attachments_dir()]}}   # files sent from the phone
 
 
 def session_fingerprint(name):
