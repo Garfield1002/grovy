@@ -27,8 +27,13 @@ os.environ["GROVY_STATE_DIR"] = os.path.join(TMP, "state")
 # Never let a test reach the real ~/.local/state (default_state_dir() migrates ~/.local/state/ccs on first use).
 os.environ["XDG_STATE_HOME"] = os.path.join(TMP, "xdg")
 os.environ.pop("CCS_STATE_DIR", None)
+# Nor the user's own custom.css / custom.js / instructions.md.
+os.environ["XDG_CONFIG_HOME"] = os.path.join(TMP, "xdg-config")
+for _k in ("GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
+    os.environ.pop(_k, None)
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
+from grovylib import plugins, claude, client, commands, core, hook, install, live, manage, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tmuxctl, uploads  # noqa: E402
 
 
 def ev(name, **kw):
@@ -40,9 +45,9 @@ class StoreCase(unittest.TestCase):
         self.dir = tempfile.mkdtemp(dir=TMP)
         self.live = {"a": "%1", "b": "%2"}
         self.pasted = []
-        self.store = grovyd.Store(self.dir, tmux_live=lambda: dict(self.live),
+        self.store = store.Store(self.dir, tmux_live=lambda: dict(self.live),
                                 paste=lambda n, t, *a, **k: self.pasted.append((n, t)))
-        self.reg = mock.patch.object(grovy, "registry", lambda: {"a": {"cwd": "/a"}, "b": {"cwd": "/b"}})
+        self.reg = mock.patch.object(sessions, "registry", lambda: {"a": {"cwd": "/a"}, "b": {"cwd": "/b"}})
         self.reg.start()
         self.store.reconcile()
 
@@ -59,42 +64,42 @@ class StoreCase(unittest.TestCase):
 class TestValidation(unittest.TestCase):
     def test_names(self):
         for good in ("a", "api", "my-proj_2", "A" * 32):
-            self.assertTrue(grovy.valid_name(good), good)
+            self.assertTrue(core.valid_name(good), good)
         for bad in ("", "-x", "a.b", "a:b", "a b", "../x", "A" * 33, "é", None, 3, "a\n"):
-            self.assertFalse(grovy.valid_name(bad), bad)
+            self.assertFalse(core.valid_name(bad), bad)
 
     def test_permission_output(self):
-        self.assertEqual(grovy.permission_output("allow"),
+        self.assertEqual(hook.permission_output("allow"),
                          {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
                                                  "decision": {"behavior": "allow"}}})
-        d = grovy.permission_output("deny")["hookSpecificOutput"]["decision"]
+        d = hook.permission_output("deny")["hookSpecificOutput"]["decision"]
         self.assertEqual(d["behavior"], "deny")
         self.assertTrue(d["message"])
 
     def test_typed_mode(self):
-        self.assertTrue(grovy.typed_mode("hello\nworld"))
-        self.assertFalse(grovy.typed_mode("/compact"))
-        self.assertFalse(grovy.typed_mode("  !rm -rf"))
-        self.assertFalse(grovy.typed_mode("x" * (grovy.TYPE_MAX + 1)))
+        self.assertTrue(tmuxctl.typed_mode("hello\nworld"))
+        self.assertFalse(tmuxctl.typed_mode("/compact"))
+        self.assertFalse(tmuxctl.typed_mode("  !rm -rf"))
+        self.assertFalse(tmuxctl.typed_mode("x" * (tmuxctl.TYPE_MAX + 1)))
 
     def test_norm(self):
-        self.assertEqual(grovyd.norm("a\r\nb  \n"), "a\nb")
+        self.assertEqual(core.norm("a\r\nb  \n"), "a\nb")
 
     def test_hook_settings_file(self):
-        hooks = json.load(open(grovy.hook_settings("x")))["hooks"]
-        self.assertEqual(set(hooks), set(grovy.HOOK_EVENTS))
-        self.assertGreater(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], grovy.PERMISSION_TIMEOUT)
+        hooks = json.load(open(claude.hook_settings("x")))["hooks"]
+        self.assertEqual(set(hooks), set(claude.HOOK_EVENTS))
+        self.assertGreater(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], core.PERMISSION_TIMEOUT)
         self.assertTrue(hooks["Stop"][0]["hooks"][0]["command"].endswith("'hook' 'x'"))
 
 
 class TestAttachmentsDir(unittest.TestCase):
     def test_sessions_may_read_attachments(self):
         with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": os.path.join(TMP, "sd1"), "TMPDIR": "/tmp"}):
-            d = grovy.attachments_dir()
+            d = core.attachments_dir()
             self.assertTrue(d.startswith(f"/tmp/grovy-{os.getuid()}-"))   # a scratch daemon gets its own
-            self.assertEqual(grovy.session_settings("x")["permissions"]["additionalDirectories"], [d])
+            self.assertEqual(claude.session_settings("x")["permissions"]["additionalDirectories"], [d])
         with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": os.path.join(TMP, "sd2")}):
-            self.assertNotEqual(grovy.attachments_dir(), d)
+            self.assertNotEqual(core.attachments_dir(), d)
 
 
 class TestRenameMigration(unittest.TestCase):
@@ -107,18 +112,18 @@ class TestRenameMigration(unittest.TestCase):
         env = {"XDG_STATE_HOME": base}
         with mock.patch.dict(os.environ, env):
             os.environ.pop("GROVY_STATE_DIR", None)
-            new = grovy.default_state_dir()
+            new = core.default_state_dir()
             self.assertEqual(new, os.path.join(base, "grovy"))
             self.assertTrue(os.path.islink(old))
             self.assertEqual(open(os.path.join(old, "token")).read(), "t0k\n")   # old path still resolves
-            self.assertEqual(grovy.default_state_dir(), new)                     # idempotent
+            self.assertEqual(core.default_state_dir(), new)                     # idempotent
 
     def test_env_falls_back_to_pre_rename_names(self):
         with mock.patch.dict(os.environ, {"CCS_PORT": "1"}):
             os.environ.pop("GROVY_PORT", None)
-            self.assertEqual(grovy.env("PORT"), "1")
+            self.assertEqual(core.env("PORT"), "1")
             with mock.patch.dict(os.environ, {"GROVY_PORT": "2"}):
-                self.assertEqual(grovy.env("PORT"), "2")
+                self.assertEqual(core.env("PORT"), "2")
 
 
 class TestHookAdapter(unittest.TestCase):
@@ -130,9 +135,9 @@ class TestHookAdapter(unittest.TestCase):
             if exc:
                 raise exc
             return reply
-        with mock.patch.object(grovy, "sock_request", fake), mock.patch("sys.stdin", io.StringIO(stdin)), \
+        with mock.patch.object(client, "sock_request", fake), mock.patch("sys.stdin", io.StringIO(stdin)), \
                 redirect_stdout(out), mock.patch("sys.stderr", io.StringIO()):
-            rc = grovy.cmd_hook(name)
+            rc = hook.cmd_hook(name)
         return rc, out.getvalue()
 
     def test_malformed_and_unknown(self):
@@ -152,6 +157,22 @@ class TestHookAdapter(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GROVY_WIDGETS": "0"}):
             self.assertEqual(self.run_hook(json.dumps(ev("SessionStart", source="startup")))[1], "")
 
+    def test_session_start_adds_user_instructions(self):
+        d = tempfile.mkdtemp(dir=TMP)
+        start = json.dumps(ev("SessionStart", source="clear"))
+        with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": d}):
+            with open(os.path.join(d, "instructions.md"), "w") as f:
+                f.write("\nUse the `todo` widget for task lists.\n")
+            ctx = json.loads(self.run_hook(start, exc=OSError("down"))[1])["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("```widget", ctx)
+            self.assertTrue(ctx.endswith("\n\nUse the `todo` widget for task lists."))   # after grovy's own guide
+            with mock.patch.dict(os.environ, {"GROVY_WIDGETS": "0"}):   # widgets off: the user's notes still go
+                ctx = json.loads(self.run_hook(start, exc=OSError("down"))[1])["hookSpecificOutput"]["additionalContext"]
+                self.assertEqual(ctx, "Use the `todo` widget for task lists.")
+                with open(os.path.join(d, "instructions.md"), "w") as f:
+                    f.write("x" * (claude.INSTRUCTIONS_MAX + 1))
+                self.assertEqual(self.run_hook(start, exc=OSError("down"))[1], "")   # too big: ignored, nothing sent
+
     def test_subagent_events_stay_out_of_the_session(self):
         """Hooks fired inside a subagent carry agent_id (verified, Claude Code 2.1.325). A background subagent's
         PostToolUse arrived after the parent's Stop and showed an idle session as working: its tool calls now
@@ -161,31 +182,31 @@ class TestHookAdapter(unittest.TestCase):
             sent.append((msg["event"]["hook_event_name"], wait_reply, msg["event"].get("tool_response")))
             return {"decision": "allow", "steer": "hijack"} if wait_reply else None
         sub = {"agent_id": "ab4c", "agent_type": "general-purpose"}
-        with mock.patch.object(grovy, "sock_request", fake), mock.patch("sys.stderr", io.StringIO()):
+        with mock.patch.object(client, "sock_request", fake), mock.patch("sys.stderr", io.StringIO()):
             for name in ("PostToolUse", "UserPromptSubmit", "Stop", "PermissionRequest", "Notification",
                          "SubagentStart", "SubagentStop"):
                 out = io.StringIO()
                 payload = ev(name, **sub, tool_response={"stdout": "x" * 9999, "backgroundTaskId": "b1"})
                 with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), redirect_stdout(out):
-                    grovy.cmd_hook("x")
+                    hook.cmd_hook("x")
                 if name == "PostToolUse":
                     self.assertEqual(out.getvalue(), "")                    # a subagent is never steered
             self.assertEqual([x[0] for x in sent], ["PostToolUse", "PermissionRequest", "Notification",
                                                     "SubagentStart", "SubagentStop"])
             self.assertEqual(sent[0], ("PostToolUse", False, {"backgroundTaskId": "b1"}))   # output not shipped
             with mock.patch("sys.stdin", io.StringIO(json.dumps(ev("PostToolUse")))):
-                grovy.cmd_hook("x")                                        # the main agent's own tool calls
+                hook.cmd_hook("x")                                        # the main agent's own tool calls
             self.assertEqual(sent[-1][:2], ("PostToolUse", True))           # wait for steering
             with mock.patch.dict(os.environ, {"GROVY_SUBAGENT_HOOKS": "1"}), \
                     mock.patch("sys.stdin", io.StringIO(json.dumps(ev("Stop", **sub)))):
-                grovy.cmd_hook("x")
+                hook.cmd_hook("x")
         self.assertEqual(sent[-1][0], "Stop")
 
     def test_auto_mode_hints_in_session_settings(self):
-        with open(grovy.hook_settings("am")) as f:
+        with open(claude.hook_settings("am")) as f:
             am = json.load(f)["autoMode"]
         self.assertEqual((am["environment"][0], am["allow"][0]), ("$defaults", "$defaults"))   # built-ins kept
-        self.assertIn(grovy.GROVY_BIN, am["environment"][1])
+        self.assertIn(claude.GROVY_BIN, am["environment"][1])
         self.assertEqual(set(am), {"environment", "allow"})   # never soft_deny/hard_deny: those would replace rules
 
     def test_daemon_down_permission_falls_back(self):
@@ -260,11 +281,11 @@ class TestEventLog(unittest.TestCase):
         good = {"id": 5, "ts": 1, "ccs": "a", "claude_session_id": None, "type": "Stop", "data": {}}
         with open(os.path.join(d, "events.jsonl"), "w") as f:
             f.write(json.dumps(good) + "\nnot json\n" + '{"id": 6, "ts": 1, "ccs": "a", "ty')
-        with mock.patch.object(grovy, "registry", lambda: {}):
-            s = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
+        with mock.patch.object(sessions, "registry", lambda: {}):
+            s = store.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
             self.assertEqual(len(s.events["a"]), 1)
             s.ingest("a", ev("Stop", last_assistant_message="after"))
-            s2 = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
+            s2 = store.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
         self.assertEqual([r["id"] for r in s2.events["a"]], [5, 6])
 
     def test_restart_reconfirms_wrapped_prompts(self):
@@ -273,19 +294,19 @@ class TestEventLog(unittest.TestCase):
                "data": {"prompt": '<pasted_content id="x">\nhello\n\n\nworld\n</pasted_content id="x">'}}
         with open(os.path.join(d, "events.jsonl"), "w") as f:
             f.write(json.dumps(rec) + "\n")
-        grovy.atomic_write_json(os.path.join(d, "prompts.json"), [
+        core.atomic_write_json(os.path.join(d, "prompts.json"), [
             {"id": "q" * 32, "ccs": "a", "text": "hello\nworld", "status": "unconfirmed", "created": 1, "updated": 1, "error": None}])
-        s = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
+        s = store.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
         self.assertEqual(s.prompts[0]["status"], "submitted")
 
     def test_restart_mid_permission_and_injection(self):
         d = tempfile.mkdtemp(dir=TMP)
-        grovy.atomic_write_json(os.path.join(d, "state.json"), {"sessions": {"a": {
+        core.atomic_write_json(os.path.join(d, "state.json"), {"sessions": {"a": {
             "name": "a", "state": "needs_input", "cwd": "/", "claude_session_id": "S", "last_event": 1,
             "activity": "", "last_error": None, "background": 0}}})
-        grovy.atomic_write_json(os.path.join(d, "prompts.json"), [
+        core.atomic_write_json(os.path.join(d, "prompts.json"), [
             {"id": "p" * 32, "ccs": "a", "text": "hi", "status": "injected", "created": 1, "updated": 1, "error": None}])
-        s = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
+        s = store.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
         self.assertEqual(s.sessions["a"]["state"], "needs_input")  # Claude fell back to its terminal dialog
         self.assertEqual(s.prompts[0]["status"], "unconfirmed")  # never re-sent
 
@@ -293,8 +314,8 @@ class TestEventLog(unittest.TestCase):
         """Regression: a force-queued prompt was typed into a terminal permission dialog after restart."""
         d = tempfile.mkdtemp(dir=TMP)
         pasted = []
-        with mock.patch.object(grovy, "registry", lambda: {"a": {"cwd": "/"}}):
-            s = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda n, t, *a, **k: pasted.append(t))
+        with mock.patch.object(sessions, "registry", lambda: {"a": {"cwd": "/"}}):
+            s = store.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda n, t, *a, **k: pasted.append(t))
             s.ingest("a", ev("SessionStart"))
             s.ingest("a", ev("UserPromptSubmit", prompt="busy"))           # working, fresh
             s.enqueue("a", "later", force=True)                            # can't type now
@@ -302,7 +323,7 @@ class TestEventLog(unittest.TestCase):
             s.sessions["a"]["state"] = "unknown"
             s.try_deliver("a")
             s.open_permission("a", ev("PermissionRequest", tool_name="Bash"))
-            s2 = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda n, t, *a, **k: pasted.append(t))
+            s2 = store.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda n, t, *a, **k: pasted.append(t))
             s2.reconcile()
             time.sleep(0.1)
         self.assertEqual(pasted, [])
@@ -359,7 +380,7 @@ class TestPermissions(StoreCase):
         self.assertEqual(self.store.decide(p["id"], "allow")[0], 409)
 
     def test_timeout(self):
-        with mock.patch.object(grovyd, "PERM_TIMEOUT", 0.3):
+        with mock.patch.object(perms, "PERM_TIMEOUT", 0.3):
             p, t, res, peer = self.open_and_wait(ev("PermissionRequest", tool_name="Bash"))
             t.join(5)
         self.assertEqual(res["reply"], {"decision": None})
@@ -415,7 +436,7 @@ class TestQuestions(StoreCase):
         self.assertEqual(self.store.decide(p["id"], "answer", {"x": "y"})[0], 400)
 
     def test_hook_emits_updated_input(self):
-        out = grovy.permission_output("allow", None, {"questions": [], "answers": {"q": "a"}})
+        out = hook.permission_output("allow", None, {"questions": [], "answers": {"q": "a"}})
         self.assertEqual(out["hookSpecificOutput"]["decision"]["updatedInput"]["answers"], {"q": "a"})
 
 
@@ -432,11 +453,11 @@ class TestCommands(StoreCase):
         self.store.sessions["a"]["cwd"] = self.proj
         self.store.ingest("a", ev("SessionStart"))
         self.store.sessions["a"]["cwd"] = self.proj
-        grovyd._cmd_cache.clear()
+        commands._cmd_cache.clear()
         self.store.paste = lambda n, t, command=False, **k: self.pasted.append((n, t, command))
 
     def test_discovery(self):
-        names = {c["name"]: c for c in grovyd.commands_for(self.proj)}
+        names = {c["name"]: c for c in commands.commands_for(self.proj)}
         self.assertIn("clear", names)
         self.assertEqual(names["hello"]["description"], "says hi")
         self.assertEqual(names["git:pr"]["description"], "Open a pull request")
@@ -461,8 +482,8 @@ class TestCommands(StoreCase):
         os.makedirs(os.path.join(self.proj, ".claude", "skills", "Settings"))
         with open(os.path.join(self.proj, ".claude", "skills", "Settings", "SKILL.md"), "w") as f:
             f.write("---\nname: Settings\n---\n")
-        grovyd._cmd_cache.clear()
-        self.assertNotIn("Settings", [c["name"] for c in grovyd.commands_for(self.proj)])
+        commands._cmd_cache.clear()
+        self.assertNotIn("Settings", [c["name"] for c in commands.commands_for(self.proj)])
 
     def test_clear_confirms_on_session_start(self):
         self.store.enqueue("a", "/clear")
@@ -483,7 +504,7 @@ class TestLifecycle(StoreCase):
                                     os.path.join(dev, "okrepo"): {"hasTrustDialogAccepted": True},
                                     os.path.join(home, "other", "untrusted"): {"hasTrustDialogAccepted": False}}}, f)
         with mock.patch.dict(os.environ, {"HOME": home, "TMPDIR": "/nonexistent-tmp"}):
-            got = grovy.trusted_projects()
+            got = projects.trusted_projects()
         rp = os.path.realpath
         self.assertIn(rp(dev), got)
         self.assertIn(rp(os.path.join(dev, "known")), got)       # plain folder: inherits ~/dev's trust
@@ -520,7 +541,7 @@ class TestLifecycle(StoreCase):
         self.assertEqual([r["id"] for r in older], ids[2:5])
         hits = self.store.history("a", q="TABLES")
         self.assertEqual([r["data"]["prompt"] for r in hits][:2], ["prompt 4 about Tables", "prompt 3 about Tables"])
-        self.assertTrue(all(grovyd._owner(r) == "a" for r in hits))
+        self.assertTrue(all(store._owner(r) == "a" for r in hits))
 
 
 class TestReviewRegressions(StoreCase):
@@ -530,7 +551,7 @@ class TestReviewRegressions(StoreCase):
         self.store.ingest("a", ev("SessionStart"))
         self.store.ingest("a", ev("UserPromptSubmit", prompt="continue"))
         self.store.ingest("a", ev("Stop", last_assistant_message="step 1 done"))
-        with mock.patch.object(grovyd, "now", lambda: time.time() + 5):     # the user types it again later
+        with mock.patch.object(core, "now", lambda: time.time() + 5):     # the user types it again later
             self.store.ingest("a", ev("UserPromptSubmit", prompt="continue"))
         self.assertEqual(self.store.sessions["a"]["state"], "working")
         self.store.enqueue("a", "phone prompt")
@@ -542,7 +563,7 @@ class TestReviewRegressions(StoreCase):
         self.store.ingest("a", ev("UserPromptSubmit", prompt="busy"))
         self.store.enqueue("a", "rm the build dir")
         del self.live["a"]
-        with mock.patch.object(grovy, "registry", lambda: {"b": {"cwd": "/b"}}):   # `grovy forget a`
+        with mock.patch.object(sessions, "registry", lambda: {"b": {"cwd": "/b"}}):   # `grovy forget a`
             self.store.reconcile()
         self.assertEqual(self.store.prompts[-1]["status"], "failed")
         self.live["a"] = "%9"
@@ -598,20 +619,20 @@ class TestReviewRegressions(StoreCase):
         os.makedirs(os.path.join(proj, ".claude", "skills", "evil"))
         with open(os.path.join(proj, ".claude", "skills", "evil", "SKILL.md"), "w") as f:
             f.write("---\nname: model\n---\n")
-        grovyd._cmd_cache.clear()
-        names = [c["name"] for c in grovyd.commands_for(proj)]
+        commands._cmd_cache.clear()
+        names = [c["name"] for c in commands.commands_for(proj)]
         self.assertNotIn("model", names)
 
     def test_live_request_shows_full_input(self):
         big = {"command": "echo " + "x" * 6000, "edits": list(range(60))}
         p = self.store.open_permission("a", ev("PermissionRequest", tool_name="Bash", tool_input=big))
-        pub = grovyd._public(p)
+        pub = perms._public(p)
         self.assertEqual(pub["tool_input"], big)
         self.assertFalse(pub["truncated"])
         self.assertIn("more items not shown", str(p["tool_input"]["edits"][-1]))   # log copy says so
         huge = self.store.open_permission("a", ev("PermissionRequest", tool_name="Write",
-                                                  tool_input={"content": "y" * (grovyd.MAX_REVIEW + 10)}))
-        self.assertTrue(grovyd._public(huge)["truncated"])
+                                                  tool_input={"content": "y" * (perms.MAX_REVIEW + 10)}))
+        self.assertTrue(perms._public(huge)["truncated"])
 
 
 class TestSecondPassRegressions(StoreCase):
@@ -623,7 +644,7 @@ class TestSecondPassRegressions(StoreCase):
         self.wait_pasted(1)
         self.assertEqual(self.store.sessions["a"]["activity"], "compacting conversation")
         later = time.time() + 90
-        with mock.patch.object(grovyd, "now", lambda: later):
+        with mock.patch.object(core, "now", lambda: later):
             self.store.reconcile()
             self.assertEqual(self.store.prompts[0]["status"], "injected")
             self.assertEqual(self.store.sessions["a"]["state"], "working")
@@ -664,7 +685,7 @@ class TestSecondPassRegressions(StoreCase):
     def test_tmux_wrapper_times_out(self):
         with mock.patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("tmux", 5)):
             with self.assertRaises(RuntimeError):
-                grovy.tmux("list-panes")
+                tmuxctl.tmux("list-panes")
 
 
 class TestEventLogRotation(unittest.TestCase):
@@ -673,8 +694,8 @@ class TestEventLogRotation(unittest.TestCase):
         with open(os.path.join(d, "events.jsonl"), "w") as f:
             f.write(json.dumps({"id": 41, "ts": 1, "ccs": "a", "claude_session_id": None, "type": "Stop", "data": {}}) + "\n")
         with mock.patch.object(os.path, "getsize", lambda p: 60 * 1024 * 1024), \
-                mock.patch.object(grovy, "registry", lambda: {}):
-            s = grovyd.Store(d, tmux_live=lambda: {}, paste=lambda *a: None)
+                mock.patch.object(sessions, "registry", lambda: {}):
+            s = store.Store(d, tmux_live=lambda: {}, paste=lambda *a: None)
         self.assertEqual(s.seq, 41)
         self.assertTrue(os.path.exists(os.path.join(d, "events.jsonl.1")))
         self.assertEqual(len(s.events["a"]), 1)
@@ -708,7 +729,7 @@ class TestConversations(StoreCase):
         # same directory name but the recorded cwd is a different folder that exists here -> not ours
         self.write(home, folder, id4, [{"type": "user", "cwd": TMP, "message": {"content": "collision"}}])
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
-            got = grovy.conversations(folder)
+            got = projects.conversations(folder)
         self.assertEqual(sorted(c["first"] for c in got), ["Fix the build please", "from another box"])
         c = next(c for c in got if c["id"] == self.ID1)
         self.assertEqual((c["id"], c["title"], c["first"], c["last"], c["messages"]),
@@ -745,7 +766,7 @@ class TestForget(StoreCase):
         @contextlib.contextmanager
         def locked():
             yield regs
-        with mock.patch.object(grovy, "registry_locked", locked):
+        with mock.patch.object(sessions, "registry_locked", locked):
             self.assertEqual(self.store.forget("a")[0], 409)          # still running
             del self.live["b"]
             self.store.reconcile()
@@ -766,7 +787,7 @@ class TestSecurityReview(StoreCase):
             self.store.ingest("a", ev("UserPromptSubmit", prompt="<task-notification>done</task-notification>"))
             self.store.open_permission("a", ev("PermissionRequest", tool_name="Bash", tool_input={"command": "rm x"}))
             seen.append(abort())
-            raise grovy.PasteAborted(seen[-1])
+            raise tmuxctl.PasteAborted(seen[-1])
         self.store.paste = paste
         self.store.enqueue("a", "hello")
         for _ in range(100):
@@ -804,10 +825,10 @@ class TestSecurityReview(StoreCase):
                 json.dump({"statusLine": {"type": "command", "command": cmd}}, f)
         out = io.StringIO()
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": os.path.join(home, "cfg")}), \
-                mock.patch.object(grovy, "registry", lambda: {"s1": {"cwd": proj}}), \
-                mock.patch.object(grovy, "sock_request", mock.Mock(side_effect=OSError("down"))), \
+                mock.patch.object(sessions, "registry", lambda: {"s1": {"cwd": proj}}), \
+                mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError("down"))), \
                 mock.patch("sys.stdin", io.StringIO(json.dumps({"cwd": evil}))), redirect_stdout(out):
-            grovy.cmd_statusline("s1")
+            hook.cmd_statusline("s1")
         self.assertFalse(os.path.exists(marker))
         self.assertEqual(out.getvalue().strip(), "OWN")   # the session's own project settings still apply
 
@@ -818,22 +839,42 @@ class TestSecurityReview(StoreCase):
 
 class TestSetupAndCustomCss(unittest.TestCase):
     def test_service_unit(self):
-        u = grovy.service_unit("100.1.2.3", 7333, path="/a:/b:/a:/x%y")
+        u = install.service_unit("100.1.2.3", 7333, path="/a:/b:/a:/x%y")
         self.assertIn("KillMode=process", u)              # restarting the daemon must not kill tmux
         self.assertIn("Environment=GROVY_BIND=100.1.2.3", u)
         self.assertIn("Environment=PATH=/a:/b:/x%%y\n", u)  # de-duplicated, % escaped for systemd
-        self.assertIn(os.path.join(grovy.HERE, "grovy") + " serve", u)
+        self.assertIn(os.path.join(core.HERE, "grovy") + " serve", u)
 
     def test_dry_run_changes_nothing(self):
         home = tempfile.mkdtemp(dir=TMP)
         env = {"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, "cfg"), "PATH": "/usr/bin:/bin"}
         out = io.StringIO()
-        with mock.patch.dict(os.environ, env), mock.patch.object(grovy.shutil, "which", lambda x: "/bin/true"), \
-                mock.patch.object(grovy, "sock_request", mock.Mock(side_effect=OSError)), redirect_stdout(out):
+        with mock.patch.dict(os.environ, env), mock.patch.object(shutil, "which", lambda x: "/bin/true"), \
+                mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError)), redirect_stdout(out):
             rc = grovy.main(["setup", "--dry-run", "--bind", "0.0.0.0", "--no-service"])
         self.assertEqual(rc, 0)
         self.assertIn("linking", out.getvalue())
         self.assertEqual(os.listdir(home), [])
+
+    def test_setup_finishes_with_the_phone_link(self):
+        """It ended in a NameError (the custom.css path variable was gone) right after printing the link."""
+        home = tempfile.mkdtemp(dir=TMP)
+        env = {"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, "cfg"), "PATH": "/usr/bin:/bin"}
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env), mock.patch.object(shutil, "which", lambda x: "/bin/true"), \
+                mock.patch.object(client, "sock_request", lambda *a, **k: {"ok": 1}), \
+                mock.patch.object(install, "cmd_url", lambda a: print("LINK")), redirect_stdout(out):
+            rc = grovy.main(["setup", "--bind", "127.0.0.1", "--no-service"])
+        self.assertEqual(rc, 0)
+        self.assertIn("LINK", out.getvalue())
+        self.assertIn(os.path.join(home, "cfg", "grovy"), out.getvalue())
+        self.assertLessEqual({"custom.css", "custom.js"}, set(os.listdir(os.path.join(home, "cfg", "grovy"))))
+
+    def test_config_dir_changes_the_fingerprint_only_when_set(self):
+        base = claude.session_fingerprint("fp")
+        with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": "/somewhere"}):
+            self.assertNotEqual(claude.session_fingerprint("fp"), base)
+        self.assertEqual(claude.session_fingerprint("fp"), base)
 
     def test_custom_css_is_served_and_reloaded(self):
         d = tempfile.mkdtemp(dir=TMP)
@@ -845,6 +886,9 @@ class TestSetupAndCustomCss(unittest.TestCase):
             self.assertIn(b'<style id="custom-css">\n:root { --user:#123456; }', html)
             self.assertLess(html.index(b"</style>"), html.index(b"custom-css"))   # after the built-in styles
             self.assertEqual(csp, csp2)                                         # scripts (and hashes) unchanged
+            with open(os.path.join(d, "custom.css"), "w") as f:
+                f.write("/* no <script> tags here */ body{}")
+            self.assertEqual(grovyd.load_index()[1], csp)   # grovy's script keeps its hash (it broke the page)
             with open(os.path.join(d, "custom.css"), "w") as f:
                 f.write("a{}</style><script>alert(1)</script>")
             with mock.patch("sys.stderr", io.StringIO()):
@@ -860,6 +904,351 @@ class TestSetupAndCustomCss(unittest.TestCase):
             os.utime(os.path.join(d, "custom.css"), ns=(1, 1))
             srv.refresh_index()
             self.assertIn(b"b{color:blue}", srv.index)                          # hot reload, no restart
+
+    def test_crlf_checkout_keeps_the_hash(self):
+        """Second review: with index.html checked out with CR LF, grovy's own script hash didn't match the browser's."""
+        import base64
+        import hashlib
+        d = tempfile.mkdtemp(dir=TMP)
+        page = os.path.join(d, "index.html")
+        with open(page, "wb") as f:
+            f.write(b"<html><script>\r\nlet a = 1;\r\n</script></html>\r\n")
+        with mock.patch.object(grovyd, "INDEX_PATH", page), mock.patch.object(grovyd, "EXTENSIONS_DIR", d):
+            html, csp = grovyd.load_index()
+        self.assertNotIn(b"\r", html)
+        self.assertIn(base64.b64encode(hashlib.sha256(b"\nlet a = 1;\n").digest()).decode(), csp)
+
+    def test_builtin_extensions_come_before_custom_js(self):
+        import base64
+        import hashlib
+        cfg, exts = tempfile.mkdtemp(dir=TMP), tempfile.mkdtemp(dir=TMP)
+        for name, code in (("b.js", "grovy.extension('b', g => 0);"), ("a.js", "grovy.extension('a', g => 0);"),
+                           ("notes.txt", "not a script")):
+            with open(os.path.join(exts, name), "w") as f:
+                f.write(code)
+        with open(os.path.join(cfg, "custom.js"), "w") as f:
+            f.write("grovy.disable('a');")
+        with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": cfg}), mock.patch.object(grovyd, "EXTENSIONS_DIR", exts):
+            html, csp = grovyd.load_index()
+            order = [html.index(x) for x in (b"DOMContentLoaded", b"extension('a'", b"extension('b'", b"disable('a')")]
+            self.assertEqual(order, sorted(order))                  # grovy, built-ins by name, then the user's file
+            self.assertNotIn(b"not a script", html)
+            for block in (b"\ngrovy.extension('a', g => 0);\n", b"\ngrovy.disable('a');\n"):
+                self.assertIn(base64.b64encode(hashlib.sha256(block).digest()).decode(), csp)
+            self.assertEqual(csp.count("sha256-"), 4)
+            srv = grovyd.HttpServer.__new__(grovyd.HttpServer)
+            srv.index_mtime = None
+            srv.refresh_index()
+            with open(os.path.join(exts, "a.js"), "w") as f:
+                f.write("grovy.extension('a', g => 1); // edited")
+            os.utime(os.path.join(exts, "a.js"), ns=(1, 1))
+            srv.refresh_index()
+            self.assertIn(b"// edited", srv.index)                  # reloaded without a restart
+            with open(os.path.join(exts, "a.js"), "w") as f:
+                f.write("x = '</script>';")
+            with mock.patch("sys.stderr", io.StringIO()):
+                self.assertNotIn(b"x = '", grovyd.load_index()[0])  # same rules as custom.js
+        self.assertTrue(os.path.exists(os.path.join(ROOT, "extensions", "context-bar.js")))
+        self.assertIn(b'grovy.extension("context-bar"', grovyd.load_index()[0])   # the real one ships and loads
+
+    def test_custom_js_is_served_hashed_and_reloaded(self):
+        import base64
+        import hashlib
+        d = tempfile.mkdtemp(dir=TMP)
+        js = os.path.join(d, "custom.js")
+        with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": d}):
+            base, csp = grovyd.load_index()
+            with open(js, "w") as f:
+                f.write('grovy.menu("Hi", () => grovy.say("hi"));')
+            html, csp2 = grovyd.load_index()
+            block = b'\ngrovy.menu("Hi", () => grovy.say("hi"));\n'
+            self.assertIn(b"<script>" + block + b"</script>", html)
+            self.assertLess(html.index(b"DOMContentLoaded"), html.index(block))   # after grovy's own script
+            self.assertTrue(html.endswith(base[base.rindex(b"</script>") + 9:]))  # and nothing else moved
+            h = "'sha256-%s'" % base64.b64encode(hashlib.sha256(block).digest()).decode()
+            self.assertNotIn(h, csp)
+            self.assertIn(h, csp2)                                                # allowed by its hash, nothing looser
+            self.assertEqual(csp2.replace(" " + h, ""), csp)
+            for bad in ('x = "</script><script>alert(1)";', "x = 1 <!-- 2", "y = '</SCRIPT >'"):
+                with open(js, "w") as f:
+                    f.write(bad)
+                with mock.patch("sys.stderr", io.StringIO()) as err:
+                    self.assertEqual(grovyd.load_index(), (base, csp))           # refused, page unchanged
+                self.assertIn("ignoring", err.getvalue())
+            srv = grovyd.HttpServer.__new__(grovyd.HttpServer)
+            srv.index_mtime = None
+            with open(js, "w") as f:
+                f.write("let a = 1;")
+            srv.refresh_index()
+            self.assertIn(b"let a = 1;", srv.index)
+            with open(js, "w") as f:
+                f.write("let a = 2;")
+            os.utime(js, ns=(1, 1))
+            srv.refresh_index()
+            self.assertIn(b"let a = 2;", srv.index)                               # hot reload, no restart
+            os.unlink(js)
+            srv.refresh_index()
+            self.assertEqual(srv.index, base)
+            with open(js, "wb") as f:                                             # saved on Windows: CR LF
+                f.write(b"let a = 3;\r\nlet b = 4;\r")
+            html, csp3 = grovyd.load_index()
+            lf = b"\nlet a = 3;\nlet b = 4;\n\n"
+            self.assertIn(b"<script>" + lf + b"</script>", html)                  # the browser hashes the LF text
+            self.assertIn(base64.b64encode(hashlib.sha256(lf).digest()).decode(), csp3)
+            for bad in (b"let a = '\0';", b"let a = '\xff';"):
+                with open(js, "wb") as f:
+                    f.write(bad)
+                with mock.patch("sys.stderr", io.StringIO()):
+                    self.assertEqual(grovyd.load_index(), (base, csp))
+            os.unlink(js)
+            os.mkfifo(js)                                                          # would block the page request
+            with mock.patch("sys.stderr", io.StringIO()) as err:
+                self.assertEqual(grovyd.load_index(), (base, csp))
+            self.assertIn("not a regular file", err.getvalue())
+            os.unlink(js)
+            shutil.copyfile(os.path.join(ROOT, "examples", "custom.js"), js)      # what `grovy setup` installs
+            self.assertIn(b"grovy.widget(type, render)", grovyd.load_index()[0])
+
+
+def write_plugin(folder, name, code):
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, name), "w") as f:
+        f.write(code)
+
+
+GOOD_PLUGIN = """
+import time
+seen = []
+def setup(grovy):
+    grovy.on("event", lambda s, rec: seen.append(("event", s, rec["type"])) or rec["data"].clear())
+    @grovy.on("state")
+    def st(s, old, new):
+        seen.append(("state", s, old, new))
+    grovy.on("notify", lambda s, kind, text: seen.append(("notify", s, kind)))
+    @grovy.route("GET", "hello")
+    def hello(req):
+        return {"hi": req.query.get("who", "?")}
+    @grovy.route("POST", "echo/body")
+    def echo(req):
+        return 201, {"got": req.body}
+    grovy.route("GET", "boom", lambda req: 1 / 0)
+    grovy.route("GET", "notjson", lambda req: {"x": object()})
+"""
+
+
+class TestPlugins(StoreCase):
+    def load(self, files, env=None):
+        folder = tempfile.mkdtemp(dir=TMP)
+        for name, code in files.items():
+            write_plugin(folder, name, code)
+        with mock.patch.dict(os.environ, env or {}), mock.patch("sys.stderr", io.StringIO()) as err:
+            host = plugins.Plugins(self.store, folder).load()
+        self.store.plugins = host
+        return host, err.getvalue()
+
+    def wait_for(self, cond):
+        for _ in range(200):
+            if cond():
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_load_and_skip(self):
+        host, log = self.load({"good.py": GOOD_PLUGIN, "Bad Name.py": GOOD_PLUGIN, "_off.py": "raise SystemExit",
+                               "broken.py": "def setup(grovy):\n    grovy.on('state', print)\n    raise RuntimeError('nope')\n",
+                               "nosetup.py": "x = 1\n", "syntax.py": "def setup(:\n"})
+        self.assertEqual(host.loaded, ["good"])
+        self.assertEqual(sorted(host.failed), ["Bad Name", "broken", "nosetup", "syntax"])
+        self.assertIn("RuntimeError: nope", host.failed["broken"])
+        # what a failing plugin registered before failing is gone: only good's handlers remain
+        self.assertEqual({n for e in host.handlers.values() for n, _ in e}, {"good"})
+        self.assertIn("failed to load", log)
+        host, _ = self.load({"good.py": GOOD_PLUGIN}, env={"GROVY_PLUGINS": "0"})
+        self.assertEqual((host.loaded, host.thread), ([], None))
+
+    def test_events_reach_plugins_as_copies_off_the_lock(self):
+        host, _ = self.load({"good.py": GOOD_PLUGIN})
+        seen = sys.modules["grovy_plugin_good"].seen
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="hello"))
+        self.assertTrue(self.wait_for(lambda: ("state", "a", "starting", "working") in seen), seen)
+        self.assertIn(("event", "a", "UserPromptSubmit"), seen)
+        rec = [r for r in self.store.events["a"] if r["type"] == "UserPromptSubmit"][-1]
+        self.assertEqual(rec["data"].get("prompt"), "hello")      # the plugin cleared its copy, not the record
+        self.store._notify("a", "done", "finished")
+        self.assertTrue(self.wait_for(lambda: ("notify", "a", "done") in seen))
+
+    def test_slow_or_failing_plugin_never_blocks_the_store(self):
+        gate = threading.Event()
+        slow = "import threading\nGATE = None\ndef setup(grovy):\n    grovy.on('event', lambda s, r: GATE.wait(5))\n"
+        bad = "def setup(grovy):\n    grovy.on('event', lambda s, r: 1 / 0)\n"
+        host, _ = self.load({"aslow.py": slow, "zbad.py": bad})   # in this order: bad runs after slow
+        sys.modules["grovy_plugin_aslow"].GATE = gate
+        t = time.monotonic()
+        for i in range(5):
+            self.store.ingest("a", ev("Notification", message=f"m{i}"))
+        self.assertLess(time.monotonic() - t, 1.0)              # ingest doesn't wait for the slow plugin
+        with mock.patch.object(plugins, "QUEUE_MAX", 2), mock.patch("sys.stderr", io.StringIO()):
+            small = plugins.Plugins(self.store, "/nonexistent")
+            small.handlers["event"].append(("x", lambda *a: None))
+            for _ in range(5):
+                small.emit("event", "a", {})                    # no worker: the queue fills, then events are dropped
+            self.assertEqual(small.dropped, 3)
+        with mock.patch("sys.stderr", io.StringIO()) as err:
+            gate.set()
+            self.assertTrue(self.wait_for(lambda: host.q.empty() and "ZeroDivisionError" in err.getvalue()))
+            time.sleep(0.05)
+        self.assertIn("plugin zbad (event)", err.getvalue())    # logged, and the worker keeps going
+
+    def test_example_plugin(self):
+        with open(os.path.join(ROOT, "examples", "plugin.py")) as f:
+            host, log = self.load({"worktime.py": f.read()})
+        self.assertEqual(host.loaded, ["worktime"], log)
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="go"))
+        self.assertTrue(self.wait_for(lambda: "a" in sys.modules["grovy_plugin_worktime"].since))
+        code, res = host.handle("GET", "worktime", "totals", {}, None)
+        self.assertEqual((code, list(json.loads(res))), (200, ["a"]))
+
+    def test_review_findings(self):
+        """Each case broke a promise of the plugin API (adversarial review): see the comments."""
+        late = "API = None\ndef setup(grovy):\n    global API\n    API = grovy\n"
+        hang = "import threading\ndef setup(grovy):\n    threading.Event().wait()\n"
+        exits = ("def setup(grovy):\n    grovy.on('event', lambda s, r: exec('raise SystemExit'))\n"
+                 "    grovy.on('event', lambda s, r: SEEN.append(r['type']))\nSEEN = []\n")
+        with mock.patch.object(plugins, "SETUP_TIMEOUT", 0.3):
+            host, log = self.load({"quits.py": "def setup(grovy):\n    raise SystemExit(1)\n",   # stopped the daemon
+                                   "x-y.py": "def setup(grovy):\n    pass\n",
+                                   "x_y.py": "def setup(grovy):\n    raise ValueError\n",          # removed x-y's module
+                                   "late.py": late, "hangs.py": hang, "exits.py": exits})
+        self.assertIn("SystemExit", host.failed["quits"])
+        self.assertIn("same module name as x-y.py", host.failed["x_y"])
+        self.assertIn("grovy_plugin_x_y", sys.modules)
+        self.assertIn("longer than", host.failed["hangs"])                  # a stuck setup() doesn't stop the rest
+        self.assertEqual(sorted(host.loaded), ["exits", "late", "x-y"])
+        with self.assertRaises(RuntimeError):                               # registering after setup(): refused
+            sys.modules["grovy_plugin_late"].API.on("event", print)
+        self.store.ingest("a", ev("Notification", message="one"))
+        self.store.ingest("a", ev("Notification", message="two"))
+        seen = sys.modules["grovy_plugin_exits"].SEEN
+        self.assertTrue(self.wait_for(lambda: seen.count("Notification") == 2))   # SystemExit killed the worker
+        self.assertTrue(host.thread.is_alive())
+        api = plugins.Api(host, "t")
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="busy"))
+        code, res = api.send("a", "queued")
+        res["text"] = "rm -rf ~"                                            # the result was grovy's own prompt
+        self.assertEqual([p["text"] for p in self.store.prompts if p["id"] == res["id"]], ["queued"])
+
+    def test_failed_plugin_loses_its_api(self):
+        """Second review: a plugin whose setup() failed could still read sessions and send from a thread it started."""
+        out = os.path.join(tempfile.mkdtemp(dir=TMP), "got")
+        code = ("import threading, time\ndef setup(grovy):\n"
+                "    def later():\n        time.sleep(0.2)\n        got = []\n"
+                "        for f in (grovy.sessions, lambda: grovy.send('a', 'hi'), lambda: grovy.on('event', print)):\n"
+                "            try:\n                f(); got.append('worked')\n"
+                "            except RuntimeError as e:\n                got.append(str(e))\n"
+                f"        open({out!r}, 'w').write('\\n'.join(got))\n"
+                "    threading.Thread(target=later).start()\n    raise ValueError('nope')\n")
+        host, _ = self.load({"dead.py": code})
+        self.assertIn("dead", host.failed)
+        self.assertTrue(self.wait_for(lambda: os.path.exists(out) and os.path.getsize(out)))
+        time.sleep(0.05)
+        with open(out) as f:
+            got = f.read().split("\n")
+        self.assertEqual(len(got), 3, got)
+        self.assertTrue(all("failed to load" in g for g in got), got)
+        self.assertEqual(self.pasted, [])
+
+    def test_routes_have_deadlines_and_json_answers(self):
+        gate = threading.Event()
+        code = ("import threading\nGATE = threading.Event()\ndef setup(grovy):\n"
+                "    grovy.route('GET', 'hang', lambda r: GATE.wait(5) and {})\n"
+                "    grovy.route('GET', 'nan', lambda r: {'x': float('nan')})\n"
+                "    grovy.route('GET', 'empty', lambda r: (204, {}))\n"
+                "    grovy.route('GET', 'exit', lambda r: exec('raise SystemExit'))\n"
+                "    grovy.route('GET', 'surrogate', lambda r: {'name': b'\\xff'.decode('utf-8', 'surrogateescape')})\n"
+                "    grovy.route('GET', 'pair', lambda r: (1, 2))\n")
+        host, _ = self.load({"r.py": code})
+        sys.modules["grovy_plugin_r"].GATE = gate
+        with mock.patch.object(plugins, "ROUTE_TIMEOUT", 0.2), mock.patch("sys.stderr", io.StringIO()):
+            host.running = threading.BoundedSemaphore(2)
+            self.assertEqual(host.handle("GET", "r", "hang", {}, None)[0], 504)   # it held a server slot forever
+            self.assertEqual(host.handle("GET", "r", "hang", {}, None)[0], 504)
+            self.assertEqual(host.handle("GET", "r", "hang", {}, None)[0], 503)   # hung routes are capped
+            gate.set()
+            self.assertTrue(self.wait_for(lambda: host.running.acquire(blocking=False)))
+            host.running.release()
+            self.assertEqual(host.handle("GET", "r", "nan", {}, None)[0], 500)    # the browser can't parse NaN
+            self.assertEqual(host.handle("GET", "r", "empty", {}, None)[0], 500)  # 204 can't carry a body
+            self.assertEqual(host.handle("GET", "r", "exit", {}, None)[0], 500)
+            # second review: it passed the check (ASCII-escaped) and then failed to encode when sent: no answer at all
+            self.assertEqual(host.handle("GET", "r", "surrogate", {}, None)[0], 500)
+            self.assertEqual(host.handle("GET", "r", "pair", {}, None), (200, b"[1, 2]"))   # plain data, not a status
+
+    def test_api_helpers(self):
+        host, _ = self.load({})
+        api = plugins.Api(host, "t")
+        self.assertEqual({s["name"] for s in api.sessions()}, {"a", "b"})
+        self.assertEqual(api.session("a")["session"]["name"], "a")
+        self.assertIsNone(api.session("nope"))
+        self.store.ingest("a", ev("Stop"))
+        code, res = api.send("a", "from a plugin")
+        self.assertEqual(code, 200)
+        self.wait_pasted(1)
+        self.assertEqual(self.pasted[-1], ("a", "from a plugin"))
+        for bad in (lambda: api.on("nope", print), lambda: api.route("PUT", "x", print),
+                    lambda: api.route("GET", "../x", print), lambda: api.on("event", 3)):
+            self.assertRaises((ValueError, TypeError), bad)
+
+
+class TestPluginRoutes(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = mock.patch.object(sessions, "registry", lambda: {})
+        cls.reg.start()
+        cls.store = store.Store(tempfile.mkdtemp(dir=TMP), tmux_live=lambda: {}, paste=lambda *a: None)
+        folder = tempfile.mkdtemp(dir=TMP)
+        write_plugin(folder, "good.py", GOOD_PLUGIN)
+        with mock.patch("sys.stderr", io.StringIO()):
+            cls.store.plugins = plugins.Plugins(cls.store, folder).load()
+        cls.httpd = grovyd.HttpServer(("127.0.0.1", 0), grovyd.Http)
+        cls.httpd.store, cls.httpd.token = cls.store, "t" * 32
+        cls.httpd.page = grovyd.load_index()
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.stopping = True
+        cls.httpd.shutdown()
+        cls.reg.stop()
+
+    def req(self, path, body=None, token=True, header=True):
+        h = {"Cookie": "grovy_token=" + "t" * 32} if token else {}
+        if header:
+            h["X-Grovy"] = "1"
+        data = None
+        if body is not None:
+            data, h["Content-Type"] = json.dumps(body).encode(), "application/json"
+        r = urllib.request.Request(self.base + path, data=data, headers=h, method="POST" if data is not None else "GET")
+        try:
+            with mock.patch("sys.stderr", io.StringIO()), urllib.request.urlopen(r, timeout=5) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"null")
+
+    def test_routes(self):
+        self.assertEqual(self.req("/api/x/good/hello?who=me"), (200, {"hi": "me"}))
+        self.assertEqual(self.req("/api/x/good/echo/body", {"a": 1}), (201, {"got": {"a": 1}}))
+        self.assertEqual(self.req("/api/x/good/hello", token=False)[0], 401)       # behind the login
+        self.assertEqual(self.req("/api/x/good/echo/body", {"a": 1}, token=False)[0], 401)
+        self.assertEqual(self.req("/api/x/good/hello", header=False)[0], 403)   # a tapped link can't run a GET route
+        self.assertEqual(self.req("/api/x/good/nope")[0], 404)
+        self.assertEqual(self.req("/api/x/other/hello")[0], 404)
+        self.assertEqual(self.req("/api/x/good/hello", {"a": 1})[0], 404)           # GET-only route
+        code, res = self.req("/api/x/good/boom")
+        self.assertEqual(code, 500)
+        self.assertIn("ZeroDivisionError", res["error"])
+        self.assertEqual(self.req("/api/x/good/notjson")[0], 500)
+        self.assertEqual(self.req("/api/sessions")[0], 200)                          # the daemon is still fine
 
 
 class TestPages(StoreCase):
@@ -877,13 +1266,13 @@ class TestPages(StoreCase):
         self.assertEqual(self.store.delete_page(p["id"], "b")[0], 404)                       # not b's page
         self.assertEqual(self.store.delete_page(p["id"])[0], 200)
         self.assertIsNone(self.store.page_html(p["id"]))
-        self.assertEqual(grovyd.Store(self.dir, tmux_live=lambda: {}, paste=None).list_pages("a"), [])   # persisted
+        self.assertEqual(store.Store(self.dir, tmux_live=lambda: {}, paste=None).list_pages("a"), [])   # persisted
 
     def test_publish_validation(self):
         self.assertEqual(self.store.publish_page("zz", "r", "", "x")[0], 404)
         for bad in ("../x", "", ".hidden", "a/b", "x" * 65, None):
             self.assertEqual(self.store.publish_page("a", bad, "", "x")[0], 400, bad)
-        with mock.patch.object(grovyd, "PAGE_MAX", 10):
+        with mock.patch.object(pages, "PAGE_MAX", 10):
             self.assertEqual(self.store.publish_page("a", "big", "", "x" * 11)[0], 413)
 
     def test_pages_follow_rename_and_go_with_forget(self):
@@ -897,14 +1286,14 @@ class TestPages(StoreCase):
         def locked():
             yield {"c": {}}
         del self.live["a"]
-        with mock.patch.object(grovy, "registry_locked", locked), mock.patch.object(self.store, "tmux_live", lambda: {}):
+        with mock.patch.object(sessions, "registry_locked", locked), mock.patch.object(self.store, "tmux_live", lambda: {}):
             self.assertEqual(self.store.forget("c")[0], 200)
         self.assertIsNone(self.store.page_html(p["id"]))
 
     def test_bridge_goes_after_doctype(self):
-        out = grovyd.with_bridge(b"\n<!DOCTYPE html><html>x")
-        self.assertTrue(out.startswith(b"\n<!DOCTYPE html>" + grovyd.PAGE_BRIDGE))
-        self.assertTrue(grovyd.with_bridge(b"<p>hi").startswith(grovyd.PAGE_BRIDGE))
+        out = pages.with_bridge(b"\n<!DOCTYPE html><html>x")
+        self.assertTrue(out.startswith(b"\n<!DOCTYPE html>" + pages.PAGE_BRIDGE))
+        self.assertTrue(pages.with_bridge(b"<p>hi").startswith(pages.PAGE_BRIDGE))
 
 
 class TestRename(StoreCase):
@@ -941,7 +1330,7 @@ class TestRename(StoreCase):
         # history from disk follows the rename too
         self.assertTrue(self.store.history("jean", q="busy"))
         # the old name can't be reused while it is an alias
-        with mock.patch.object(grovy, "registry", lambda: regs):
+        with mock.patch.object(sessions, "registry", lambda: regs):
             self.assertEqual(self.store.create("a", "/x", False)[0], 409)
 
     def test_hook_adapter_updates_the_renamed_entry(self):
@@ -951,9 +1340,9 @@ class TestRename(StoreCase):
         def locked():
             yield regs
         out = io.StringIO()
-        with mock.patch.object(grovy, "registry_locked", locked), mock.patch.object(grovy, "sock_request", lambda *a, **k: None), \
+        with mock.patch.object(sessions, "registry_locked", locked), mock.patch.object(client, "sock_request", lambda *a, **k: None), \
                 mock.patch("sys.stdin", io.StringIO(json.dumps(ev("SessionStart", sid="NEW")))), redirect_stdout(out):
-            grovy.cmd_hook("a")
+            hook.cmd_hook("a")
         self.assertEqual(regs["jean"]["claude_session_id"], "NEW")
 
 
@@ -982,11 +1371,11 @@ class TestStatusLine(StoreCase):
             json.dump({"statusLine": {"type": "command", "command": "cat >/dev/null; echo my-own-status-line", "padding": 2}}, f)
         msgs, out = [], io.StringIO()
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}), \
-                mock.patch.object(grovy, "sock_request", lambda m, **k: msgs.append(m)), \
+                mock.patch.object(client, "sock_request", lambda m, **k: msgs.append(m)), \
                 mock.patch("sys.stdin", io.StringIO(json.dumps({**self.SAMPLE, "transcript_path": "/secret"}))), \
                 redirect_stdout(out):
-            grovy.cmd_statusline("a")
-            settings = json.load(open(grovy.hook_settings("sl")))
+            hook.cmd_statusline("a")
+            settings = json.load(open(claude.hook_settings("sl")))
         self.assertEqual(out.getvalue(), "my-own-status-line\n")
         self.assertEqual(msgs[0]["type"], "statusline")
         self.assertNotIn("transcript_path", msgs[0]["data"])     # only the fields grovy uses are forwarded
@@ -998,21 +1387,21 @@ class TestStatusLine(StoreCase):
         with open(os.path.join(home, "settings.json"), "w") as f:
             json.dump({"statusLine": {"type": "command", "command": "python3 grovy.py statusline x"}}, f)
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
-            self.assertIsNone(grovy.user_statusline())
+            self.assertIsNone(claude.user_statusline())
 
 
 class TestOutdated(StoreCase):
     def test_update_offered_only_when_the_settings_changed(self):
-        fp = grovy.session_fingerprint("a")
+        fp = claude.session_fingerprint("a")
         reg = {"a": {"cwd": "/a", "config": fp}, "b": {"cwd": "/b", "config": "old"}}
-        with mock.patch.object(grovy, "registry", lambda: reg):
+        with mock.patch.object(sessions, "registry", lambda: reg):
             self.store.reconcile()
             self.assertEqual((self.store.summary("a")["outdated"], self.store.summary("b")["outdated"]), (False, True))
             del reg["a"]["config"]   # started before grovy recorded it
             self.store.reconcile()
             self.assertTrue(self.store.summary("a")["outdated"])
             reg["a"]["config"] = fp
-            with mock.patch.object(grovy, "SESSION_ENV_VERSION", 99):   # e.g. a new variable in the environment
+            with mock.patch.object(claude, "SESSION_ENV_VERSION", 99):   # e.g. a new variable in the environment
                 self.store.reconcile()
             self.assertTrue(self.store.summary("a")["outdated"])
             del self.live["b"]       # ended: Resume, not Update
@@ -1081,15 +1470,15 @@ class TestOomGuard(StoreCase):
 
 class TestOomHelpers(unittest.TestCase):
     def test_proc_scope_and_journal_match(self):
-        self.assertTrue(grovy.proc_scope(os.getpid()) is None or grovy.proc_scope(os.getpid()).endswith(".scope"))
-        self.assertIsNone(grovy.proc_scope(10**9))
+        self.assertTrue(oom.proc_scope(os.getpid()) is None or oom.proc_scope(os.getpid()).endswith(".scope"))
+        self.assertIsNone(oom.proc_scope(10**9))
         for line in ("tmux-spawn-9.scope: systemd-oomd killed 14 process(es) in this unit.",
                      "x.scope: Failed with result 'oom-kill'."):
-            self.assertTrue(grovy.OOM_LOG_RE.search(line))
-        self.assertFalse(grovy.OOM_LOG_RE.search("x.scope: Consumed 2min CPU time, 6.1M memory peak."))
-        with mock.patch.object(grovy.subprocess, "run", side_effect=OSError("no journalctl")):
-            self.assertFalse(grovy.oom_killed(["x.scope"]))
-            self.assertIsNone(grovy.oom_protect("a", 1))
+            self.assertTrue(oom.OOM_LOG_RE.search(line))
+        self.assertFalse(oom.OOM_LOG_RE.search("x.scope: Consumed 2min CPU time, 6.1M memory peak."))
+        with mock.patch.object(subprocess, "run", side_effect=OSError("no journalctl")):
+            self.assertFalse(oom.oom_killed(["x.scope"]))
+            self.assertIsNone(oom.oom_protect("a", 1))
 
 
 class TestSteering(StoreCase):
@@ -1152,7 +1541,7 @@ class TestSteering(StoreCase):
         self.assertIn("this message", self.store.take_steers("a"))
         self.assertEqual(self.statuses(), ["steered", "queued", "queued"])   # nothing jumps the command
         self.assertIsNone(self.store.take_steers("a"))
-        self.store.enqueue("b", "x" * (grovyd.STEER_MAX + 1))
+        self.store.enqueue("b", "x" * (prompts.STEER_MAX + 1))
         self.assertIsNone(self.store.take_steers("b"))
 
     def test_socket_hands_it_to_the_main_agent_only(self):
@@ -1175,10 +1564,10 @@ class TestSteering(StoreCase):
 
     def test_hook_adapter_outputs_the_context(self):
         out = io.StringIO()
-        with mock.patch.object(grovy, "sock_request", lambda m, timeout=2.0, wait_reply=True:
+        with mock.patch.object(client, "sock_request", lambda m, timeout=2.0, wait_reply=True:
                                {"steer": "CTX"} if m.get("want_steer") else None), \
                 mock.patch("sys.stdin", io.StringIO(json.dumps(ev("PostToolUse")))), redirect_stdout(out):
-            grovy.cmd_hook("a")
+            hook.cmd_hook("a")
         self.assertEqual(json.loads(out.getvalue()), {"hookSpecificOutput": {"hookEventName": "PostToolUse",
                                                                               "additionalContext": "CTX"}})
         for reply in ({"steer": None}, None, OSError("down")):
@@ -1187,9 +1576,9 @@ class TestSteering(StoreCase):
                 if isinstance(r, Exception):
                     raise r
                 return r
-            with mock.patch.object(grovy, "sock_request", fake), mock.patch("sys.stderr", io.StringIO()), \
+            with mock.patch.object(client, "sock_request", fake), mock.patch("sys.stderr", io.StringIO()), \
                     mock.patch("sys.stdin", io.StringIO(json.dumps(ev("PostToolUse")))), redirect_stdout(out):
-                self.assertEqual(grovy.cmd_hook("a"), 0)
+                self.assertEqual(hook.cmd_hook("a"), 0)
             self.assertEqual(out.getvalue(), "")
 
 
@@ -1280,11 +1669,11 @@ class TestTurnTools(StoreCase):
 
     def test_long_turns_are_capped(self):
         self.store.ingest("a", ev("UserPromptSubmit", prompt="go"))
-        for i in range(grovyd.TURN_TOOLS + 5):
+        for i in range(store.TURN_TOOLS + 5):
             self.store.ingest("a", ev("PostToolUse", tool_name="Bash", tool_input={"command": f"echo {i} " + "x" * 300}))
         self.store.ingest("a", ev("Stop", last_assistant_message="done"))
         d = self.store.events["a"][-1]["data"]
-        self.assertEqual((len(d["tools"]), d["tool_count"]), (grovyd.TURN_TOOLS, grovyd.TURN_TOOLS + 5))
+        self.assertEqual((len(d["tools"]), d["tool_count"]), (store.TURN_TOOLS, store.TURN_TOOLS + 5))
         self.assertEqual(len(d["tools"][0]["arg"]), 118)
 
 
@@ -1382,7 +1771,7 @@ class TestPromptQueue(StoreCase):
 
     def test_aborted_paste_is_not_typed(self):
         def abort(*a, **k):
-            raise grovy.PasteAborted("stopped")
+            raise tmuxctl.PasteAborted("stopped")
         self.store.paste = abort
         self.store.ingest("a", ev("SessionStart"))
         self.store.enqueue("a", "x")
@@ -1420,7 +1809,7 @@ class TestPromptQueue(StoreCase):
         # confirmation never arrives -> unconfirmed, not retried
         for p in self.store.prompts:
             if p["status"] == "injected":
-                p["updated"] -= grovyd.CONFIRM_TIMEOUT + 1
+                p["updated"] -= manage.CONFIRM_TIMEOUT + 1
         self.store.reconcile()
         self.assertEqual(self.statuses()[0], "unconfirmed")
         self.assertEqual([t for _, t in self.pasted].count("p0"), 1)
@@ -1458,7 +1847,7 @@ class TestPromptQueue(StoreCase):
         time.sleep(0.05)
         self.assertEqual(len(self.pasted), 1)  # working and recently active: never
         self.store.cancel_prompt(p2["id"])
-        self.store.sessions["a"]["last_event"] -= grovyd.FORCE_STALE + 1
+        self.store.sessions["a"]["last_event"] -= prompts.FORCE_STALE + 1
         self.store.enqueue("a", "forced3", force=True)  # silent "working" + explicit force, now
         self.wait_pasted(2)
         self.assertEqual(self.pasted[-1], ("a", "forced3"))
@@ -1476,7 +1865,7 @@ class TestPromptQueue(StoreCase):
         self.assertEqual(self.store.enqueue("a", "  ")[0], 400)
         self.assertEqual(self.store.enqueue("a", 5)[0], 400)
         self.assertEqual(self.store.enqueue("nope", "x")[0], 404)
-        self.assertEqual(self.store.enqueue("a", "x" * (grovyd.MAX_PROMPT + 1))[0], 413)
+        self.assertEqual(self.store.enqueue("a", "x" * (prompts.MAX_PROMPT + 1))[0], 413)
         _, p = self.store.enqueue("a", "x")  # session "starting": queued
         self.assertEqual(self.store.cancel_prompt(p["id"]), (200, "cancelled"))
         self.assertEqual(self.store.cancel_prompt(p["id"])[0], 409)
@@ -1510,12 +1899,12 @@ class TestLive(StoreCase):
         for spec in (None, [], "x", {"text": "no type"}, {"type": 3}):
             self.assertEqual(self.store.live_update("a", "k", spec)[0], 400, spec)
         self.assertEqual(self.store.live_update("a", "k", ok, "exploded")[0], 400)
-        with mock.patch.object(grovyd, "LIVE_MAX", 100):
+        with mock.patch.object(live, "LIVE_MAX", 100):
             self.assertEqual(self.store.live_update("a", "k", {"type": "note", "text": "x" * 200})[0], 413)
         self.assertEqual(self.lives(), [])
 
     def test_new_cards_are_rate_limited_but_updates_are_not(self):
-        with mock.patch.object(grovyd, "LIVE_NEW_PER_MIN", 3):
+        with mock.patch.object(live, "LIVE_NEW_PER_MIN", 3):
             for i in range(3):
                 self.assertEqual(self.store.live_update("a", f"k{i}", {"type": "note"})[0], 200)
             self.assertEqual(self.store.live_update("a", "k3", {"type": "note"})[0], 429)
@@ -1530,11 +1919,11 @@ class TestLive(StoreCase):
         with open(self.store.log_path) as f:
             self.assertEqual(sum('"Live"' in l for l in f), 1)
         self.store.flush_live()   # the reconcile loop's flush writes the latest state
-        s2 = grovyd.Store(self.dir, tmux_live=lambda: dict(self.live), paste=None)
+        s2 = store.Store(self.dir, tmux_live=lambda: dict(self.live), paste=None)
         [e] = [e for e in s2.events["a"] if e["type"] == "Live"]
         self.assertEqual((e["data"]["rev"], e["data"]["spec"]["items"][0]["value"]), (5, 4))
         self.store.live_update("a", "job", {"type": "note", "text": "end"}, "failed", "boom")   # final: written now
-        s3 = grovyd.Store(self.dir, tmux_live=lambda: dict(self.live), paste=None)
+        s3 = store.Store(self.dir, tmux_live=lambda: dict(self.live), paste=None)
         lives = [e for e in s3.events["a"] if e["type"] == "Live"]
         self.assertEqual([(e["data"]["status"], e["data"]["rev"]) for e in lives], [("failed", 6)])
         self.assertEqual([e["type"] for e in s3.events["a"]], ["UserPromptSubmit", "Live"])   # position kept
@@ -1548,7 +1937,7 @@ class TestLive(StoreCase):
     def test_card_scrolled_out_of_memory_comes_back_as_new(self):
         _, r = self.store.live_update("a", "job", {"type": "note"})
         with self.store.lock:
-            for _ in range(grovyd.HISTORY):
+            for _ in range(store.HISTORY):
                 self.store._record("a", "Notification", {})
         _, r2 = self.store.live_update("a", "job", {"type": "note", "text": "later"})
         self.assertNotEqual(r2["id"], r["id"])
@@ -1557,7 +1946,7 @@ class TestLive(StoreCase):
     def test_browser_refreshes_are_throttled_and_the_last_one_comes(self):
         published = []
         self.store.publish = lambda name=None: published.append(time.monotonic())
-        with mock.patch.object(grovyd, "LIVE_PUBLISH_EVERY", 0.2):
+        with mock.patch.object(live, "LIVE_PUBLISH_EVERY", 0.2):
             for v in range(20):
                 self.store.live_update("a", "job", {"type": "note", "text": str(v)})
             self.assertEqual(len(published), 1)
@@ -1584,10 +1973,10 @@ class TestLiveClient(unittest.TestCase):
                 raise self.fail
             self.sent.append(msg)
             return {"ok": {}}
-        self.patches = [mock.patch.object(grovy, "sock_request", fake),
+        self.patches = [mock.patch.object(client, "sock_request", fake),
                         mock.patch.dict(os.environ, {"GROVY_SESSION": "a"}),
-                        mock.patch.object(grovy, "LIVE_EVERY", 0.1),
-                        mock.patch.dict(grovy._live, {"off_until": 0.0, "open": {}, "crash": None, "warned": set()})]
+                        mock.patch.object(scriptlib, "LIVE_EVERY", 0.1),
+                        mock.patch.dict(scriptlib._live, {"off_until": 0.0, "open": {}, "crash": None, "warned": set()})]
         for p in self.patches:
             p.start()
 
@@ -1656,12 +2045,12 @@ class TestLiveClient(unittest.TestCase):
         p = grovy.progress("t", 3)
         q = grovy.progress("u", 2)
         q.set(2)
-        grovy._live_exit()
+        scriptlib._live_exit()
         self.assertEqual(self.last(p.key)["status"], "stopped")
         self.assertEqual(self.last(q.key)["status"], "done")   # complete: just never closed
         r = grovy.show({"type": "stats", "items": []})
-        grovy._live["crash"] = "KeyError: 'x'"
-        grovy._live_exit()
+        scriptlib._live["crash"] = "KeyError: 'x'"
+        scriptlib._live_exit()
         self.assertEqual((self.last(r.key)["status"], self.last(r.key)["message"]),
                          ("failed", "the script crashed: KeyError: 'x'"))
 
@@ -1684,11 +2073,11 @@ class TestLiveClient(unittest.TestCase):
     def test_daemon_down_costs_one_try(self):
         self.fail = OSError("down")
         calls = []
-        orig = grovy.sock_request
+        orig = client.sock_request
         def counting(*a, **k):
             calls.append(1)
             return orig(*a, **k)
-        with mock.patch.object(grovy, "sock_request", counting):
+        with mock.patch.object(client, "sock_request", counting):
             p = grovy.progress("t", 100)
             for i in range(100):
                 p.set(i)
@@ -1698,18 +2087,18 @@ class TestLiveClient(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_errors_are_reported_once(self):
-        with mock.patch.object(grovy, "sock_request", lambda *a, **k: {"error": "too many"}), \
+        with mock.patch.object(client, "sock_request", lambda *a, **k: {"error": "too many"}), \
                 mock.patch("sys.stderr", io.StringIO()) as err:
             grovy.note("a")
             grovy.note("b")
         self.assertEqual(err.getvalue().count("too many"), 1)
 
     def test_guide_spells_out_the_path_for_old_sessions(self):
-        with mock.patch.dict(os.environ, {"PYTHONPATH": grovy.session_pythonpath()}):
-            self.assertIn("(on PYTHONPATH;", grovy.widget_guide())
+        with mock.patch.dict(os.environ, {"PYTHONPATH": claude.session_pythonpath()}):
+            self.assertIn("(on PYTHONPATH;", claude.widget_guide())
         with mock.patch.dict(os.environ, {"PYTHONPATH": "/elsewhere"}):
-            self.assertIn(f"sys.path.insert(0, {grovy.HERE!r})", grovy.widget_guide())
-            self.assertEqual(grovy.session_pythonpath(), "/elsewhere" + os.pathsep + grovy.HERE)
+            self.assertIn(f"sys.path.insert(0, {core.HERE!r})", claude.widget_guide())
+            self.assertEqual(claude.session_pythonpath(), "/elsewhere" + os.pathsep + core.HERE)
 
 
 class TestLiveEndToEnd(unittest.TestCase):
@@ -1717,13 +2106,13 @@ class TestLiveEndToEnd(unittest.TestCase):
 
     def setUp(self):
         self.sdir = tempfile.mkdtemp(dir=TMP)
-        self.reg = mock.patch.object(grovy, "registry", lambda: {"a": {"cwd": "/a"}})
+        self.reg = mock.patch.object(sessions, "registry", lambda: {"a": {"cwd": "/a"}})
         self.reg.start()
-        self.store = grovyd.Store(self.sdir, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
+        self.store = store.Store(self.sdir, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
         self.store.reconcile()
         self.env = dict(os.environ, GROVY_STATE_DIR=self.sdir, GROVY_SESSION="a")
         with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": self.sdir}):
-            self.sock = grovyd.SockServer(grovy.sock_path(), grovyd.SockHandler)
+            self.sock = grovyd.SockServer(core.sock_path(), grovyd.SockHandler)
         self.sock.store = self.store
         threading.Thread(target=self.sock.serve_forever, daemon=True).start()
 
@@ -1778,13 +2167,13 @@ class TestLiveEndToEnd(unittest.TestCase):
 class TestHttp(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.reg = mock.patch.object(grovy, "registry", lambda: {})
+        cls.reg = mock.patch.object(sessions, "registry", lambda: {})
         cls.reg.start()
-        cls.store = grovyd.Store(tempfile.mkdtemp(dir=TMP), tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
+        cls.store = store.Store(tempfile.mkdtemp(dir=TMP), tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
         cls.store.reconcile()
         cls.httpd = grovyd.HttpServer(("127.0.0.1", 0), grovyd.Http)
         cls.httpd.store, cls.httpd.token = cls.store, ""
-        cls.httpd.index, cls.httpd.csp = grovyd.load_index()
+        cls.httpd.page = grovyd.load_index()
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
@@ -1829,7 +2218,7 @@ class TestHttp(unittest.TestCase):
         self.assertIn("connect-src 'none'", csp)
         self.assertIn("img-src data: blob:;", csp)
         self.assertEqual(h["X-Frame-Options"], "SAMEORIGIN")
-        self.assertTrue(body.startswith(b"<!doctype html>" + grovyd.PAGE_BRIDGE))
+        self.assertTrue(body.startswith(b"<!doctype html>" + pages.PAGE_BRIDGE))
         self.assertIn("frame-src 'self'", self.req("/")[2]["Content-Security-Policy"])
         self.assertEqual([x["id"] for x in json.loads(self.req("/api/pages")[1])["pages"]], [p["id"]])
         self.assertEqual(self.req("/p/" + "0" * 32)[0], 404)
@@ -1866,7 +2255,7 @@ class TestHttp(unittest.TestCase):
 
     def test_attachment_upload(self):
         top = os.path.join(tempfile.mkdtemp(dir=TMP), "grovy-u", "attachments")
-        with mock.patch.object(grovy, "attachments_dir", lambda: top):
+        with mock.patch.object(core, "attachments_dir", lambda: top):
             code, body, _ = self.upload("a", b"\x89PNG data", "../My photo (1).png")
             self.assertEqual(code, 200, body)
             res = json.loads(body)
@@ -1880,7 +2269,7 @@ class TestHttp(unittest.TestCase):
             self.assertEqual(self.upload("a", b"x", ctype="application/json")[0], 415)
             self.assertEqual(self.upload("nope", b"x")[0], 404)
             self.assertEqual(self.upload("a", b"")[0], 400)
-            with mock.patch.object(grovyd, "MAX_UPLOAD", 4):
+            with mock.patch.object(uploads, "MAX_UPLOAD", 4):
                 self.assertEqual(self.upload("a", b"12345")[0], 413)
             with mock.patch.object(self.httpd, "token", "secret"):
                 self.assertEqual(self.upload("a", b"x")[0], 401)
@@ -1888,7 +2277,7 @@ class TestHttp(unittest.TestCase):
 
     def test_attachment_thumbnails(self):
         top = os.path.join(tempfile.mkdtemp(dir=TMP), "grovy-t", "attachments")
-        with mock.patch.object(grovy, "attachments_dir", lambda: top):
+        with mock.patch.object(core, "attachments_dir", lambda: top):
             img = json.loads(self.upload("a", b"\x89PNG", "p.png")[1])["path"]
             txt = json.loads(self.upload("a", b"secret", "notes.txt")[1])["path"]
             code, body, h = self.req("/api/attachments/a/" + os.path.basename(img))
@@ -1947,7 +2336,7 @@ class TestHttp(unittest.TestCase):
         os.chmod(os.path.join(base, "grovy-o"), 0o777)
         for d in ("grovy-s", "grovy-o"):
             top = os.path.join(base, d, "attachments")
-            with mock.patch.object(grovy, "attachments_dir", lambda: top):
+            with mock.patch.object(core, "attachments_dir", lambda: top):
                 code, body, _ = self.upload("a", b"secret")
                 self.assertEqual(code, 500, body)
         self.assertEqual(os.listdir(elsewhere), [])
@@ -1958,8 +2347,8 @@ class TestHttp(unittest.TestCase):
         old, new = os.path.join(top, "s1", "old"), os.path.join(top, "s2", "new")
         for p in (old, new):
             open(p, "w").close()
-        os.utime(old, (time.time() - grovyd.ATTACH_TTL - 60,) * 2)
-        grovyd.prune_attachments(top)
+        os.utime(old, (time.time() - uploads.ATTACH_TTL - 60,) * 2)
+        uploads.prune_attachments(top)
         self.assertEqual(sorted(os.listdir(top)), ["s2"])   # the emptied folder goes too
         self.assertTrue(os.path.exists(new))
 
@@ -1968,7 +2357,7 @@ class TestHttp(unittest.TestCase):
             MAX_CONNECTIONS = 4
         srv = Small(("127.0.0.1", 0), grovyd.Http)
         srv.store, srv.token = self.store, ""
-        srv.index, srv.csp = grovyd.load_index()
+        srv.page = grovyd.load_index()
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         port = srv.server_address[1]
         try:
@@ -2009,7 +2398,7 @@ class TestHttp(unittest.TestCase):
         with mock.patch.object(grovyd.Http, "HEADER_DEADLINE", 0.5):
             srv = Small(("127.0.0.1", 0), grovyd.Http)
             srv.store, srv.token = self.store, ""
-            srv.index, srv.csp = grovyd.load_index()
+            srv.page = grovyd.load_index()
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             port = srv.server_address[1]
             try:
@@ -2175,8 +2564,8 @@ class TestTmuxIntegration(unittest.TestCase):
             f.write("#!/bin/bash\necho READY\nwhile IFS= read -r l; do printf 'GOT[%s]\\n' \"$l\"; done\n")
         os.chmod(cls.fake, 0o755)
         cls.sock = "grovy-test-%d" % os.getpid()
-        real = grovy.tmux
-        cls.patches = [mock.patch.object(grovy, "tmux", lambda *a, **k: real("-L", cls.sock, *a, **k)),
+        real = tmuxctl.tmux
+        cls.patches = [mock.patch.object(tmuxctl, "tmux", lambda *a, **k: real("-L", cls.sock, *a, **k)),
                        mock.patch.dict(os.environ, {"GROVY_CLAUDE": cls.fake})]
         [p.start() for p in cls.patches]
         cls.proj = os.path.join(TMP, "dir with spaces")
@@ -2190,117 +2579,126 @@ class TestTmuxIntegration(unittest.TestCase):
     def wait_for(self, name, needle, t=5):
         end = time.time() + t
         while time.time() < end:
-            out = grovy.capture(name)
+            out = tmuxctl.capture(name)
             if needle in out:
                 return out
             time.sleep(0.05)
-        self.fail(f"{needle!r} not seen in:\n{grovy.capture(name)}")
+        self.fail(f"{needle!r} not seen in:\n{tmuxctl.capture(name)}")
 
     def test_typing_stops_without_enter_when_aborted(self):
-        grovy.start_session("ab1", self.proj)
+        sessions.start_session("ab1", self.proj)
         self.wait_for("ab1", "READY")
         calls = []
         def abort():
             calls.append(1)
             return "Claude opened a permission request" if len(calls) >= 2 else None
-        with self.assertRaises(grovy.PasteAborted):
-            grovy.paste_prompt("ab1", "x" * (grovy.TYPE_CHUNK * 4), abort=abort)
+        with self.assertRaises(tmuxctl.PasteAborted):
+            tmuxctl.paste_prompt("ab1", "x" * (tmuxctl.TYPE_CHUNK * 4), abort=abort)
         time.sleep(0.5)
-        self.assertNotIn("GOT[", grovy.capture("ab1"))   # Enter never pressed
+        self.assertNotIn("GOT[", tmuxctl.capture("ab1"))   # Enter never pressed
         self.assertEqual(len(calls), 2)                    # stopped right after the chunk where it changed
-        grovy.kill_session("ab1")
+        sessions.kill_session("ab1")
 
     def test_session_can_import_grovy(self):
-        grovy.start_session("py1", self.proj)
-        self.assertEqual(grovy.registry()["py1"]["config"], grovy.session_fingerprint("py1"))
-        out = grovy.tmux("show-environment", "-t", "=grovy-py1", "PYTHONPATH", check=False).stdout
-        self.assertIn(grovy.HERE, out.strip().split("=", 1)[1].split(os.pathsep))
-        grovy.kill_session("py1")
+        sessions.start_session("py1", self.proj)
+        self.assertEqual(sessions.registry()["py1"]["config"], claude.session_fingerprint("py1"))
+        out = tmuxctl.tmux("show-environment", "-t", "=grovy-py1", "PYTHONPATH", check=False).stdout
+        self.assertIn(core.HERE, out.strip().split("=", 1)[1].split(os.pathsep))
+        sessions.kill_session("py1")
 
     def test_widgets_opt_out_reaches_the_session(self):
         with mock.patch.dict(os.environ, {"GROVY_WIDGETS": "0"}):
-            grovy.start_session("ow1", self.proj)
-        out = grovy.tmux("show-environment", "-t", "=grovy-ow1", "GROVY_WIDGETS", check=False).stdout
+            sessions.start_session("ow1", self.proj)
+        out = tmuxctl.tmux("show-environment", "-t", "=grovy-ow1", "GROVY_WIDGETS", check=False).stdout
         self.assertEqual(out.strip(), "GROVY_WIDGETS=0")
-        grovy.kill_session("ow1")
+        sessions.kill_session("ow1")
+
+    def test_config_dir_reaches_the_session(self):
+        """The hooks read instructions.md from the same config folder as the daemon that started the session."""
+        cfg = tempfile.mkdtemp(dir=TMP)
+        with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": cfg}):
+            sessions.start_session("cd1", self.proj)
+        out = tmuxctl.tmux("show-environment", "-t", "=grovy-cd1", "GROVY_CONFIG_DIR", check=False).stdout
+        self.assertEqual(out.strip(), "GROVY_CONFIG_DIR=" + cfg)
+        sessions.kill_session("cd1")
 
     def test_lifecycle_and_literal_delivery(self):
-        grovy.start_session("it1", self.proj)
-        grovy.start_session("it2", self.proj)
+        sessions.start_session("it1", self.proj)
+        sessions.start_session("it2", self.proj)
         with self.assertRaises(ValueError):
-            grovy.start_session("it1", self.proj)
+            sessions.start_session("it1", self.proj)
         with self.assertRaises(ValueError):
-            grovy.start_session("bad name", self.proj)
-        self.assertTrue({"it1", "it2"} <= set(grovy.tmux_managed()))
+            sessions.start_session("bad name", self.proj)
+        self.assertTrue({"it1", "it2"} <= set(tmuxctl.tmux_managed()))
         # an unrelated session that merely looks like ours is never considered managed
-        grovy.tmux("new-session", "-d", "-s", "grovy-impostor", "sleep 60")
-        self.assertNotIn("impostor", grovy.tmux_managed())
+        tmuxctl.tmux("new-session", "-d", "-s", "grovy-impostor", "sleep 60")
+        self.assertNotIn("impostor", tmuxctl.tmux_managed())
         with self.assertRaises(ValueError):
-            grovy.kill_session("impostor")
+            sessions.kill_session("impostor")
         self.wait_for("it1", "READY")
         nasty = "a 'b' \"c\" $(echo pwned) `id` ; \\ ünï 🚀 %s"
-        grovy.paste_prompt("it1", nasty)
+        tmuxctl.paste_prompt("it1", nasty)
         self.wait_for("it1", f"GOT[{nasty}]")
-        grovy.paste_prompt("it1", "l1\nl2")
+        tmuxctl.paste_prompt("it1", "l1\nl2")
         self.wait_for("it1", "GOT[l2]")
         # typed-path edge cases: tmux ';' separators, option-looking text, chunk boundaries, tabs
         semi = "x" * 63 + ";"            # a chunk that ends exactly in ';'
-        grovy.paste_prompt("it1", semi + " ; \\; -t foo")
+        tmuxctl.paste_prompt("it1", semi + " ; \\; -t foo")
         self.wait_for("it1", "GOT[" + semi + " ; \\; -t foo]")
-        grovy.paste_prompt("it1", "-n --help")
+        tmuxctl.paste_prompt("it1", "-n --help")
         self.wait_for("it1", "GOT[-n --help]")
         long = "".join(chr(0x41 + i % 26) for i in range(300))
-        grovy.paste_prompt("it1", long + "\tend")
+        tmuxctl.paste_prompt("it1", long + "\tend")
         self.wait_for("it1", "GOT[" + long + "    end]")
-        grovy.paste_prompt("it1", "/literal slash stays literal")  # paste path
+        tmuxctl.paste_prompt("it1", "/literal slash stays literal")  # paste path
         self.wait_for("it1", "GOT[/literal slash stays literal]")
-        grovy.paste_prompt("it1", "!echo a\x1b[201~INJECTED\x1b[200~")      # can't break out of the paste
+        tmuxctl.paste_prompt("it1", "!echo a\x1b[201~INJECTED\x1b[200~")      # can't break out of the paste
         self.wait_for("it1", "GOT[!echo a[201~INJECTED[200~]")
-        self.assertNotIn("GOT", grovy.capture("it2"))  # isolation
-        reg = grovy.registry()
+        self.assertNotIn("GOT", tmuxctl.capture("it2"))  # isolation
+        reg = sessions.registry()
         self.assertEqual(reg["it1"]["cwd"], os.path.realpath(self.proj))
-        grovy.kill_session("it1")
-        self.assertNotIn("it1", grovy.tmux_managed())
-        self.assertIn("it2", grovy.tmux_managed())
+        sessions.kill_session("it1")
+        self.assertNotIn("it1", tmuxctl.tmux_managed())
+        self.assertIn("it2", tmuxctl.tmux_managed())
         with self.assertRaises(RuntimeError):
-            grovy.paste_prompt("it1", "into the void")
-        grovy.kill_session("it2")
-        self.assertEqual(grovy.tmux("has-session", "-t", "=grovy-impostor", check=False).returncode, 0)
+            tmuxctl.paste_prompt("it1", "into the void")
+        sessions.kill_session("it2")
+        self.assertEqual(tmuxctl.tmux("has-session", "-t", "=grovy-impostor", check=False).returncode, 0)
 
     def test_other_state_dirs_sessions_are_invisible(self):
         """Regression: a test daemon's session ("shadow t3") showed up in the live daemon's list."""
-        grovy.start_session("mine", self.proj)
+        sessions.start_session("mine", self.proj)
         other = os.path.join(TMP, "other-state")
         with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": other}):
-            grovy.start_session("theirs", self.proj)
-            self.assertEqual(set(grovy.tmux_managed()), {"theirs"})
-            grovy.kill_session("theirs")
-        self.assertNotIn("theirs", grovy.tmux_managed())
-        self.assertIn("mine", grovy.tmux_managed())
-        grovy.kill_session("mine")
+            sessions.start_session("theirs", self.proj)
+            self.assertEqual(set(tmuxctl.tmux_managed()), {"theirs"})
+            sessions.kill_session("theirs")
+        self.assertNotIn("theirs", tmuxctl.tmux_managed())
+        self.assertIn("mine", tmuxctl.tmux_managed())
+        sessions.kill_session("mine")
 
     def test_live_rename(self):
-        grovy.start_session("rn1", self.proj)
+        sessions.start_session("rn1", self.proj)
         self.wait_for("rn1", "READY")
-        self.assertTrue(grovy.rename_session("rn1", "rn2"))
-        self.assertEqual(set(grovy.tmux_managed()) & {"rn1", "rn2"}, {"rn2"})
-        reg = grovy.registry()
+        self.assertTrue(sessions.rename_session("rn1", "rn2"))
+        self.assertEqual(set(tmuxctl.tmux_managed()) & {"rn1", "rn2"}, {"rn2"})
+        reg = sessions.registry()
         self.assertEqual(reg["rn2"]["aliases"], ["rn1"])
         self.assertNotIn("rn1", reg)
         for f in ("rn1.json", "rn2.json"):   # the running Claude's file and the one for its next start
-            cmd = json.load(open(os.path.join(grovy.state_dir(), "hooks", f)))["hooks"]["Stop"][0]["hooks"][0]["command"]
+            cmd = json.load(open(os.path.join(core.state_dir(), "hooks", f)))["hooks"]["Stop"][0]["hooks"][0]["command"]
             self.assertTrue(cmd.endswith("'hook' 'rn2'"), cmd)
-        grovy.paste_prompt("rn2", "still typeable")              # pane ownership check passes after rename
+        tmuxctl.paste_prompt("rn2", "still typeable")              # pane ownership check passes after rename
         self.wait_for("rn2", "GOT[still typeable]")
         with self.assertRaises(ValueError):
-            grovy.start_session("rn1", self.proj)                # old name is reserved as an alias
-        grovy.kill_session("rn2")
+            sessions.start_session("rn1", self.proj)                # old name is reserved as an alias
+        sessions.kill_session("rn2")
 
     def test_hook_env_reaches_session(self):
-        grovy.start_session("it3", self.proj)
-        out = grovy.tmux("show-environment", "-t", "=grovy-it3", "GROVY_SESSION").stdout
+        sessions.start_session("it3", self.proj)
+        out = tmuxctl.tmux("show-environment", "-t", "=grovy-it3", "GROVY_SESSION").stdout
         self.assertEqual(out.strip(), "GROVY_SESSION=it3")
-        grovy.kill_session("it3")
+        sessions.kill_session("it3")
 
 
 if __name__ == "__main__":

@@ -11,1535 +11,45 @@ import hashlib
 import hmac
 import http.server
 import ipaddress
-import socket
 import json
 import os
 import re
-import secrets
-import select
-import shlex
 import shutil
+import socket
 import socketserver
 import stat
-import subprocess
 import sys
 import threading
 import time
-import uuid
 from collections import deque
 from html import escape as html_escape
 from urllib.parse import urlsplit, parse_qs, unquote
 
-import grovy
+from grovylib import claude, client, commands, core, notify, oom, pages, plugins
+from grovylib.store import Store
 
-HISTORY = 300            # events kept in memory per session
-MAX_FIELD = 20000        # chars kept of any one text field in the event log
-MAX_PROMPT = 100_000     # chars accepted for a browser prompt
+
 MAX_BODY = 256 * 1024
-MAX_REVIEW = 512 * 1024
-MAX_UPLOAD = 100 * 1024 * 1024   # bytes per attachment sent from the phone
-ATTACH_TTL = 7 * 86400          # attachments older than this are deleted
-ATTACH_NAME = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}-[A-Za-z0-9._-]{1,80}")   # what save_attachment names files
-IMAGE_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
-TURN_TOOLS = 100   # tool calls listed per turn ("Worked for …"); beyond that only counted
-TOOL_ARG = ("command", "file_path", "notebook_path", "path", "pattern", "url", "query", "description", "skill", "prompt")
-SSE_PER_CLIENT = 4  # live-update streams kept per client IP (older ones are closed)  # bytes of tool input shown for approval; beyond that, approve in the terminal
-CONFIRM_TIMEOUT = 30     # seconds for UserPromptSubmit to confirm an injected prompt
-DELIVERY_ACTIVITY = {None: "sending prompt from web", "compact": "compacting conversation",
-                     "clear": "clearing conversation"}
-COMMAND_TIMEOUT = 600    # /clear, /compact: their receipt is SessionStart, sent only once they finish
+
+
+SSE_PER_CLIENT = 4  # live-update streams kept per client IP (older ones are closed)
+
+
 RECONCILE_EVERY = 10
-INPUT_STATES = ("idle", "error")  # states in which we will type into the session
-DUP_WINDOW = 1.0  # seconds
-FORCE_STALE = 60  # a "working" session silent this long may be force-typed into, if the user confirms
-PERM_TIMEOUT = grovy.PERMISSION_TIMEOUT
-STEER_MAX = 8000          # chars handed to Claude in one PostToolUse (longer messages wait for the turn's end)
-STEER_INTRO = ("The user sent {what} from their phone (grovy) while you were working. {it} the user's own "
-               "words, exactly as if they had typed {them} into the terminal; take {them} into account now:\n\n")
-LIVE_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
-LIVE_MAX = 64 * 1024        # bytes of JSON in one live widget
-LIVE_NEW_PER_MIN = 30       # new live cards per session per minute: a runaway loop must not flush the chat history
-LIVE_STATUS = ("running", "done", "failed", "stopped")
-LIVE_PUBLISH_EVERY = 0.5    # seconds between browser refreshes caused by live updates (per session)
-LIVE_LOG_EVERY = 2.0        # seconds between event-log writes of one running widget (the reconcile loop flushes)
 
-LABELS = {"working": "working", "needs_input": "waiting on a terminal dialog", "starting": "starting",
-          "unknown": "in an unknown state"}
-STATE_RANK = {"needs_input": 0, "error": 1, "unknown": 2, "working": 3, "starting": 4, "idle": 5, "exited": 6}
-
-
-def now():
-    return time.time()
-
-
-def norm(text):
-    return "\n".join(l.rstrip() for l in str(text).replace("\r\n", "\n").replace("\r", "\n").strip().split("\n"))
-
-
-PASTE_TAG = re.compile(r"</?pasted_content[^>]*>")
-MACHINE_PROMPT = re.compile(r"\s*<(agent-message|task-notification)\b")
-# The background task a machine prompt reports on: a subagent's report, or a task's notification (it has finished).
-MACHINE_TASK = re.compile(r'\s*<agent-message from="([\w-]{1,64})"|\s*<task-notification>\s*<task-id>([\w-]{1,64})</task-id>')
-TASK_EVENTS = ("SubagentStart", "SubagentStop")
-MAX_TASKS = 50
-
-
-def squash(text):
-    """Comparison key for prompts: Claude wraps long pastes in <pasted_content> tags and re-spaces
-    them, so drop the tags and collapse all whitespace."""
-    return " ".join(PASTE_TAG.sub(" ", str(text)).split())
-
-
-def clip(v, n=MAX_FIELD):
-    if isinstance(v, str):
-        return v if len(v) <= n else v[:n] + f"\n… [{len(v) - n} chars truncated]"
-    if isinstance(v, dict):
-        return {k: clip(x, min(n, 4000)) for k, x in list(v.items())[:50]}
-    if isinstance(v, list):
-        return [clip(x, min(n, 4000)) for x in v[:50]] + ([f"… {len(v) - 50} more items not shown"] if len(v) > 50 else [])
-    return v
-
-
-# Fields of each hook payload worth keeping. Tool outputs are deliberately not stored.
-KEEP = {
-    "SessionStart": ("source", "model"),
-    "SessionEnd": ("reason",),
-    "UserPromptSubmit": ("prompt",),
-    "PermissionRequest": ("tool_name", "tool_input"),
-    "Notification": ("message", "title", "notification_type"),
-    "Stop": ("last_assistant_message",),
-    "StopFailure": ("error", "error_details", "last_assistant_message"),
-}
-
-
-def tool_summary(name, inp):
-    """One short line for a tool call: its name and its most telling argument."""
-    arg = ""
-    if isinstance(inp, dict):
-        arg = next((str(inp[k]) for k in TOOL_ARG if isinstance(inp.get(k), (str, int)) and str(inp[k]).strip()), "")
-    arg = " ".join(arg.split())
-    return {"tool": str(name or "tool")[:60], "arg": arg[:117] + "…" if len(arg) > 120 else arg}
-
-
-def private_dir(path):
-    """Create PATH (mode 700) under a shared temp dir. Its parent must be ours, a real directory and private:
-    anyone can create names in /tmp, so a planted symlink or open directory there is refused, never written into."""
-    top = os.path.dirname(path)
-    os.makedirs(top, mode=0o700, exist_ok=True)
-    st = os.lstat(top)
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
-        raise OSError(f"{top} is not a private directory of this user")
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    return path
-
-
-def prune_attachments(top, ttl=ATTACH_TTL):
-    """Delete attachments older than ttl, and session folders left empty."""
-    cutoff = time.time() - ttl
-    for d in os.scandir(top):
-        if not d.is_dir(follow_symlinks=False):
-            continue
-        for f in os.scandir(d.path):
-            try:
-                if f.stat(follow_symlinks=False).st_mtime < cutoff:
-                    os.unlink(f.path)
-            except OSError:
-                pass
-        try:
-            os.rmdir(d.path)   # only succeeds when empty
-        except OSError:
-            pass
-
-
-class Store:
-    def __init__(self, sdir, tmux_live=grovy.tmux_managed, paste=grovy.paste_prompt, notifier=None,
-                 key=grovy.send_key, lifecycle=None, oom=None):
-        self.dir = sdir
-        self.lock = threading.RLock()
-        self.tmux_live = tmux_live
-        self.paste = paste
-        self.key = key
-        self.lifecycle = lifecycle or Lifecycle()
-        self.notifier = notifier
-        self.oom = oom          # OomGuard or None (tests, systems without systemd)
-        self.sessions = {}      # name -> runtime dict
-        self.events = {}        # name -> deque of event records
-        self.perms = {}         # id -> permission dict (includes threading.Event under "_ev")
-        self.prompts = []       # list of prompt dicts, persisted
-        self.seen = {}  # payload digest -> time; only a re-delivery within DUP_WINDOW is a duplicate
-        self.subscribers = set()
-        self.seq = 0
-        self.log_path = os.path.join(sdir, "events.jsonl")
-        self.state_path = os.path.join(sdir, "state.json")
-        self.prompts_path = os.path.join(sdir, "prompts.json")
-        self.pages_dir = os.path.join(sdir, "pages")
-        self.pages_path = os.path.join(sdir, "pages.json")
-        self.pages = {}         # id -> {id, session, name, title, version, updated, size}
-        self.live = {}          # name -> {key -> {"rec": event record, "logged": time, "dirty": bool}}
-        self.live_new = {}      # name -> deque of creation times (rate limit)
-        self._pub_at, self._pub_timer = {}, {}
-        self._load()
-
-    # ------------------------------------------------------------ persistence
-    def _load(self):
-        self.aliases = self._read_aliases()
-        pages = grovy.read_json(self.pages_path, {})
-        self.pages = {k: v for k, v in pages.items() if ID_RE.match(k) and isinstance(v, dict)} \
-            if isinstance(pages, dict) else {}
-        st = grovy.read_json(self.state_path, {})
-        for name, s in (st.get("sessions") or {}).items():
-            if grovy.valid_name(name) and isinstance(s, dict):
-                self.sessions[name] = s
-                if s.get("state") == "needs_input":
-                    # The waiting hook saw EOF and exited without output, so Claude is now showing its
-                    # terminal dialog: still needs_input (and therefore never typed into).
-                    s["activity"] = "waiting in terminal (daemon restarted during a dialog)"
-        self.prompts = [p for p in grovy.read_json(self.prompts_path, []) if isinstance(p, dict) and "id" in p]
-        for p in self.prompts:
-            if "session" not in p and "ccs" in p:  # pre-rename record
-                p["session"] = p.pop("ccs")
-        for p in self.prompts:
-            p["force"] = False  # a confirmation never outlives the moment it was given
-            if p.get("status") == "injected":  # crashed between typing and confirmation: never re-send
-                p["status"], p["error"] = "unconfirmed", "daemon restarted before confirmation"
-        try:
-            with open(self.log_path, "rb") as f:
-                for line in f:
-                    try:
-                        rec = json.loads(line)
-                        if "session" not in rec and "ccs" in rec:  # pre-rename record
-                            rec["session"] = rec.pop("ccs")
-                        rec["session"] = self._canon(rec["session"])  # recorded under a name since renamed
-                        self.seq = max(self.seq, int(rec["id"]))
-                        q = self.events.setdefault(rec["session"], deque(maxlen=HISTORY))
-                        if rec.get("type") == "Live":   # a live widget is re-logged under its id on each update
-                            key = (rec.get("data") or {}).get("key")
-                            old = self.live.get(rec["session"], {}).get(key)
-                            if old and old["rec"]["id"] == rec["id"]:
-                                at = next((i for i, r in enumerate(q) if r is old["rec"]), None)
-                                if at is not None:
-                                    q[at] = old["rec"] = rec
-                                continue   # (an update of a card that has scrolled out of memory is dropped)
-                            self.live.setdefault(rec["session"], {})[key] = {"rec": rec, "logged": 0, "dirty": False}
-                        q.append(rec)
-                    except (ValueError, KeyError, TypeError):
-                        continue  # truncated / corrupt record: skip it
-            with open(self.log_path, "rb+") as f:  # make sure a torn last line can't swallow the next record
-                f.seek(0, 2)
-                if f.tell():
-                    f.seek(-1, 2)
-                    if f.read(1) != b"\n":
-                        f.write(b"\n")
-        except FileNotFoundError:
-            pass
-        try:  # rotate only after reading, so ids keep counting up and recent history stays in memory
-            if os.path.getsize(self.log_path) > 50 * 1024 * 1024:
-                os.replace(self.log_path, self.log_path + ".1")
-        except OSError:
-            pass
-        # Prompts left "unconfirmed" by an older matcher: confirm them if Claude did receive them.
-        seen = {squash(r["data"].get("prompt", "")) for q in self.events.values() for r in q
-                if r.get("type") == "UserPromptSubmit" and isinstance(r.get("data"), dict)}
-        for p in self.prompts:
-            if p.get("status") == "unconfirmed" and squash(p.get("text", "")) in seen:
-                p["status"] = "submitted"
-        self._log = open(self.log_path, "a", buffering=1)
-        os.chmod(self.log_path, 0o600)
-
-    def _save_state(self):
-        grovy.atomic_write_json(self.state_path, {"sessions": self.sessions})
-
-    def _save_pages(self):
-        grovy.atomic_write_json(self.pages_path, self.pages)
-
-    def _save_prompts(self):
-        keep, count = [], {}
-        for p in reversed(self.prompts):  # keep all pending + the last 50 per session
-            count[p["session"]] = count.get(p["session"], 0) + 1
-            if p["status"] in ("queued", "injected") or count[p["session"]] <= 50:
-                keep.append(p)
-        self.prompts = keep[::-1]
-        grovy.atomic_write_json(self.prompts_path, self.prompts)
-
-    # ------------------------------------------------------------ helpers
-    @staticmethod
-    def _read_aliases():
-        return {a: n for n, v in grovy.registry().items() for a in (v.get("aliases") or [])}
-
-    def _canon(self, name):
-        """A renamed session's running Claude still reports its old name until it restarts."""
-        return self.aliases.get(name, name)
-
-    def _session(self, name):
-        s = self.sessions.get(name)
-        if s is None:
-            s = self.sessions[name] = {"name": name, "state": "starting", "cwd": None,
-                                       "claude_session_id": None, "last_event": None, "activity": "",
-                                       "last_error": None, "background": 0}
-        return s
-
-    def _record(self, name, etype, data, sid=None):
-        self.seq += 1
-        rec = {"id": self.seq, "ts": now(), "session": name, "claude_session_id": sid, "type": etype, "data": data}
-        self._log.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        self.events.setdefault(name, deque(maxlen=HISTORY)).append(rec)
-        return rec
-
-    def _set(self, name, state, activity=None):
-        s = self._session(name)
-        s["state"] = state
-        if activity is not None:
-            s["activity"] = activity[:200]
-        s["last_event"] = now()
-
-    def publish(self, name=None):
-        msg = json.dumps({"session": name, "ts": now()})
-        for q in list(self.subscribers):
-            q.append(msg)
-            q.wake.set()
-
-    def _notify(self, name, kind, text):
-        if self.notifier:
-            self.notifier.send(name, kind, text)
-
-    # ------------------------------------------------------------ hook ingestion
-    def ingest(self, name, payload):
-        """Apply one non-blocking hook event. Returns False if it was a duplicate."""
-        name = self._canon(name)
-        ev = payload.get("hook_event_name")
-        sid = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
-        digest = hashlib.sha256(json.dumps([name, payload], sort_keys=True).encode()).hexdigest()
-        with self.lock:
-            t = now()
-            # Hook payloads carry no unique id, so identical content can be a genuine repeat
-            # ("continue" typed twice, the same idle notification). Only a near-instant re-delivery
-            # of the same payload is treated as a duplicate.
-            if t - self.seen.get(digest, -1e9) < DUP_WINDOW:
-                return False
-            self.seen[digest] = t
-            if len(self.seen) > 1000:
-                self.seen = {k: v for k, v in self.seen.items() if t - v < DUP_WINDOW}
-            s = self._session(name)
-            if ev in TASK_EVENTS or (ev == "PostToolUse" and payload.get("agent_id")):
-                # Fired inside a subagent, or about one: it updates the list of background work and nothing else.
-                # A subagent's tool calls aren't the session's state (they can even arrive after the parent's Stop).
-                self._track_tasks(s, ev, payload, t)
-                if ev != "PostToolUse":   # a subagent's every tool call isn't worth a state write
-                    self._save_state()
-            else:
-                self._apply(name, s, ev, payload, sid, t)
-                self._save_state()
-        self.publish(name)
-        self.try_deliver(name)
-        return True
-
-    def _apply(self, name, s, ev, payload, sid, t):
-        """One hook event of the session itself (not of a subagent), under the lock."""
-        if payload.get("cwd"):
-            s["cwd"] = str(payload["cwd"])
-        if ev != "PostToolUse":
-            data = {k: clip(payload[k]) for k in KEEP.get(ev, ()) if k in payload}
-            if ev == "Stop":
-                data["background_tasks"] = _count(payload.get("background_tasks"))
-                names = [x["description"] or x["type"] for x in self._task_snapshot(s, payload.get("background_tasks"), t)]
-                if names:
-                    data["background_names"] = names[:10]
-                turn = s.pop("turn", None)
-                if turn:   # "Worked for …": how long the turn took and what it ran
-                    data["worked"] = round(t - turn["start"], 1)
-                    data["tools"], data["tool_count"] = turn["tools"], turn["count"]
-            if ev == "UserPromptSubmit":
-                p = self._confirm_prompt(name, payload.get("prompt", ""))
-                if p:
-                    data["sent"] = p["created"]  # when the user sent it; the event's ts is when Claude read it
-            self._record(name, ev, data, sid)
-        if ev == "SessionStart":
-            s["claude_session_id"] = sid
-            s["last_error"] = None
-            src = payload.get("source")
-            ours = False
-            for p in self.prompts:  # /clear and /compact emit no UserPromptSubmit; this is their receipt
-                if p["session"] == name and p["status"] == "injected" and p.get("command") == src \
-                        and now() - p["updated"] < COMMAND_TIMEOUT:  # a stale one must not turn auto-compaction into "idle"
-                    p["status"], p["updated"], ours = "submitted", now(), True
-                    self._save_prompts()
-            if src in ("startup", "resume"):
-                self._task_snapshot(s, [], t)   # a new Claude process: whatever the old one ran is gone
-            if src == "compact" and not ours and s["state"] == "working":
-                s["last_event"] = now()  # automatic compaction mid-turn: Claude is still working
-            else:
-                self._set(name, "idle", f"session {src or 'start'}")
-        elif ev == "UserPromptSubmit":
-            text = norm(payload.get("prompt", ""))
-            m = MACHINE_PROMPT.match(text)  # injected by Claude Code itself, not typed by the user
-            self._set(name, "working", ("subagent report" if m.group(1) == "agent-message" else "task notification")
-                      if m else "prompt: " + text[:120])
-            done = MACHINE_TASK.match(text)
-            if done:   # that task has finished (Claude Code's next list will agree)
-                self._drop_task(s, done.group(1) or done.group(2))
-            s["turn"] = {"start": t, "tools": [], "count": 0}
-        elif ev == "PostToolUse":
-            self._task_launched(s, payload, t)
-            turn = s.get("turn")
-            if turn is not None:
-                turn["count"] += 1
-                if len(turn["tools"]) < TURN_TOOLS:
-                    turn["tools"].append(tool_summary(payload.get("tool_name"), payload.get("tool_input")))
-            if s["state"] != "exited" and not self._pending(name):
-                self._set(name, "working", f"ran {payload.get('tool_name', 'tool')}")
-        elif ev == "Stop":
-            msg = norm(payload.get("last_assistant_message") or "")
-            # With background tasks Claude still accepts input, so "idle" stays truthful; the UI shows the tasks.
-            self._set(name, "idle", msg[:200] or "turn finished")
-            bg = f" ({s['background']} still running)" if s.get("background") else ""
-            self._notify(name, "done", "finished: " + (msg[:80] or "turn complete") + bg)
-        elif ev == "StopFailure":
-            err = str(payload.get("error") or "error")
-            s["last_error"] = err
-            self._set(name, "error", f"failed: {err}")
-            self._notify(name, "error", f"error: {err}")
-        elif ev == "Notification":
-            nt = payload.get("notification_type")
-            if nt == "permission_prompt" and not self._pending(name):
-                # A terminal dialog we have no hook for (or a hook that gave up): only the terminal can answer.
-                self._set(name, "needs_input", "waiting in terminal: " + str(payload.get("message", ""))[:120])
-                self._notify(name, "input", "needs attention in terminal")
-            elif nt in ("elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"):
-                self._set(name, "needs_input", str(payload.get("message", ""))[:160])
-                self._notify(name, "input", "needs input in terminal")
-            elif nt == "idle_prompt" and s["state"] not in ("needs_input",):
-                self._set(name, "idle")
-            else:
-                s["last_event"] = now()
-        elif ev == "SessionEnd":
-            if payload.get("reason") in ("clear", "resume"):
-                s["last_event"] = now()  # same process continues with a new conversation (SessionStart)
-            else:
-                self._expire_perms(name, "Claude session ended")
-                self._set(name, "exited", f"conversation ended ({payload.get('reason', '')})")
-                self._task_snapshot(s, [], t)
-                self._fail_queued(name, "Claude exited before it was sent")
-
-
-    # ------------------------------------------------------------ background work
-    # s["tasks"] (id -> task) mirrors Claude Code's own list of background shells and subagents. Every Stop and
-    # SubagentStop carries that whole list and replaces ours; between them, launches, SubagentStart and finish
-    # notices keep it current. A SubagentStop alone doesn't end a subagent: it also fires when one pauses for its
-    # own background work (verified), so only Claude Code's list, or the subagent's report, says it is done.
-    def _task_snapshot(self, s, tasks, t):
-        """Replace the list with Claude Code's (Stop, SubagentStop); keeps when we first saw each and what it did.
-        Returns the new list. Anything but a list (an older Claude Code sent a count) clears it, keeping the count."""
-        old, new = s.get("tasks") or {}, {}
-        for i, x in enumerate(tasks if isinstance(tasks, list) else []):
-            x = x if isinstance(x, dict) else {}   # anything listed counts, even malformed: never hide running work
-            tid = str(x["id"])[:64] if isinstance(x.get("id"), (str, int)) and str(x["id"]) else f"#{i}"
-            if len(new) < MAX_TASKS:
-                new[tid] = {**old.get(tid, {"since": t, "last": None, "tools": 0}), "id": tid,
-                            "type": str(x.get("type") or "task")[:20], "status": str(x.get("status") or "")[:20],
-                            "description": " ".join(str(x.get("description") or "").split())[:120],
-                            "agent_type": str(x.get("agent_type") or "")[:60] or None,
-                            "command": " ".join(str(x.get("command") or "").split())[:200] or None}
-        s["tasks"] = new
-        s["background"] = _count(tasks)
-        return list(new.values())
-
-    def _add_task(self, s, tid, t, **fields):
-        tasks = s.setdefault("tasks", {})
-        if tid not in tasks and len(tasks) >= MAX_TASKS:
-            return
-        tasks[tid] = {**tasks.get(tid, {"id": tid, "since": t, "last": None, "tools": 0, "status": "running",
-                                        "command": None, "agent_type": None, "description": ""}),
-                      **{k: v for k, v in fields.items() if v}}
-        s["background"] = len(tasks)
-
-    def _drop_task(self, s, tid):
-        if (s.get("tasks") or {}).pop(tid, None) is not None:
-            s["background"] = len(s["tasks"])
-
-    def _task_launched(self, s, payload, t):
-        """A PostToolUse that started background work: a shell (backgroundTaskId) or an async subagent."""
-        resp, inp = payload.get("tool_response"), payload.get("tool_input")
-        resp, inp = resp if isinstance(resp, dict) else {}, inp if isinstance(inp, dict) else {}
-        bid = resp.get("backgroundTaskId")
-        if isinstance(bid, str) and bid:
-            self._add_task(s, bid[:64], t, type="shell",
-                           description=" ".join(str(inp.get("description") or "").split())[:120],
-                           command=" ".join(str(inp.get("command") or "").split())[:200] or None)
-        aid = resp.get("agentId")
-        if isinstance(aid, str) and aid and resp.get("isAsync") is True:
-            self._add_task(s, aid[:64], t, type="subagent",
-                           description=" ".join(str(resp.get("description") or inp.get("description") or "").split())[:120],
-                           agent_type=str(inp.get("subagent_type") or "")[:60])
-
-    def _track_tasks(self, s, ev, payload, t):
-        aid = payload.get("agent_id")
-        aid = aid[:64] if isinstance(aid, str) and aid else None
-        if ev == "SubagentStart" and aid and payload.get("agent_type"):   # (unnamed internal agents are skipped)
-            self._add_task(s, aid, t, type="subagent", status="running", agent_type=str(payload["agent_type"])[:60])
-        elif ev == "SubagentStop" and "background_tasks" in payload:
-            self._task_snapshot(s, payload.get("background_tasks"), t)
-        elif ev == "PostToolUse" and aid:
-            task = (s.get("tasks") or {}).get(aid)
-            if task is not None:   # never re-adds one Claude Code's list has dropped (a late PostToolUse)
-                task["last"] = tool_summary(payload.get("tool_name"), payload.get("tool_input"))
-                task["tools"] = task.get("tools", 0) + 1
-                task["active"] = t
-            self._task_launched(s, payload, t)   # a subagent's own background shell
-
-    # ------------------------------------------------------------ permissions
-    def _pending(self, name):
-        return [p for p in self.perms.values() if p["session"] == name and p["status"] == "pending"]
-
-    def open_permission(self, name, payload):
-        name = self._canon(name)
-        pid = uuid.uuid4().hex
-        with self.lock:
-            raw = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
-            p = {"id": pid, "session": name, "claude_session_id": payload.get("session_id"),
-                 "tool_name": str(payload.get("tool_name", "?")), "tool_input": clip(raw),
-                 "created": now(), "expires": now() + PERM_TIMEOUT, "status": "pending",
-                 "decision": None, "answers": None, "_input": raw, "_ev": threading.Event()}
-            p["kind"] = "question" if p["tool_name"] == QUESTION_TOOL and _questions(raw) else "permission"
-            self._record(name, "PermissionRequest", {"id": pid, "tool_name": p["tool_name"], "kind": p["kind"],
-                                                      "tool_input": p["tool_input"]}, p["claude_session_id"])
-            what = ("question: " + str(_questions(raw)[0].get("header") or "Claude asks")) if p["kind"] == "question" \
-                else f"permission: {p['tool_name']}"
-            self._set(name, "needs_input", what)
-            self._save_state()
-            self.perms[pid] = p  # only once logged: a failure above can't leave a phantom pending request
-        self.publish(name)
-        self._notify(name, "input", what)
-        return p
-
-    def decide(self, pid, decision, answers=None):
-        """Browser decision. First valid decision wins; anything else is rejected.
-
-        Permissions take allow/deny. Questions (AskUserQuestion) take "answer" with
-        {question text: answer}, delivered as updatedInput.answers, or "deny" to skip.
-        """
-        if decision not in ("allow", "deny", "answer"):
-            return 400, "decision must be allow, deny or answer"
-        with self.lock:
-            p = self.perms.get(pid)
-            if not p:
-                return 404, "unknown permission request"
-            if p["status"] != "pending":
-                return 409, f"already {p['status']}" + (f" ({p['decision']})" if p["decision"] else "")
-            if now() > p["expires"]:
-                return 409, "expired"
-            reply = {"decision": decision}
-            if p["kind"] == "question":
-                if decision == "allow":
-                    return 400, "answer the question (or skip it)"
-                if decision == "answer":
-                    err = _check_answers(p["_input"], answers)
-                    if err:
-                        return 400, err
-                    p["answers"] = answers
-                    reply = {"decision": "allow", "updated_input": {**p["_input"], "answers": answers}}
-                else:
-                    reply["message"] = ("The user skipped this question from their phone. "
-                                        "Continue with your best judgment.")
-            elif decision == "answer":
-                return 400, "not a question"
-            p["status"], p["decision"], p["_reply"] = "deciding", decision, reply
-            p["_ev"].set()
-        self.publish(p["session"])
-        return 200, "sent to Claude"
-
-    def _finish_perm(self, p, status, note):
-        """Final state of a request; called with the lock held."""
-        p["status"] = status
-        self._record(p["session"], "PermissionResult", {"id": p["id"], "status": status, "kind": p.get("kind"),
-                                                    "decision": p["decision"], "answers": p.get("answers"),
-                                                    "note": note})
-        s = self._session(p["session"])
-        if s["state"] == "needs_input" and not self._pending(p["session"]):
-            if status == "delivered":
-                self._set(p["session"], "working", f"{p['decision']}: {p['tool_name']}")
-            elif status == "timeout":
-                self._set(p["session"], "needs_input", f"permission for {p['tool_name']} now in terminal")
-            else:
-                self._set(p["session"], "unknown", note)
-        self._save_state()
-
-    def _expire_perms(self, name, note):
-        for p in self._pending(name):
-            p["decision"] = None
-            p["status"] = "expiring"
-            p["_note"] = note
-            p["_ev"].set()
-
-    def wait_permission(self, p, conn):
-        """Block the hook's socket until decided, expired, or the hook goes away. Returns the reply."""
-        while not p["_ev"].wait(0.5):
-            if now() > p["expires"]:
-                with self.lock:
-                    if p["status"] == "pending":
-                        p["status"] = "expiring"
-                        p["_note"] = "timed out; falling back to terminal dialog"
-                break
-            r, _, _ = select.select([conn], [], [], 0)
-            if r:
-                try:
-                    gone = conn.recv(1, 0x40) == b""  # MSG_DONTWAIT
-                except BlockingIOError:
-                    gone = False
-                except OSError:
-                    gone = True
-                if gone:
-                    with self.lock:
-                        if p["status"] == "pending":
-                            p["status"] = "expiring"
-                            p["_note"] = "hook went away (answered in terminal or Claude moved on)"
-                    break
-        with self.lock:
-            if p["status"] == "deciding":
-                return p["_reply"]
-            return {"decision": None}
-
-    def complete_permission(self, p, delivered, error=None):
-        with self.lock:
-            if p["status"] == "deciding":
-                if delivered:
-                    self._finish_perm(p, "delivered", f"{p['decision']} delivered to Claude")
-                else:
-                    self._finish_perm(p, "failed", f"could not deliver decision: {error}")
-            else:
-                note = p.get("_note", "expired")
-                self._finish_perm(p, "timeout" if "timed out" in note else "expired", note)
-        self.publish(p["session"])
-        self.try_deliver(p["session"])
-
-    # ------------------------------------------------------------ prompts
-    def enqueue(self, name, text, force=False):
-        if not isinstance(text, str) or not text.strip():
-            return 400, "empty prompt"
-        if len(text) > MAX_PROMPT:
-            return 413, "prompt too long"
-        with self.lock:
-            if name not in self.sessions:
-                return 404, "unknown session"
-            command = None
-            lead = text.lstrip()  # Claude Code trims leading whitespace/newlines before parsing (verified)
-            if lead.startswith("!"):
-                return 400, "Bash mode (!) isn't available from the phone. Ask Claude to run the command instead."
-            if lead.startswith("/"):
-                m = CMD_RE.match(lead)
-                command = m.group(1) if m else None
-                if not command or command.lower() in RESERVED_COMMANDS - {"clear", "compact"} or \
-                        command not in {c["name"] for c in commands_for(self.sessions[name].get("cwd"))}:
-                    return 400, (f"{lead.split()[0]} can't be run from the phone (only skills, custom commands, "
-                                 f"/clear and /compact). Use the terminal: grovy attach {name}.")
-            p = {"id": uuid.uuid4().hex, "session": name, "text": text, "status": "queued", "force": force is True,
-                 "command": command, "created": now(), "updated": now(), "error": None}
-            self.prompts.append(p)
-            self._save_prompts()
-        self.publish(name)
-        self.try_deliver(name)
-        with self.lock:
-            # "Type anyway" was confirmed for the state the user saw *now*. If it couldn't be typed
-            # immediately, it becomes an ordinary queued prompt: a later uncertain state (e.g. an open
-            # terminal dialog after a restart) must never inherit that consent.
-            p["force"] = False
-        return 200, p
-
-    # ------------------------------------------------------------ lifecycle (phone)
-    def conversations(self, path):
-        """Past conversations in a trusted folder, each marked with where it's currently open, if anywhere."""
-        if not isinstance(path, str) or path not in self.lifecycle.trusted_projects():
-            return 400, "pick one of the listed folders"
-        convs = self.lifecycle.conversations(path)
-        live_ccs = self._live_ccs_conversations()
-        live_any = self.lifecycle.live_conversations()
-        for c in convs:
-            c["open_in"] = ("grovy:" + live_ccs[c["id"]]) if c["id"] in live_ccs else \
-                ("terminal" if c["id"] in live_any else None)
-        return 200, convs
-
-    def _live_ccs_conversations(self):
-        live = self.tmux_live()
-        with self.lock:
-            return {s["claude_session_id"]: n for n, s in self.sessions.items()
-                    if n in live and s.get("claude_session_id") and s.get("state") != "exited"}
-
-    def create(self, name, path, ask, resume=None, fork=False):
-        """New session from the phone: only in a folder Claude already trusts (no blocking trust dialog).
-        With resume=<conversation id>, continue (or, with fork, copy) a past conversation from that folder."""
-        if not grovy.valid_name(name):
-            return 400, "name: letters, digits, - and _ (max 32)"
-        if not isinstance(path, str) or path not in self.lifecycle.trusted_projects():
-            return 400, "pick one of the listed folders"
-        if grovy.name_in_use(grovy.registry(), name):
-            return 409, f"the name {name} is taken (by a session or a renamed session's old name)"
-        extra = ["--permission-mode", "default"] if ask is True else []
-        if resume is not None:
-            if not isinstance(resume, str) or resume not in {c["id"] for c in self.lifecycle.conversations(path)}:
-                return 400, "unknown conversation for this folder"
-            live_ccs = self._live_ccs_conversations()
-            if resume in live_ccs:
-                return 409, f"already open in session {live_ccs[resume]}"
-            if resume in self.lifecycle.live_conversations() and fork is not True:
-                return 409, "this conversation is open in another terminal: fork a copy instead"
-            extra += ["--resume", resume] + (["--fork-session"] if fork is True else [])
-        try:
-            self.lifecycle.start(name, path, extra)
-        except (ValueError, RuntimeError) as e:
-            return 409, str(e)
-        self.reconcile()
-        return 200, "started"
-
-    def resume(self, name):
-        try:
-            msg = self.lifecycle.resume(name)
-        except (ValueError, RuntimeError) as e:
-            return 409, str(e)
-        self.reconcile()
-        return 200, msg
-
-    def rename(self, old, new):
-        """Rename a session (live or ended) and move everything the daemon holds for it."""
-        if not isinstance(new, str) or not grovy.valid_name(new):
-            return 400, "name: letters, digits, - and _ (max 32)"
-        with self.lock:  # held across the tmux rename so no reconcile sees a half-renamed session
-            old = self._canon(old)
-            if old not in self.sessions:
-                return 404, "unknown session"
-            if new in self.sessions and new != old:
-                return 409, f"the name {new} is already taken"
-            try:
-                self.lifecycle.rename(old, new)
-            except (ValueError, RuntimeError) as e:
-                return 409, str(e)
-            if new != old:
-                s = self.sessions.pop(old)
-                s["name"] = new
-                self.sessions[new] = s
-                if old in self.events:
-                    q = self.events.pop(old)
-                    for r in q:
-                        r["session"] = new
-                    self.events[new] = q
-                if old in self.live:
-                    self.live[new] = self.live.pop(old)
-                for p in self.prompts + list(self.perms.values()) + list(self.pages.values()):
-                    if p["session"] == old:
-                        p["session"] = new
-                self._save_pages()
-                self.aliases = {a: (new if n == old else n) for a, n in self.aliases.items()}
-                self.aliases[old] = new
-                self.aliases.pop(new, None)
-                self._record(new, "Renamed", {"from": old, "to": new})
-                self._save_state()
-                self._save_prompts()
-        self.publish(old)
-        self.publish(new)
-        return 200, new
-
-    def status(self, name, d):
-        """Status-line data (model, effort, context). Claude refreshes it often: keep it in memory and
-        only notify browsers when something visible changed."""
-        def num(v):
-            return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
-        cw = d.get("context_window") if isinstance(d.get("context_window"), dict) else {}
-        used = None
-        if num(cw.get("remaining_percentage")) is not None:  # accounts for the compaction reserve
-            used = 100 - int(cw["remaining_percentage"])
-        elif num(cw.get("used_percentage")) is not None:
-            used = int(cw["used_percentage"])
-        model = d.get("model") if isinstance(d.get("model"), dict) else {}
-        effort = d.get("effort") if isinstance(d.get("effort"), dict) else {}
-        meta = {"model": str(model.get("display_name") or model.get("id") or "")[:40] or None,
-                "effort": str(effort.get("level") or "")[:20] or None,
-                "fast": d.get("fast_mode") is True,
-                "context": max(0, min(100, used)) if used is not None else None}
-        with self.lock:
-            name = self._canon(name)
-            s = self.sessions.get(name)
-            if not s or s.get("meta") == meta:
-                return
-            s["meta"] = meta
-            self._save_state()
-        self.publish(name)
-
-    def restart(self, name, force=False):
-        """"Update": stop + resume in one step, so the session picks up new grovy settings (hooks, status line).
-        Without force, only when nothing can be cut off: Claude idle, no background tasks, no pending request,
-        no prompt in flight. force=True is the user's explicit, one-time "update anyway": what was running is
-        cut off (the conversation itself is resumed)."""
-        with self.lock:
-            s = self.sessions.get(name)
-            if not s:
-                return 404, "unknown session"
-            if s["state"] == "exited":
-                return 409, "the session has ended: use Resume"
-            busy = [why for why, cond in (
-                (f"Claude is {LABELS.get(s['state'], s['state'])}", s["state"] not in ("idle", "error")),
-                (f"{s.get('background')} background task(s) are running", s.get("background")),
-                ("a request is waiting for your answer", self._pending(name)),
-                ("a message is being sent", any(p["session"] == name and p["status"] in ("queued", "injected")
-                                                for p in self.prompts))) if cond]
-            if busy and not force:
-                return 409, "not now: " + "; ".join(busy)
-            if busy:
-                self._record(name, "Updated", {"forced": True, "cut_off": busy})
-        try:
-            self.lifecycle.kill(name)
-        except (ValueError, RuntimeError) as e:
-            return 409, str(e)
-        self.reconcile()
-        code, msg = self.resume(name)
-        return (200, "updated: " + msg) if code == 200 else (code, "stopped, but resume failed: " + msg)
-
-    def forget(self, name):
-        """Remove an ended session from the list (its conversation stays resumable from ＋)."""
-        if name in self.tmux_live():
-            return 409, f"{name} is still running; stop it first"
-        with grovy.registry_locked() as reg:
-            if reg.pop(name, None) is None and name not in self.sessions:
-                return 404, "unknown session"
-        with self.lock:
-            self.sessions.pop(name, None)
-            self.live.pop(name, None)
-            self._save_state()
-            for pid in [k for k, p in self.pages.items() if p["session"] == name]:
-                self._drop_page(pid)
-        self.publish(name)
-        return 200, "removed"
-
-    def kill(self, name):
-        try:
-            self.lifecycle.kill(name)
-        except (ValueError, RuntimeError) as e:
-            return 409, str(e)
-        self.reconcile()
-        return 200, "stopped"
-
-    # ------------------------------------------------------------ pages (local "artifacts")
-    def save_attachment(self, name, filename, read, size):
-        """Write a file sent from the phone where the session's Claude may read it. read(n) yields the body."""
-        with self.lock:
-            if name not in self.sessions:
-                return 404, "no such session"
-        if size > MAX_UPLOAD:
-            return 413, f"too large (the limit is {MAX_UPLOAD // 2**20} MB)"
-        if size <= 0:
-            return 400, "empty file"
-        try:
-            top = private_dir(grovy.attachments_dir())
-            prune_attachments(top)
-            d = os.path.join(top, name)
-            os.makedirs(d, mode=0o700, exist_ok=True)
-        except OSError as e:
-            return 500, f"can't use the attachments folder: {e}"
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(filename or "")).strip("._-")[:80] or "file"
-        path = os.path.join(d, f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}-{safe}")
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        except OSError as e:
-            return 500, f"can't save it: {e}"
-        try:
-            with os.fdopen(fd, "wb") as f:
-                left = size
-                while left:
-                    chunk = read(min(left, 1 << 16))
-                    if not chunk:
-                        raise OSError("upload cut short")
-                    f.write(chunk)
-                    left -= len(chunk)
-        except OSError as e:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-            return 400, f"not saved: {e}"
-        return 200, {"path": path, "name": safe, "size": size}
-
-    def read_attachment(self, name, filename, images=False):
-        """An image the phone sent (thumbnails), or with images=True one Claude kept with `grovy image` (image
-        widgets): (content type, bytes) or None."""
-        ext = filename.rsplit(".", 1)[-1].lower()
-        if not grovy.valid_name(name) or not ATTACH_NAME.fullmatch(filename) or ext not in IMAGE_TYPES:
-            return None
-        try:
-            top = os.path.join(self.dir, "images") if images else private_dir(grovy.attachments_dir())
-            fd = os.open(os.path.join(top, name, filename), os.O_RDONLY | os.O_NOFOLLOW)
-            with os.fdopen(fd, "rb") as f:
-                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                    return None
-                return IMAGE_TYPES[ext], f.read(MAX_UPLOAD + 1)
-        except OSError:
-            return None
-
-    def publish_page(self, session, name, title, html):
-        """Store a copy of an HTML page Claude made (`grovy page publish`). Same session + name = new version."""
-        if not isinstance(name, str) or not PAGE_NAME_RE.fullmatch(name):
-            return 400, "page name: letters, digits, '.', '-', '_' (max 64)"
-        if not isinstance(html, str):
-            return 400, "no HTML"
-        data = html.encode("utf-8", "surrogateescape")
-        if len(data) > PAGE_MAX:
-            return 413, f"page too large ({len(data) // 1024} KB, max {PAGE_MAX // 1024} KB)"
-        title = (title if isinstance(title, str) and title.strip() else name).strip()[:200]
-        with self.lock:
-            session = self._canon(session)
-            if session not in self.sessions:
-                return 404, f"unknown session {session!r}"
-            pid = next((k for k, p in self.pages.items() if p["session"] == session and p["name"] == name), None)
-            pid = pid or uuid.uuid4().hex
-            os.makedirs(self.pages_dir, mode=0o700, exist_ok=True)
-            path = os.path.join(self.pages_dir, pid + ".html")
-            tmp = path + ".tmp"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-            os.replace(tmp, path)
-            p = self.pages.setdefault(pid, {"id": pid, "session": session, "name": name, "version": 0})
-            p.update(title=title, version=p["version"] + 1, updated=now(), size=len(data))
-            self._save_pages()
-            self._record(session, "Page", {"page": pid, "name": name, "title": title, "version": p["version"]})
-            out = dict(p)
-        self.publish(session)
-        return 200, out
-
-    # ------------------------------------------------------------ live widgets (from scripts: `import grovy`)
-    def live_update(self, session, key, spec, status="running", message=None):
-        """Create or update, in place, a widget card a script running in the session shows on the phone.
-        The page renders and validates the widget; here we only bound it."""
-        if not isinstance(key, str) or not LIVE_KEY_RE.fullmatch(key):
-            return 400, "key: letters, digits, '.', ':', '-', '_' (max 64)"
-        if not isinstance(spec, dict) or not isinstance(spec.get("type"), str):
-            return 400, "a widget is a JSON object with a \"type\""
-        if status not in LIVE_STATUS:
-            return 400, "status: " + ", ".join(LIVE_STATUS)
-        if len(json.dumps(spec, ensure_ascii=False).encode()) > LIVE_MAX:
-            return 413, f"widget too large (max {LIVE_MAX // 1024} KB of JSON)"
-        message = message[:500] if isinstance(message, str) and message.strip() else None
-        t = now()
-        with self.lock:
-            session = self._canon(session)
-            if session not in self.sessions:
-                return 404, f"unknown session {session!r}"
-            cards = self.live.setdefault(session, {})
-            meta = cards.get(key)
-            if meta and not any(r is meta["rec"] for r in self.events.get(session, ())):
-                meta = None   # scrolled out of the history kept in memory: show it again as a new card
-            if meta is None:
-                recent = self.live_new.setdefault(session, deque())
-                while recent and t - recent[0] > 60:
-                    recent.popleft()
-                if len(recent) >= LIVE_NEW_PER_MIN:
-                    return 429, (f"too many new widgets (max {LIVE_NEW_PER_MIN} a minute per session); "
-                                 "update an existing one by key instead")
-                recent.append(t)
-                rec = self._record(session, "Live", {"key": key, "spec": spec, "status": status, "message": message,
-                                                     "rev": 1, "created": t, "updated": t})
-                cards[key] = {"rec": rec, "logged": t, "dirty": False}
-            else:
-                rec, d = meta["rec"], meta["rec"]["data"]
-                # a new dict, not d.update(): the HTTP thread may be serializing the old one outside the lock
-                rec["data"] = {**d, "spec": spec, "status": status, "message": message, "rev": d["rev"] + 1, "updated": t}
-                meta["dirty"] = True
-                if status != "running" or t - meta["logged"] >= LIVE_LOG_EVERY:
-                    self._log_live(meta)
-            out = {"key": key, "id": rec["id"], "rev": rec["data"]["rev"]}
-        self._publish_soon(session)
-        return 200, out
-
-    def _log_live(self, meta):
-        self._log.write(json.dumps(meta["rec"], ensure_ascii=False) + "\n")   # same id: the last line wins on load
-        meta["logged"], meta["dirty"] = now(), False
-
-    def flush_live(self):
-        with self.lock:
-            for cards in self.live.values():
-                for meta in cards.values():
-                    if meta["dirty"]:
-                        self._log_live(meta)
-
-    def _publish_soon(self, name):
-        """Live updates can come many times a second: refresh browsers at most every LIVE_PUBLISH_EVERY,
-        always including the last update."""
-        with self.lock:
-            wait = self._pub_at.get(name, 0) + LIVE_PUBLISH_EVERY - now()
-            if wait > 0:
-                if name not in self._pub_timer:
-                    tm = self._pub_timer[name] = threading.Timer(wait, self._publish_due, (name,))
-                    tm.daemon = True
-                    tm.start()
-                return
-            self._pub_at[name] = now()
-        self.publish(name)
-
-    def _publish_due(self, name):
-        with self.lock:
-            self._pub_timer.pop(name, None)
-            self._pub_at[name] = now()
-        self.publish(name)
-
-    def share_page(self, pid, shared):
-        """A shared page gets an unguessable link (/s/<token>) that works without the grovy token. Unsharing
-        revokes it; sharing again issues a new one. Republishing keeps the link."""
-        with self.lock:
-            p = self.pages.get(pid)
-            if not p:
-                return 404, "unknown page"
-            if bool(shared) != bool(p.get("share")):
-                p["share"] = secrets.token_hex(16) if shared else None
-                self._save_pages()
-            out = dict(p)
-        self.publish(out["session"])
-        return 200, out
-
-    def shared_page_html(self, token):
-        with self.lock:
-            pid = next((k for k, p in self.pages.items()
-                        if p.get("share") and hmac.compare_digest(p["share"], token)), None)
-        return self.page_html(pid) if pid else None
-
-    def _drop_page(self, pid):
-        p = self.pages.pop(pid, None)
-        try:
-            os.unlink(os.path.join(self.pages_dir, pid + ".html"))
-        except FileNotFoundError:
-            pass
-        self._save_pages()
-        return p
-
-    def delete_page(self, pid, session=None):
-        with self.lock:
-            p = self.pages.get(pid)
-            if not p or (session is not None and p["session"] != self._canon(session)):
-                return 404, "unknown page"
-            self._drop_page(pid)
-        self.publish(p["session"])
-        return 200, "deleted"
-
-    def list_pages(self, session=None):
-        with self.lock:
-            session = session and self._canon(session)
-            return sorted((dict(p) for p in self.pages.values() if session is None or p["session"] == session),
-                          key=lambda p: -p["updated"])
-
-    def page_html(self, pid):
-        with self.lock:
-            p = self.pages.get(pid)
-            if not p:
-                return None
-            try:
-                with open(os.path.join(self.pages_dir, pid + ".html"), "rb") as f:
-                    return dict(p), f.read()
-            except OSError:
-                return None
-
-    # ------------------------------------------------------------ history / search (from the log on disk)
-    def history(self, name, before=None, q=None, limit=100):
-        """Older events (id < before), or prompts/replies containing q (newest first)."""
-        q = q.lower() if q else None
-        out = []
-        try:
-            with open(self.log_path, "rb") as f:
-                for line in f:
-                    try:
-                        r = json.loads(line)
-                    except ValueError:
-                        continue
-                    if not isinstance(r, dict) or self._canon(_owner(r)) != name:
-                        continue
-                    if q:
-                        d = r.get("data") or {}
-                        text = d.get("prompt") or d.get("last_assistant_message") or ""
-                        if r.get("type") in ("UserPromptSubmit", "Stop", "Steered") and q in str(text).lower():
-                            out.append(r)
-                    elif before is not None and r.get("id", 0) < before:
-                        out.append(r)
-        except OSError:
-            return []
-        latest = {r.get("id"): r for r in out}   # a live widget appears once per logged update: keep the last
-        out = [r for r in out if latest.get(r.get("id")) is r]
-        return out[::-1][:limit] if q else out[-limit:]
-
-    def interrupt(self, name):
-        """Press Esc for the user, only while Claude is known to be working (never into a dialog)."""
-        with self.lock:  # held across the key press, so no permission can be registered in between
-            s = self.sessions.get(name)
-            if not s:
-                return 404, "unknown session"
-            if s["state"] != "working" or self._pending(name):
-                return 409, f"nothing to interrupt (Claude is {s['state']})"
-            try:
-                self.key(name, "Escape")
-            except Exception as e:
-                return 409, str(e)
-            # Esc emits no hook. We pressed it, so say so instead of leaving a stale "working".
-            self._record(name, "Interrupted", {})
-            self._set(name, "unknown", "interrupted from the phone")
-            self._save_state()
-        self.publish(name)
-        return 200, "interrupted"
-
-    def cancel_prompt(self, pid):
-        with self.lock:
-            for p in self.prompts:
-                if p["id"] == pid:
-                    if p["status"] != "queued":
-                        return 409, f"prompt is {p['status']}"
-                    p["status"], p["updated"] = "cancelled", now()
-                    self._save_prompts()
-                    break
-            else:
-                return 404, "unknown prompt"
-        self.publish(p["session"])
-        return 200, "cancelled"
-
-    def take_steers(self, name):
-        """Steering: messages queued while Claude works are handed to it by the hook of the main agent's next tool
-        call (PostToolUse additionalContext), with no keystrokes, so nothing can land in a dialog. Verified with
-        Claude Code 2.1.325, Haiku and Opus: Claude acts on them mid-turn. The leading run of queued plain messages
-        goes, in order; a queued slash command (and everything after it) waits for the turn's end, as does a turn
-        that ends before any tool call: then try_deliver types them as usual. Returns the context text or None."""
-        name = self._canon(name)
-        with self.lock:
-            s = self.sessions.get(name)
-            if not s or s["state"] == "exited":
-                return None
-            take, size = [], 0
-            for p in self.prompts:
-                if p["session"] != name or p["status"] != "queued":
-                    continue
-                if p.get("command") or size + len(p["text"]) > STEER_MAX:
-                    break
-                take.append(p)
-                size += len(p["text"])
-            if not take:
-                return None
-            for p in take:
-                p["status"], p["updated"] = "steered", now()
-                self._record(name, "Steered", {"prompt": clip(p["text"]), "sent": p["created"]})
-            self._save_prompts()
-        self.publish(name)
-        one = len(take) == 1
-        intro = STEER_INTRO.format(what="this message" if one else f"these {len(take)} messages",
-                                   it="It is" if one else "They are", them="it" if one else "them")
-        return intro + "\n\n---\n\n".join(p["text"] for p in take)
-
-    def _fail_queued(self, name, why):
-        """Queued prompts belong to the session instance that was running when they were queued."""
-        for p in self.prompts:
-            if p["session"] == name and p["status"] == "queued":
-                p["status"], p["error"], p["updated"] = "failed", why, now()
-        self._save_prompts()
-
-    def _confirm_prompt(self, name, text):
-        t = squash(text)
-        order = sorted((p for p in self.prompts if p["session"] == name), reverse=True,
-                       key=lambda p: (p["status"] == "injected", p["created"]))  # the one in flight first
-        for p in order:
-            if p["status"] in ("injected", "unconfirmed") and \
-                    (squash(p["text"]) == t or squash(p["text"])[:200] == t[:200]):
-                p["status"], p["updated"] = "submitted", now()
-                self._save_prompts()
-                return p
-        return None
-
-    def try_deliver(self, name):
-        """Type the oldest queued prompt into the session, if and only if that is known to be safe."""
-        with self.lock:
-            s = self.sessions.get(name)
-            if not s or self._pending(name):
-                return
-            mine = [p for p in self.prompts if p["session"] == name]
-            if any(p["status"] == "injected" for p in mine):
-                return  # one in flight at a time
-            queued = [p for p in mine if p["status"] == "queued"]
-            if not queued:
-                return
-            p = queued[0]
-            # Uncertain states are only typed into when the user explicitly confirmed this prompt.
-            if s["state"] not in INPUT_STATES and not (p.get("force") and self._forceable(s)):
-                return
-            # Persist "injected" BEFORE typing: a crash after this point can never cause a second send.
-            p["status"], p["updated"] = "injected", now()
-            self._set(name, "working", DELIVERY_ACTIVITY.get(p.get("command"), DELIVERY_ACTIVITY[None]))
-            self._save_prompts()
-            self._save_state()
-        self.publish(name)
-        threading.Thread(target=self._paste, args=(p,), daemon=True).start()
-
-    def _still_safe(self, p):
-        """Asked by the typing loop between chunks and before Enter: a reason to stop, or None."""
-        with self.lock:
-            s = self.sessions.get(p["session"])
-            if p["status"] != "injected":
-                return "the prompt was cancelled"
-            if self._pending(p["session"]):
-                return "Claude opened a permission request while the prompt was being typed"
-            if not s or s["state"] != "working" or s["activity"] not in DELIVERY_ACTIVITY.values():
-                return "Claude started something else while the prompt was being typed"
-        return None
-
-    def _paste(self, p):
-        aborted = False
-        try:
-            self.paste(p["session"], p["text"], bool(p.get("command")), abort=lambda: self._still_safe(p))
-            err = None
-        except grovy.PasteAborted as e:  # never pressed Enter; the partial text may be left in the input
-            err, aborted = str(e), True
-        except Exception as e:  # tmux failure, session gone, pane reused...
-            err = str(e)
-        with self.lock:
-            if not err and p["status"] == "injected":
-                p["typed"] = now()  # Enter pressed: Claude Code has it; its hook (the read receipt) may come much later
-            if err and p["status"] == "injected":
-                p["status"], p["updated"] = "failed", now()
-                p["error"] = (err + ". Enter was not pressed; part of it may be left in the terminal input "
-                              "(check it: grovy attach " + p["session"] + ")") if aborted else err
-                if not aborted:
-                    self._set(p["session"], "unknown", f"prompt delivery failed: {err}")
-            self._save_prompts()
-        self.publish(p["session"])
-
-    # ------------------------------------------------------------ reconciliation
-    def reconcile(self):
-        changed, gone = set(), []
-        try:   # outside the lock: reads the user's settings files
-            expected = {n: grovy.session_fingerprint(n) for n in grovy.registry()}
-        except (OSError, ValueError) as e:
-            print(f"grovyd: can't tell whether sessions are up to date: {e}", file=sys.stderr)
-            expected = {}
-        with self.lock:
-            # Snapshot under the state lock: a snapshot taken outside it could be applied after a
-            # newer hook event and mark a just-started session "exited".
-            try:
-                live = self.tmux_live()
-            except RuntimeError as e:  # tmux unresponsive: skip this round rather than guess "exited"
-                print(f"grovyd: reconcile skipped: {e}", file=sys.stderr)
-                return
-            reg = grovy.registry()
-            self.aliases = {a: n for n, v in reg.items() for a in (v.get("aliases") or [])}
-            for name in set(reg) | set(live) | set(self.sessions):
-                s = self._session(name)
-                if name in reg:
-                    s["cwd"] = s.get("cwd") or reg[name].get("cwd")
-                    s["claude_session_id"] = s.get("claude_session_id") or reg[name].get("claude_session_id")
-                    if name in expected:
-                        outdated = name in live and reg[name].get("config") != expected[name]
-                        if s.get("outdated") != outdated:
-                            s["outdated"] = outdated
-                            changed.add(name)
-                if name not in live and s["state"] != "exited":
-                    if s.get("scopes"):
-                        gone.append((name, s["scopes"]))
-                    self._expire_perms(name, "tmux session gone")
-                    self._set(name, "exited", "tmux session gone")
-                    self._record(name, "Exited", {"note": "tmux session no longer exists"})
-                    self._fail_queued(name, "session exited before it was sent")
-                    changed.add(name)
-                elif name in live and s["state"] == "exited":
-                    self._set(name, "starting", "process started")
-                    changed.add(name)
-                if name not in reg and name not in live:
-                    del self.sessions[name]  # forgotten
-                    changed.add(name)
-            for pid in [k for k, p in self.perms.items()
-                        if p["status"] not in ("pending", "deciding") and now() - p["created"] > 3600]:
-                del self.perms[pid]
-            for p in self.prompts:
-                limit = COMMAND_TIMEOUT if p.get("command") in ("clear", "compact") else CONFIRM_TIMEOUT
-                if p["status"] == "injected" and now() - p["updated"] > limit:
-                    p["status"], p["updated"] = "unconfirmed", now()
-                    p["error"] = "no UserPromptSubmit seen; check the terminal"
-                    changed.add(p["session"])
-                    s = self.sessions.get(p["session"])
-                    if s and s["state"] == "working" and s["activity"] in DELIVERY_ACTIVITY.values():
-                        self._set(p["session"], "unknown", "prompt not confirmed")
-                elif p["status"] == "queued" and p["session"] not in live:  # incl. forgotten sessions: never
-                    # deliver into a future session that merely reuses the name
-                    p["status"], p["error"], p["updated"] = "failed", "session not running", now()
-                    changed.add(p["session"])
-            if changed:
-                self._save_state()
-                self._save_prompts()
-        for name in changed:
-            self.publish(name)
-        if self.oom:
-            self._oom_check(gone)
-        for name in list(self.sessions):
-            self.try_deliver(name)
-
-    def _oom_check(self, gone):
-        """Outside the lock (systemd and journal calls): say when the OOM killer took a session, and keep new
-        sessions' Claude out of its way."""
-        for name, scopes in gone:
-            if self.oom.killed(scopes):
-                with self.lock:
-                    self._record(name, "Killed", {"by": "oom"})
-                    self._set(name, "exited", "killed by the out-of-memory killer")
-                    self._save_state()
-                self._notify(name, "error", "killed by the out-of-memory killer (memory pressure on this machine)")
-                self.publish(name)
-        try:
-            pids = self.oom.pids()
-        except Exception as e:  # never let this break reconciliation
-            print(f"grovyd: oom guard: {e}", file=sys.stderr)
-            return
-        with self.lock:
-            todo = [(n, pid) for n, pid in pids.items() if n in self.sessions and self.sessions[n].get("oom_pid") != pid]
-        for name, pid in todo:
-            scope = self.oom.scope(pid)
-            scopes = [scope] if scope else []
-            if scope and not scope.startswith("grovy-"):
-                new = self.oom.protect(name, pid)
-                if new:
-                    scopes.append(new)
-                else:
-                    print(f"grovyd: couldn't shield {name} from the OOM killer", file=sys.stderr)
-            with self.lock:
-                s = self.sessions.get(name)
-                if s:
-                    s["oom_pid"], s["scopes"] = pid, scopes
-                    self._save_state()
-
-    def _forceable(self, s):
-        """unknown, or working but silent (e.g. turn interrupted with Esc: Claude emits no hook)."""
-        return s["state"] == "unknown" or (
-            s["state"] == "working" and now() - (s.get("last_event") or 0) > FORCE_STALE)
-
-    # ------------------------------------------------------------ views
-    def summary(self, name):
-        s = dict(self.sessions[name])
-        mine = [p for p in self.prompts if p["session"] == name]
-        s["pending_permissions"] = len(self._pending(name))
-        s["queued_prompts"] = sum(p["status"] in ("queued", "injected") for p in mine)
-        s["accepts_input"] = s["state"] in INPUT_STATES and not s["pending_permissions"]
-        s["can_force"] = self._forceable(s) and not s["pending_permissions"]
-        # background work, oldest first (none once Claude has exited, even if its end went unreported)
-        s["tasks"] = [] if s["state"] == "exited" else sorted(
-            (dict(x) for x in (s.get("tasks") or {}).values()), key=lambda x: x.get("since") or 0)
-        return s
-
-    def list_sessions(self):
-        with self.lock:
-            out = [self.summary(n) for n in self.sessions]
-        out.sort(key=lambda s: (STATE_RANK.get(s["state"], 9) if not s["pending_permissions"] else -1,
-                                -(s["last_event"] or 0)))
-        return out
-
-    def detail(self, name, limit=100):
-        with self.lock:
-            if name not in self.sessions:
-                return None
-            return {"session": self.summary(name), "now": now(),   # the page corrects for its own clock's offset
-                    "events": list(self.events.get(name, ()))[-limit:],
-                    "permissions": [_public(p) for p in self.perms.values()
-                                    if p["session"] == name and p["status"] in ("pending", "deciding")],
-                    "prompts": [p for p in self.prompts if p["session"] == name][-30:],
-                    "pages": {k: {"version": p["version"], "title": p["title"], "share": p.get("share")}
-                              for k, p in self.pages.items() if p["session"] == name}}
-
-    def permissions(self):
-        with self.lock:
-            return [_public(p) for p in self.perms.values() if p["status"] in ("pending", "deciding")]
-
-
-CMD_RE = re.compile(r"/([A-Za-z0-9][\w:.-]*)(?:\s|$)")
-BUILTIN_COMMANDS = [{"name": "clear", "description": "Start a new conversation (clears context)", "source": "built-in"},
-                    {"name": "compact", "description": "Summarize the conversation to free up context",
-                     "source": "built-in"}]
-_cmd_cache = {}
-# Claude Code built-ins (and common aliases) that open menus or act outside the conversation.
-# Names are compared lowercased. Skills can't shadow these: the phone must never open a built-in menu.
-RESERVED_COMMANDS = set("""add-dir agents allowed-tools approved-tools bashes btw bug chrome clear compact config
-context continue copy cost doctor effort exit export extra-usage fast feedback fork help hooks ide init
-install-github-app install-slack-app keybindings login logout mcp memory migrate-installer model new
-output-style permissions plan plugin plugins pr-comments privacy-settings quit release-notes reload-plugins
-remote-env rename reset resume review rewind sandbox security-review settings skills stats status statusline
-tasks teleport terminal-setup theme todos upgrade usage vim""".split())
-
-
-def _frontmatter(path):
-    meta, body = {}, []
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            lines = f.read(8192).splitlines()
-    except OSError:
-        return meta, ""
-    if lines and lines[0].strip() == "---":
-        for i, l in enumerate(lines[1:], 1):
-            if l.strip() == "---":
-                body = lines[i + 1:]
-                break
-            k, _, v = l.partition(":")
-            meta[k.strip()] = v.strip().strip('"')
-    else:
-        body = lines
-    return meta, next((l.strip("# ").strip() for l in body if l.strip()), "")
-
-
-def commands_for(cwd):
-    """Skills and custom commands Claude Code would offer in this project, plus /clear and /compact.
-    Cached briefly; read from the same places Claude Code reads them."""
-    hit = _cmd_cache.get(cwd)
-    if hit and now() - hit[0] < 30:
-        return hit[1]
-    import glob
-    home = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    found = {}
-
-    def add(name, desc, source):
-        if name.lower() in RESERVED_COMMANDS:  # a repo's SKILL.md named "model"/"Model" must not unlock /model
-            return
-        if name and re.fullmatch(r"[A-Za-z0-9][\w:.-]*", name) and name not in found:
-            found[name] = {"name": name, "description": desc[:140], "source": source}
-
-    roots = [(os.path.join(cwd, ".claude"), "project")] if cwd else []
-    roots.append((home, "user"))
-    for root, source in roots:
-        for f in sorted(glob.glob(os.path.join(glob.escape(root), "skills", "*", "SKILL.md"))):
-            meta, first = _frontmatter(f)
-            add(meta.get("name") or os.path.basename(os.path.dirname(f)), meta.get("description") or first, source)
-        cdir = os.path.join(root, "commands")
-        for f in sorted(glob.glob(os.path.join(glob.escape(cdir), "**", "*.md"), recursive=True)):
-            meta, first = _frontmatter(f)
-            rel = os.path.relpath(f, cdir)[:-3].replace(os.sep, ":")
-            add(rel, meta.get("description") or first, source)
-    for f in sorted(glob.glob(os.path.join(glob.escape(home), "skills", "synced", "*", "*", "SKILL.md"))):
-        meta, first = _frontmatter(f)  # claude.ai-synced skills are invoked with this prefix
-        add("anthropic-skills:" + (meta.get("name") or os.path.basename(os.path.dirname(f))),
-            meta.get("description") or first, "synced")
-    out = BUILTIN_COMMANDS + sorted(found.values(), key=lambda c: c["name"])
-    _cmd_cache[cwd] = (now(), out)
-    return out
-
-
-QUESTION_TOOL = "AskUserQuestion"
-
-
-def _questions(inp):
-    qs = inp.get("questions") if isinstance(inp, dict) else None
-    return [q for q in qs if isinstance(q, dict) and isinstance(q.get("question"), str)] if isinstance(qs, list) else []
-
-
-def _check_answers(inp, answers):
-    """Every question needs a non-empty string answer; nothing else is accepted."""
-    qs = _questions(inp)
-    if not isinstance(answers, dict) or set(answers) != {q["question"] for q in qs}:
-        return "answers must cover exactly the questions asked"
-    for v in answers.values():
-        if not isinstance(v, str) or not v.strip() or len(v) > 4000:
-            return "each answer must be non-empty text (max 4000 chars)"
-    return None
-
-
-def _owner(r):
-    """Session name of a stored record; records written before the rename used the key "ccs"."""
-    return r.get("session", r.get("ccs"))
-
-
-def _count(v):
-    if isinstance(v, (list, dict)):
-        return len(v)
-    if isinstance(v, int) and not isinstance(v, bool):
-        return v
-    return 0
-
-
-def _public(p):
-    """A live request as the browser sees it: the full tool input (not the clipped log copy) when it
-    fits, otherwise flagged so the UI refuses to let the user approve what it can't show."""
-    d = {k: v for k, v in p.items() if not k.startswith("_")}
-    raw = p.get("_input")
-    if raw is not None:
-        fits = len(json.dumps(raw, ensure_ascii=False)) <= MAX_REVIEW
-        d["tool_input"], d["truncated"] = (raw if fits else p["tool_input"]), not fits
-    return d
-
-
-# ---------------------------------------------------------------- notifications
-
-class OomGuard:
-    """systemd-oomd side effects (swappable in tests). Off without busctl/journalctl or with GROVY_OOM_AVOID=0."""
-    pids = staticmethod(grovy.pane_pids)
-    scope = staticmethod(grovy.proc_scope)
-    protect = staticmethod(grovy.oom_protect)
-    killed = staticmethod(grovy.oom_killed)
-
-    @staticmethod
-    def available():
-        return grovy.env("OOM_AVOID", "1") != "0" and bool(shutil.which("busctl") and shutil.which("journalctl"))
-
-
-class Lifecycle:
-    """tmux/claude side effects for phone-initiated lifecycle actions (swappable in tests)."""
-
-    @staticmethod
-    def trusted_projects():
-        return grovy.trusted_projects()
-
-    @staticmethod
-    def start(name, path, extra):
-        grovy.start_session(name, path, extra)
-        grovy.check_started(name, path, extra)
-
-    @staticmethod
-    def resume(name):
-        return grovy.resume_session(name)
-
-    @staticmethod
-    def conversations(path):
-        return grovy.conversations(path)
-
-    @staticmethod
-    def live_conversations():
-        return grovy.live_conversations()
-
-    @staticmethod
-    def kill(name):
-        grovy.kill_session(name)
-
-    @staticmethod
-    def rename(old, new):
-        grovy.rename_session(old, new)
-
-
-class Notifier:
-    """Runs GROVY_NOTIFY_CMD (argv, shlex-split) with the message on stdin. Never blocks callers."""
-
-    def __init__(self, cmd, url=None, min_gap=60):
-        self.cmd, self.url, self.min_gap = shlex.split(cmd), url, min_gap
-        self.last = {}
-
-    def send(self, name, kind, text):
-        key = (name, kind)
-        if now() - self.last.get(key, 0) < self.min_gap:
-            return
-        self.last[key] = now()
-        msg = f"[{name}] {text}" + (f"\n{self.url}#/s/{name}" if self.url else "")
-        threading.Thread(target=self._run, args=(msg, kind, name), daemon=True).start()
-
-    def _run(self, msg, kind, name):
-        try:
-            subprocess.run(self.cmd, input=msg, text=True, timeout=15, capture_output=True,
-                           env={**os.environ, "GROVY_NOTIFY_KIND": kind, "GROVY_NOTIFY_SESSION": name,
-                                "CCS_NOTIFY_KIND": kind, "CCS_NOTIFY_SESSION": name})
-        except (OSError, subprocess.SubprocessError) as e:
-            print(f"grovyd: notify failed: {e}", file=sys.stderr)
-
-
-# ---------------------------------------------------------------- unix socket (hooks + CLI)
 
 class SockHandler(socketserver.StreamRequestHandler):
     def handle(self):
         store = self.server.store
         try:
-            line = self.rfile.readline(8 * PAGE_MAX)   # a page's HTML, JSON-escaped
+            line = self.rfile.readline(8 * pages.PAGE_MAX)   # a page's HTML, JSON-escaped
             msg = json.loads(line)
         except (ValueError, OSError):
             return
         t = msg.get("type") if isinstance(msg, dict) else None
         if t == "hook":
             name, payload = msg.get("session") or msg.get("ccs"), msg.get("event")
-            if not grovy.valid_name(name) or not isinstance(payload, dict):
+            if not core.valid_name(name) or not isinstance(payload, dict):
                 return
             if payload.get("hook_event_name") == "PermissionRequest":
                 self._permission(store, name, payload)
@@ -1555,12 +65,12 @@ class SockHandler(socketserver.StreamRequestHandler):
                         pass   # the hook gave up waiting; the message was marked steered but may not have arrived
         elif t == "status":
             self._reply({"sessions": {s["name"]: s for s in store.list_sessions()}, "url": self.server.url,
-                         "claude": shutil.which(grovy.claude_cmd())})
+                         "claude": shutil.which(claude.claude_cmd())})
         elif t == "refresh":
             store.reconcile()
         elif t == "statusline":
             name = msg.get("session")
-            if grovy.valid_name(name) and isinstance(msg.get("data"), dict):
+            if core.valid_name(name) and isinstance(msg.get("data"), dict):
                 store.status(name, msg["data"])
         elif t == "rename":
             code, res = store.rename(str(msg.get("old", "")), msg.get("new"))
@@ -1605,36 +115,71 @@ class SockServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
 
-# ---------------------------------------------------------------- HTTP
-
-INDEX_PATH = os.path.join(grovy.HERE, "index.html")
+INDEX_PATH = os.path.join(core.HERE, "index.html")
 
 
-CUSTOM_CSS_MAX = 256 * 1024
+CUSTOM_MAX = 256 * 1024
+# What is added to the page: grovy's built-in extensions (extensions/*.js in the grovy folder), then the user's own
+# files from their config folder (never overwritten by updates): custom.css after the built-in styles, custom.js after
+# every script. Text that would end its block early is refused, so a file can't change the page around it.
+CUSTOM = {"custom.css": (b"</style",), "custom.js": (b"</script", b"<!--")}
+EXTENSIONS_DIR = os.path.join(core.HERE, "extensions")
 
 
-def custom_css_path():
-    return os.path.join(grovy.config_dir(), "custom.css")
+def custom_path(name):
+    return os.path.join(core.config_dir(), name)
 
 
-def custom_css():
-    """The user's custom.css, or b"" (missing, too big, or containing "</style", which would end the block)."""
+def builtin_extensions():
+    """Paths of grovy's own extensions, in load order (by file name)."""
     try:
-        with open(custom_css_path(), "rb") as f:
-            css = f.read(CUSTOM_CSS_MAX + 1)
+        return [os.path.join(EXTENSIONS_DIR, f) for f in sorted(os.listdir(EXTENSIONS_DIR)) if f.endswith(".js")]
     except OSError:
-        return b""
-    if len(css) > CUSTOM_CSS_MAX or b"</style" in css.lower():
-        print(f"grovyd: ignoring {custom_css_path()}: over {CUSTOM_CSS_MAX // 1024} KB or contains </style",
-              file=sys.stderr, flush=True)
-        return b""
-    return css
+        return []
 
 
-ASSETS_DIR = os.path.join(grovy.HERE, "assets")
+def page_file(path, forbidden):
+    """A file to add to the page, as UTF-8 bytes with LF line endings, or b"" (missing, not a regular file, too big,
+    not UTF-8, or containing text that would end its block). Line endings matter: the browser turns CR LF into LF
+    before checking the script's CSP hash, so the hash must be of the LF text."""
+    try:   # opened without blocking, then checked: a FIFO (even one swapped in at the last moment) can't hang us
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with open(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("not a regular file")
+            data = f.read(CUSTOM_MAX + 1)
+        if len(data) > CUSTOM_MAX:
+            raise ValueError(f"over {CUSTOM_MAX // 1024} KB")
+        data.decode("utf-8")
+        if b"\0" in data:
+            raise ValueError("contains a NUL byte")
+    except FileNotFoundError:
+        return b""
+    except (OSError, ValueError) as e:   # UnicodeDecodeError is a ValueError
+        print(f"grovyd: ignoring {path}: {'not UTF-8' if isinstance(e, UnicodeDecodeError) else e}", file=sys.stderr,
+              flush=True)
+        return b""
+    data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    bad = [t.decode() for t in forbidden if t in data.lower()]
+    if bad:
+        print(f"grovyd: ignoring {path}: contains {bad[0]}", file=sys.stderr, flush=True)
+        return b""
+    return data
+
+
+def custom_file(name):
+    """The user's custom.css or custom.js (see page_file)."""
+    return page_file(custom_path(name), CUSTOM[name])
+
+
+ASSETS_DIR = os.path.join(core.HERE, "assets")
+
+
 # Public static files: an allowlist, never a path from the request.
 ASSETS = {"icon-64.png": "image/png", "icon-180.png": "image/png", "icon-192.png": "image/png",
           "icon-512.png": "image/png", "backdrop.svg": "image/svg+xml"}
+
+
 MANIFEST = json.dumps({
     "name": "grovy", "short_name": "grovy", "start_url": "/", "display": "standalone",
     "background_color": "#161615", "theme_color": "#161615",
@@ -1643,48 +188,38 @@ MANIFEST = json.dumps({
 
 
 def load_index():
-    with open(INDEX_PATH, "rb") as f:
-        html = f.read()
-    css = custom_css()
+    with open(INDEX_PATH, "rb") as f:   # LF, as the browser sees it (a CR LF checkout would break the hash)
+        html = f.read().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    scripts = re.findall(rb"<script>(.*?)</script>", html, re.S)   # grovy's own script (taken before anything is added)
+    css = custom_file("custom.css")
     if css:   # after the built-in styles, so the same selectors and tokens override them
         html = html.replace(b"</style>", b"</style>\n<style id=\"custom-css\">\n" + css + b"\n</style>", 1)
-    scripts = re.findall(rb"<script>(.*?)</script>", html, re.S)
-    hashes = " ".join("'sha256-%s'" % base64.b64encode(hashlib.sha256(s).digest()).decode() for s in scripts)
+    # After grovy's script, which starts the page only once it is all parsed: built-in extensions, then custom.js.
+    added = [b"\n" + js + b"\n" for js in [page_file(p, CUSTOM["custom.js"]) for p in builtin_extensions()]
+             + [custom_file("custom.js")] if js]
+    if added:
+        i = html.rindex(b"</script>") + len(b"</script>")
+        html = html[:i] + b"".join(b"\n<script>" + js + b"</script>" for js in added) + html[i:]
+    # Hashes of exactly the blocks above, never a pattern match over the assembled page (custom.css text such as
+    # "<script>" in a comment would otherwise shift what gets hashed).
+    hashes = " ".join("'sha256-%s'" % base64.b64encode(hashlib.sha256(s).digest()).decode() for s in scripts + added)
     csp = (f"default-src 'none'; script-src {hashes}; style-src 'unsafe-inline'; connect-src 'self'; "
            "img-src 'self' data:; frame-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; "
            "frame-ancestors 'none'")
     return html, csp
 
 
-ID_RE = re.compile(r"^[0-9a-f]{32}$")
-
-
-def with_bridge(html):
-    """Insert PAGE_BRIDGE after the doctype (anything before it would put the page in quirks mode)."""
-    m = re.match(rb"(\xef\xbb\xbf)?\s*<!doctype[^>]*>", html, re.I)
-    return html[:m.end()] + PAGE_BRIDGE + html[m.end():] if m else PAGE_BRIDGE + html
-
-PAGE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
-PAGE_MAX = 5 * 1024 * 1024
-PAGE_CDNS = "https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com"
-# Pages are Claude-written HTML: sandboxed (opaque origin: no cookies, no grovy API, no other pages), libraries
-# only from the CDN allowlist, and no fetch/XHR/WebSocket/images from the network, so a page can't send data out.
-# Browsers can't stop a page from navigating its own frame elsewhere; docs/DESIGN.md "Known limitations" says so.
-PAGE_CSP = ("sandbox allow-scripts allow-forms allow-modals allow-downloads; default-src 'none'; "
-            f"script-src 'unsafe-inline' 'unsafe-eval' {PAGE_CDNS}; "
-            f"style-src 'unsafe-inline' {PAGE_CDNS} https://fonts.googleapis.com; "
-            f"font-src data: {PAGE_CDNS} https://fonts.gstatic.com; img-src data: blob:; media-src data: blob:; "
-            "connect-src 'none'; frame-src 'none'; worker-src blob:; form-action 'none'; base-uri 'none'; "
-            "frame-ancestors 'self'")
-# Injected first into every page: grovy.send(text) proposes a message (the phone puts it in the message box).
-PAGE_BRIDGE = (b"<script>window.grovy={send:function(t){if(window.parent===window){alert('Open this page from grovy "
-               b"to send it to Claude.');return}window.parent.postMessage({grovy:'send',text:String(t)},'*')}};</script>")
 REQ_ID_RE = re.compile(r"[A-Za-z0-9-]{16,64}")
+PLUGIN_PATH = re.compile(r"/api/x/([a-z0-9][a-z0-9_-]{0,31})/(.+)")   # a plugin's own routes (grovylib/plugins.py)
+
+
 HOST_PAGE = (b"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
              b"<title>grovy</title><body style='font:16px system-ui;padding:24px;max-width:30em'>"
              b"<h2>grovy doesn't know the name &ldquo;{host}&rdquo;</h2><p>To protect against DNS rebinding, grovy only "
              b"answers to IP addresses and names it was told about. Either open it by IP address, or restart the "
              b"daemon with <code>GROVY_HOSTS={host}</code> in its environment.</p>")
+
+
 LOGIN_PAGE = (b"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
               b"<title>grovy</title><body style='font:16px system-ui;padding:24px;max-width:30em'>"
               b"<h2>grovy: login needed</h2><p>Open the link printed by <code>grovy url</code> on the machine "
@@ -1696,7 +231,7 @@ class Http(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
-        if grovy.env("DEBUG"):
+        if core.env("DEBUG"):
             super().log_message(fmt, *args)
 
     def _send(self, code, body, ctype="application/json", extra=(), frame="DENY"):
@@ -1759,7 +294,7 @@ class Http(http.server.BaseHTTPRequestHandler):
         return ok
 
     def _abort(self):
-        if grovy.env("DEBUG"):
+        if core.env("DEBUG"):
             print(f"grovyd: closed idle connection from {self.client_address[0]} "
                   f"(no request within {self.HEADER_DEADLINE}s)", file=sys.stderr, flush=True)
         try:
@@ -1809,7 +344,7 @@ class Http(http.server.BaseHTTPRequestHandler):
             got = self.server.store.shared_page_html(m.group(1))
             if not got:
                 return self._send(404, b"Not found (this page is no longer shared).", "text/plain")
-            return self._send(200, got[1], "text/html", [("Content-Security-Policy", PAGE_CSP)])
+            return self._send(200, got[1], "text/html", [("Content-Security-Policy", pages.PAGE_CSP)])
         if not self._authed():
             if path == "/":
                 return self._send(401, LOGIN_PAGE, "text/html")
@@ -1817,8 +352,8 @@ class Http(http.server.BaseHTTPRequestHandler):
         store = self.server.store
         if path == "/":
             self.server.refresh_index()
-            return self._send(200, self.server.index, "text/html",
-                              [("Content-Security-Policy", self.server.csp)])
+            index, csp = self.server.page   # one read: a reload in between can't pair a page with another's CSP
+            return self._send(200, index, "text/html", [("Content-Security-Policy", csp)])
         if path == "/api/sessions":
             return self._send(200, {"sessions": store.list_sessions(), "now": time.time()})
         if path == "/api/permissions":
@@ -1838,7 +373,7 @@ class Http(http.server.BaseHTTPRequestHandler):
             return self._send(200, got[1], got[0], [("Cache-Control", "private, max-age=604800"),
                                                     ("Content-Security-Policy", "default-src 'none'")])
         m = re.fullmatch(r"/api/sessions/([^/]+)/history", path)
-        if m and grovy.valid_name(m.group(1)):
+        if m and core.valid_name(m.group(1)):
             qs = parse_qs(url.query)
             q = (qs.get("q", [""])[0] or "").strip()[:200]
             try:
@@ -1854,19 +389,25 @@ class Http(http.server.BaseHTTPRequestHandler):
             if not got:
                 return self._send(404, b"This page was deleted.", "text/plain")
             p, html = got
-            return self._send(200, with_bridge(html), "text/html",
-                              [("Content-Security-Policy", PAGE_CSP)], frame="SAMEORIGIN")
+            return self._send(200, pages.with_bridge(html), "text/html",
+                              [("Content-Security-Policy", pages.PAGE_CSP)], frame="SAMEORIGIN")
         if path == "/api/pages":
             return self._send(200, {"pages": store.list_pages()})
+        m = PLUGIN_PATH.fullmatch(path)
+        if m and store.plugins:
+            if self.headers.get("X-Grovy") != "1":   # only fetch() can add it: a tapped link or a navigation can't
+                return self._err(403, "plugin routes are for grovy.api() (X-Grovy header missing)")
+            query = {k: v[0] for k, v in parse_qs(url.query).items()}
+            return self._send(*store.plugins.handle("GET", m.group(1), m.group(2), query, None))
         m = re.fullmatch(r"/api/sessions/([^/]+)/pages", path)
-        if m and grovy.valid_name(m.group(1)):
+        if m and core.valid_name(m.group(1)):
             return self._send(200, {"pages": store.list_pages(m.group(1))})
         m = re.fullmatch(r"/api/sessions/([^/]+)/commands", path)
-        if m and grovy.valid_name(m.group(1)):
+        if m and core.valid_name(m.group(1)):
             s = store.sessions.get(m.group(1))
-            return self._send(200, {"commands": commands_for(s.get("cwd"))}) if s else self._err(404, "unknown session")
+            return self._send(200, {"commands": commands.commands_for(s.get("cwd"))}) if s else self._err(404, "unknown session")
         m = re.fullmatch(r"/api/sessions/([^/]+)", path)
-        if m and grovy.valid_name(m.group(1)):
+        if m and core.valid_name(m.group(1)):
             d = store.detail(m.group(1))
             return self._send(200, d) if d else self._err(404, "unknown session")
         self._err(404, "not found")
@@ -1907,8 +448,8 @@ class Http(http.server.BaseHTTPRequestHandler):
             entry = self.server.done.get(rid)
             first = entry is None
             if first:
-                entry = self.server.done[rid] = {"ev": threading.Event(), "res": None, "t": now()}
-                for k in [k for k, v in self.server.done.items() if now() - v["t"] > 600]:
+                entry = self.server.done[rid] = {"ev": threading.Event(), "res": None, "t": core.now()}
+                for k in [k for k, v in self.server.done.items() if core.now() - v["t"] > 600]:
                     del self.server.done[k]
         if first:
             try:
@@ -1924,7 +465,7 @@ class Http(http.server.BaseHTTPRequestHandler):
 
     def _upload(self, name):
         self.close_connection = True   # an error leaves the body unread
-        if not grovy.valid_name(name):
+        if not core.valid_name(name):
             return self._err(404, "no such session")
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/octet-stream":
             return self._err(415, "Content-Type must be application/octet-stream")
@@ -1941,15 +482,15 @@ class Http(http.server.BaseHTTPRequestHandler):
         store = self.server.store
         wrap = lambda code, res: (code, {"status": res} if code == 200 else {"error": res})  # noqa: E731
         m = re.fullmatch(r"/api/sessions/([^/]+)/prompts", path)
-        if m and grovy.valid_name(m.group(1)):
+        if m and core.valid_name(m.group(1)):
             code, res = store.enqueue(m.group(1), body.get("text"), body.get("force") is True)
             return code, (res if code == 200 else {"error": res})
         m = re.fullmatch(r"/api/permissions/([^/]+)/decision", path)
-        if m and ID_RE.match(m.group(1)):
+        if m and core.ID_RE.match(m.group(1)):
             return wrap(*store.decide(m.group(1), body.get("decision"), body.get("answers")))
         if path == "/api/client-error":  # the phone reports render errors it would otherwise swallow
-            if now() - self.server.last_client_error > 5:
-                self.server.last_client_error = now()
+            if core.now() - self.server.last_client_error > 5:
+                self.server.last_client_error = core.now()
                 msg = " | ".join(str(body.get(k, ""))[:2000].replace("\n", " ⏎ ") for k in ("view", "message", "stack"))
                 print(f"grovyd: CLIENT ERROR from {self.client_address[0]}: {msg}", file=sys.stderr, flush=True)
             return 200, {"status": "logged"}
@@ -1961,25 +502,28 @@ class Http(http.server.BaseHTTPRequestHandler):
             return wrap(*store.create(body.get("name"), body.get("path"), body.get("ask"),
                                       body.get("resume"), body.get("fork")))
         m = re.fullmatch(r"/api/sessions/([^/]+)/rename", path)
-        if m and grovy.valid_name(m.group(1)):
+        if m and core.valid_name(m.group(1)):
             return wrap(*store.rename(m.group(1), body.get("name")))
         m = re.fullmatch(r"/api/sessions/([^/]+)/restart", path)
-        if m and grovy.valid_name(m.group(1)):
+        if m and core.valid_name(m.group(1)):
             return wrap(*store.restart(m.group(1), force=body.get("force") is True))
         m = re.fullmatch(r"/api/sessions/([^/]+)/(resume|kill|forget|interrupt)", path)
-        if m and grovy.valid_name(m.group(1)):
+        if m and core.valid_name(m.group(1)):
             return wrap(*getattr(store, m.group(2))(m.group(1)))
         m = re.fullmatch(r"/api/pages/([^/]+)/share", path)
-        if m and ID_RE.match(m.group(1)):
+        if m and core.ID_RE.match(m.group(1)):
             if not isinstance(body.get("shared"), bool):
                 return 400, {"error": "shared: true or false"}
             code, res = store.share_page(m.group(1), body["shared"])
             return code, ({"page": res} if code == 200 else {"error": res})
         m = re.fullmatch(r"/api/pages/([^/]+)/delete", path)
-        if m and ID_RE.match(m.group(1)):
+        if m and core.ID_RE.match(m.group(1)):
             return wrap(*store.delete_page(m.group(1)))
+        m = PLUGIN_PATH.fullmatch(path)
+        if m and store.plugins:
+            return store.plugins.handle("POST", m.group(1), m.group(2), {}, body)
         m = re.fullmatch(r"/api/prompts/([^/]+)/cancel", path)
-        if m and ID_RE.match(m.group(1)):
+        if m and core.ID_RE.match(m.group(1)):
             return wrap(*store.cancel_prompt(m.group(1)))
         return 404, {"error": "not found"}
 
@@ -2099,34 +643,45 @@ class HttpServer(http.server.ThreadingHTTPServer):
         finally:
             self._slots.release()
     index_mtime = None
+    page = (b"", "default-src 'none'")   # (index.html as served, its CSP), always replaced together
+
+    @property
+    def index(self):
+        return self.page[0]
+
+    @property
+    def csp(self):
+        return self.page[1]
 
     def refresh_index(self):
-        """Pick up index.html and custom.css edits without a daemon restart (the CSP hash is recomputed too)."""
+        """Pick up edits to index.html, extensions/, custom.css and custom.js without a daemon restart (CSP hashes
+        included)."""
         try:
-            m = os.stat(INDEX_PATH).st_mtime_ns
+            m = [os.stat(INDEX_PATH).st_mtime_ns]
         except OSError:
             return
-        try:
-            c = os.stat(custom_css_path())
-            m = (m, c.st_mtime_ns, c.st_size)
-        except OSError:
-            m = (m, None)
+        for path in [custom_path(name) for name in CUSTOM] + builtin_extensions():
+            try:
+                c = os.stat(path)
+                m.append((path, c.st_mtime_ns, c.st_size))
+            except OSError:
+                m.append(None)
         if m != self.index_mtime:
-            self.index, self.csp = load_index()
+            self.page = load_index()
             self.index_mtime = m
 
 
 def serve(bind, port):
-    sdir = grovy.state_dir()
+    sdir = core.state_dir()
     notifier = None
-    if grovy.env("NOTIFY_CMD"):
-        notifier = Notifier(grovy.env("NOTIFY_CMD"), grovy.env("PUBLIC_URL"))
-    store = Store(sdir, notifier=notifier, oom=OomGuard() if OomGuard.available() else None)
+    if core.env("NOTIFY_CMD"):
+        notifier = notify.Notifier(core.env("NOTIFY_CMD"), core.env("PUBLIC_URL"))
+    st = Store(sdir, notifier=notifier, oom=oom.OomGuard() if oom.OomGuard.available() else None)
 
-    sp = grovy.sock_path()
+    sp = core.sock_path()
     if os.path.exists(sp):
         try:  # refuse to start twice
-            grovy.sock_request({"type": "status"}, timeout=1)
+            client.sock_request({"type": "status"}, timeout=1)
             print(f"grovyd: already running (socket {sp})", file=sys.stderr)
             return 1
         except (OSError, ValueError):
@@ -2134,31 +689,36 @@ def serve(bind, port):
     old = os.umask(0o177)
     sock = SockServer(sp, SockHandler)
     os.umask(old)
-    sock.store = store
+    sock.store = st
 
     httpd = HttpServer((bind, port), Http)
-    httpd.store = store
+    httpd.store = st
     # A token is always required, loopback included: other local users and DNS-rebinding pages can
     # reach 127.0.0.1 too. Generated once into the state dir; see `grovy url`. GROVY_AUTH=off keeps it
     # optional, e.g. while enrolling a phone that can only read the link through this page.
     loopback = bind in ("127.0.0.1", "::1", "localhost")
-    httpd.token = grovy.load_token(create=True)
+    httpd.token = core.load_token(create=True)
     httpd.allowed_hosts = {"localhost", socket.gethostname().lower(), socket.getfqdn().lower()} | {
-        h.strip().lower() for h in grovy.env("HOSTS", "").split(",") if h.strip()}
-    httpd.enforce = grovy.env("AUTH", "on") != "off"
+        h.strip().lower() for h in core.env("HOSTS", "").split(",") if h.strip()}
+    httpd.enforce = core.env("AUTH", "on") != "off"
     httpd.refresh_index()
     url = f"http://{bind}:{port}/"
     sock.url = url
 
-    store.reconcile()
+    st.reconcile()
     threading.Thread(target=sock.serve_forever, daemon=True).start()
+
+    def load_plugins():   # once the sockets are up (and this is the only daemon): plugins never delay hooks or the page
+        st.plugins = plugins.Plugins(st).load()
+
+    threading.Thread(target=load_plugins, name="grovy-plugin-load", daemon=True).start()
 
     def loop():
         while True:
             time.sleep(RECONCILE_EVERY)
             try:
-                store.reconcile()
-                store.flush_live()
+                st.reconcile()
+                st.flush_live()
             except Exception as e:  # keep the daemon alive; surface the problem
                 print(f"grovyd: reconcile error: {e}", file=sys.stderr)
 

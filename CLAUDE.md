@@ -13,11 +13,14 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 
 - **Never** kill your own tmux session (`grovy-$GROVY_SESSION`), the daemon's (`grovyd`), or any session you
   didn't create. Never run `tmux kill-server` on the default server.
-- `grovy.py` runs as the hook adapter for **every** hook event, immediately after you save it. A syntax error
-  makes all hooks fail. That fails safe (permissions fall back to the terminal dialog), but the phone goes blind.
-  Run `python3 -c "import grovy"` right after editing it.
+- `grovy.py hook NAME` runs for **every** hook event of every session, with the code as it is on disk the moment
+  you save. It loads `grovy.py`, `grovylib/hook.py` and what that imports (`core`, `client`, `claude`, `projects`,
+  `sessions`, `tmuxctl`, `scriptlib`). A syntax error there makes all hooks fail. That fails safe (permissions fall back
+  to the terminal dialog), but the phone goes blind. Run `python3 -c "import grovy; from grovylib import hook"` right
+  after editing any of them.
 - `index.html` is hot-reloaded by the daemon, and the user gets it on their next page reload.
-- `grovyd.py` changes need a daemon restart. Restarting never touches Claude sessions:
+- The daemon loads `grovyd.py` and `grovylib/` once, so changes to them need a daemon restart (changes to the modules
+  above reach hooks at once, and the daemon only after the restart). Restarting never touches Claude sessions:
   `tmux respawn-pane -k -t =grovyd: "<same command line it was started with>"` (check it with
   `tmux list-panes -t =grovyd: -F '#{pane_start_command}'`). Restart only after the tests pass. Events sent during
   the ~1s gap are lost.
@@ -28,14 +31,18 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 
 | file | what |
 |---|---|
-| `grovy.py` | CLI, tmux helpers (`tmux()`, `paste_prompt`, `send_key`), registry, hook adapter (`cmd_hook`), trusted projects |
-| `grovyd.py` | daemon: `Store` (state machine, permissions/questions, prompt queue, lifecycle, history), `Http`, `SockHandler` |
-| `index.html` | the whole UI: vanilla JS, one inline `<script>` (its CSP hash is computed at load) |
-| pages | `grovy page` (`cmd_page`) → socket `page` → `Store.publish_page`; served by `/p/<id>` with `PAGE_CSP` + `PAGE_BRIDGE`. Never loosen `PAGE_CSP` (no `allow-same-origin`, no `connect-src`) without the user agreeing |
-| setup, customizing | `grovy setup` (`cmd_setup`, `SERVICE_UNIT`; keep `examples/grovy.service` in sync). User styles: `~/.config/grovy/custom.css`, injected by `load_index()`. Put user-facing customization there, not in the repo |
-| widgets | `WIDGET_GUIDE` in `grovy.py` (what Claude is told, via the SessionStart hook) and `WIDGETS` in `index.html` (renderers). Change both together; every renderer validates its input and throws a readable `Error` |
-| live widgets | client library in `grovy.py` (`track`, `progress`, `note`, `log`, `show`; CLI `tail`/`progress`/`note`/`show`) → socket `live` → `Store.live_update` → `Live` event, rendered by `liveNode`. User scripts import this module: it must stay import-cheap, and those functions must never raise or block |
-| `tests/test_grovy.py` | unit tests that drive `grovyd.Store` with fake tmux/paste callables, plus real-tmux integration tests on a private server |
+| `grovy.py` | the `grovy` command (hook/statusline go straight to `grovylib/hook.py`), and what `import grovy` gives scripts |
+| `grovylib/` | everything else, one file per topic: **`grovylib/__init__.py` has the map**. Cross-module references are always `module.name` (e.g. `sessions.registry()`), so one `mock.patch.object(module, "name")` reaches every caller |
+| `grovyd.py` | daemon entry: `Http` (API, SSE), `SockHandler` (hooks, CLI), `serve()`, `load_index()` |
+| `Store` | `grovylib/store.py`, assembled from one class per feature (`Tasks`, `Permissions`, `Prompts`, `SessionLifecycle`, `Pages`, `LiveCards`, `Attachments`), each in its own module, all sharing `self.lock` and `self.sessions` |
+| `extensions/` | built-in page extensions (`context-bar.js`, ...): features written only against `window.grovy`, loaded before the user's `custom.js`. A self-contained UI feature belongs here rather than in `index.html` when the API can carry it; when it can't, grow the API |
+| `index.html` | the whole UI: vanilla JS, one inline `<script>` (its CSP hash is computed at load); a map of its parts is at the top of the script |
+| pages | `grovy page` (`cli.cmd_page`) → socket `page` → `Store.publish_page` (`pages.py`); served by `/p/<id>` with `PAGE_CSP` + `PAGE_BRIDGE`. Never loosen `PAGE_CSP` (no `allow-same-origin`, no `connect-src`) without the user agreeing |
+| setup | `grovy setup` (`install.cmd_setup`, `SERVICE_UNIT`; keep `examples/grovy.service` in sync) |
+| customizing | the user's own files in `~/.config/grovy/`, never in the repo: `custom.css` and `custom.js` (added to the page by `load_index()`; the script gets its own CSP hash), `instructions.md` (added to Claude's SessionStart context by `claude.user_instructions()`), `plugins/*.py` (loaded by the daemon, `grovylib/plugins.py`; their callbacks run on a worker thread, never under `Store.lock`). `custom.js` uses only `window.grovy` (the "extensions" part of `index.html`); plugins use only the `Api` object. Keep both APIs stable, documented in `examples/custom.js` and `examples/plugin.py`, and grow them rather than change them |
+| widgets | `WIDGET_GUIDE` in `grovylib/claude.py` (what Claude is told, via the SessionStart hook) and `WIDGETS` in `index.html` (renderers). Change both together; every renderer validates its input and throws a readable `Error` |
+| live widgets | client library in `grovylib/scriptlib.py` (`track`, `progress`, `note`, `log`, `show`, re-exported by `grovy.py`; CLI `tail`/`progress`/`note`/`show`) → socket `live` → `Store.live_update` (`live.py`) → `Live` event, rendered by `liveNode`. User scripts import this: it must stay import-cheap, and those functions must never raise or block |
+| `tests/test_grovy.py` | unit tests that drive `Store` with fake tmux/paste callables, plus real-tmux integration tests on a private server |
 
 ## Rules
 
@@ -82,7 +89,7 @@ Put scratch files in your scratchpad, not the repo.
 
 - Hooks are injected per session with `claude --settings FILE`; hook arrays merge with the user's settings.
   **The `--settings` file is read once at start**: editing it doesn't affect a running Claude (verified with a
-  statusLine marker). Changes to it reach a session on its next start: ⋯ → Update session (`Store.restart`).
+  statusLine marker). Changes to it reach a session on its next start: ⋯ → Update session (`Store.restart`, in `manage.py`).
 - The status line (`statusLine` in the same file → `grovy statusline NAME`) gets JSON on stdin: `model.display_name`,
   `effort.level`, `fast_mode`, `context_window.{used,remaining}_percentage` (null until the first message), `cost.*`,
   `cwd`, `session_id`. grovy forwards a trimmed copy and prints the user's own status line, so the terminal is unchanged.

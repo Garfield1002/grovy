@@ -1,3 +1,0 @@
-#!/bin/sh
-# Pre-rename alias: `ccs` runs `grovy`.
-exec "$(dirname "$(readlink -f "$0")")/grovy" "$@"

@@ -10,23 +10,27 @@ claude ──hooks──► grovy hook NAME ──unix socket──► grovyd �
 
 | file | what |
 |---|---|
-| `grovy` / `grovy.py` | CLI, tmux helpers, session registry, hook adapter |
-| `grovyd.py` | daemon: state from hooks, permission broker, prompt queue, HTTP/SSE |
-| `index.html` | the whole UI (vanilla JS, no innerHTML) |
+| `grovy` / `grovy.py` | the `grovy` command, and the library scripts get with `import grovy` |
+| `grovyd.py` | the daemon: HTTP API + SSE for the browser, Unix socket for hooks and the CLI |
+| `extensions/` | built-in extensions of the page, written against `window.grovy` like a user's `custom.js` (see "Making it yours") |
+| `grovylib/` | the rest, one file per topic (CLI, hook adapter, tmux, registry, and the daemon's `Store`, assembled from one class per feature); `grovylib/__init__.py` maps it |
+| `index.html` | the whole UI (vanilla JS, no innerHTML); a map of its parts opens its script |
 | `tests/test_grovy.py` | unit + tmux integration tests (`python3 -m unittest discover -s tests`) |
 | `examples/` | systemd unit, Telegram notify script, the generated hook config |
 | `assets/` | icon sizes and the home-screen backdrop, from [grove](https://github.com/Garfield1002/grove); served without the token from an allowlist (`ASSETS` in `grovyd.py`) |
 
 > **Renamed from `ccs`.** On first run, `~/.local/state/ccs` moves to `~/.local/state/grovy`, and a symlink is
-> left behind for sessions started before the rename. `CCS_*` environment variables are still accepted, and
-> `ccs`/`ccs.py` remain as aliases. Phones logged in with the old cookie stay logged in.
+> left behind for sessions started before the rename. `CCS_*` environment variables are still accepted.
+> Phones logged in with the old cookie stay logged in, and records written before the rename still load. (The
+> `ccs`/`ccs.py` command aliases were removed once no session started before the rename was left.)
 
 ## Session settings and context
 
 `grovy new` (and the phone) writes a per-session settings file (`$STATE/hooks/NAME.json`, see
 `examples/claude-hooks.json`) and starts `claude --settings THAT_FILE`. Hook arrays from `--settings` are *merged*
 with the user's settings, so existing hooks keep working. Claude processes not started by grovy are unaffected.
-The SessionStart hook adds the widget/page guide (`WIDGET_GUIDE`, about 450 tokens) as `additionalContext`.
+The SessionStart hook adds the widget/page guide (`WIDGET_GUIDE`, about 450 tokens) as `additionalContext`, followed
+by the user's own `~/.config/grovy/instructions.md` if there is one (see "Making it yours").
 
 ## Network access and the token
 
@@ -72,6 +76,7 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 | `GROVY_DEBUG` | unset | log HTTP requests |
 | `GROVY_WIDGETS` | `1` | `0` = don't tell Claude sessions about widgets and pages (applies to sessions started afterwards) |
 | `GROVY_OOM_AVOID` | `1` | `0` = don't move sessions out of systemd-oomd's way (see "Out of memory") |
+| `GROVY_PLUGINS` | `1` | `0` = don't load `~/.config/grovy/plugins/` (see "Making it yours") |
 | `GROVY_SUBAGENT_HOOKS` | `0` | `1` = forward every hook of subagents (normally only permission requests, notifications, start/stop and tool calls, which feed the background list) |
 
 ## Notifications (Telegram or anything else)
@@ -81,6 +86,89 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 command output or the full prompt. It is rate-limited to one per session per kind per 60s, and runs
 in a background thread with a 15s timeout, so a failing bot never blocks hooks or Claude.
 `examples/notify-telegram.sh` posts to an existing bot (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`).
+
+## Making it yours
+
+grovy's page can be extended by scripts that use one documented object, `window.grovy`, the same way for grovy's own
+built-in extensions and for the user's. Everything personal lives in `~/.config/grovy/` (`GROVY_CONFIG_DIR`), outside
+the repo, so updates never conflict with it. `grovy setup` installs commented templates of `custom.css` and `custom.js`.
+
+* **Built-in extensions** are `extensions/*.js` in the grovy folder, loaded in file-name order right after grovy's own
+  script. They are ordinary features written against `window.grovy` only: `context-bar.js` (the line above the message
+  box, see "Status info") is the first. Each registers with `grovy.extension(name, setup)`; the setups run at start-up,
+  after `custom.js`, so `grovy.disable(name)` there turns one off (or replace it: disable it and copy it under another
+  name).
+* **`custom.css`** is added after the built-in styles (a later rule with the same selector wins).
+* **`custom.js`** is added after the built-in extensions, as its own inline `<script>`. It is documented in
+  `examples/custom.js`. `window.grovy` is a frozen object defined in the "extensions" part of `index.html`:
+  * DOM and API helpers: `h`, `md`, `api`, `ask`, `say`, `sheet`, `css(text)` (placed before `custom.css`, which
+    keeps the last word).
+  * `slot("composer")`: the place above the message box (below the reply buttons), where the context bar sits.
+  * The open session: `session`, and `state` as a copy.
+  * `draft(text)`, and `send(text)`: the Send button's request, never forced, through the send hooks.
+  * `widget(type, render)`: adds or replaces a widget renderer.
+  * `menu(label, run, {where})`: a ⋯ item.
+  * `key(combo, run)`: a shortcut.
+    * It needs Ctrl or Alt (F-keys excepted), so it can't take typing.
+    * Grovy's own Ctrl+Enter and Alt+↑/↓ are refused, and so are the browser's F5 and F12.
+    * With Alt alone (Option on a Mac turns letters into symbols), letters and digits also match by physical key.
+    * That fallback doesn't apply with AltGr (Ctrl+Alt), which types characters such as `@` that must stay typeable.
+    * Shift is refused with a symbol: name the symbol it types instead.
+  * `on(event, fn)`:
+    * `render`: a message node was built and may be changed (the event is a copy).
+    * `update`: a copy of the open session's state.
+    * `route`.
+    * `send`: may rewrite the text, or return `false` (or blank text) to keep it from being sent. It runs before the
+      check that attachments don't go with a `/` or `!` command. An `async` hook stops the
+      send, since its answer would come too late.
+  * `extension`, `disable`, `extensions`.
+
+  Start-up waits for `DOMContentLoaded`, so everything the extensions register is there for the first paint. A callback
+  that throws, and an error while an extension loads, shows an error at the top of the page that stays until tapped.
+  The failing callback is skipped. A `send` callback that throws stops that send.
+* **`instructions.md`** (up to 16 KB) is appended to what the SessionStart hook tells Claude, after the widget guide
+  and even with `GROVY_WIDGETS=0`: for example how to use a widget type `custom.js` adds. It is read at each start,
+  resume, `/clear` and `/compact`.
+* **`plugins/*.py`** run inside the daemon, loaded once it is serving (restart it to reload; `GROVY_PLUGINS=0` loads
+  none; events in the first moments after a start may not reach them). Each defines `setup(grovy)` and uses the `Api`
+  it is given (`grovylib/plugins.py`, example in `examples/plugin.py`):
+  * `on("event" | "state" | "notify", fn)`.
+  * `route("GET" | "POST", path, fn)` for `/api/x/PLUGIN/PATH`. It sits behind the token. POST is checked like the
+    rest of the API. A GET also needs an `X-Grovy: 1` header, which `grovy.api` sends and a tapped link or a page's
+    navigation can't. Keep GET routes read-only all the same.
+  * `sessions()` and `session(name)`, as copies.
+  * `send(session, text)`: the phone's rules, never forced, with a copy as its result.
+  * `log()`.
+
+  Isolation:
+  * Store only queues the callbacks, with copied arguments, while it holds its lock. One worker thread runs them, so a
+    slow or failing plugin never delays hooks, permissions or the page. Past 1000 waiting calls, new ones are dropped
+    and logged.
+  * Each `setup` runs on its own thread with a 10s deadline. A plugin that fails to import, raises (`SystemExit`
+    included) or overruns is skipped whole: nothing it registered stays, and `on`/`route` refuse calls once `setup` is
+    over. Two files that map to the same module name (`a-b.py`, `a_b.py`): the second is skipped.
+  * A route runs on its own thread with a 30s deadline (504). At most 8 run at once, hung ones included (503), so they
+    can't use up the server's connections. An answer must be JSON (no NaN), at most 4 MB, with a status that can carry
+    a body.
+  * A plugin that failed can't use its `Api` any more, even from a thread it left running.
+  * A callback or route that raises is logged (a route answers 500), and the rest carries on.
+
+The daemon rereads `extensions/`, `custom.css` and `custom.js` when they change (next page reload, no restart). Each
+script's CSP hash is computed from exactly the block grovyd inserts, so nothing is loosened: only that text runs.
+grovyd skips a file, with a line in the log, when it:
+* is not a regular file;
+* is over 256 KB;
+* is not UTF-8, or contains a NUL;
+* contains what would end its block early: `</style` in CSS; `</script` or `<!--` in a script.
+
+Line endings are made LF, because the browser hashes a script after doing the same.
+
+`custom.js` runs with the page's full access: it can read the conversation and use the API with your login. Plugins
+likewise run with the daemon's rights. That is no new power: whoever can write your config folder can already change
+grovy itself. It does make the config folder worth watching. A prompt-injected Claude that writes there gets
+persistence: a `custom.js` that approves requests, or an `instructions.md` read by every new session. Claude's own
+permission settings decide whether it may write outside the project. Check what changed there if a session did
+something you didn't expect, and never install a `custom.js` or plugin you don't understand.
 
 ## How it works
 
@@ -260,7 +348,8 @@ settings file only at start), so the daemon routes alias → current name. Old h
 alias can't be taken by another session until the renamed one is removed.
 
 **Status info.** Each session's status line runs `grovy statusline NAME`. It forwards model, effort, fast mode and
-context use to the daemon (shown as a full-width bar just above the message box, below the reply chips, replacing the composer's top line; tap for details; and as "context N%" in the list), then prints your own
+context use to the daemon (shown by the built-in extension `extensions/context-bar.js` as a full-width bar just above the message box, below
+the reply chips, replacing the composer's top line, tap for details; and as "context N%" in the list), then prints your own
 configured status line, so the terminal looks the same. Your status line is looked up in your user settings and the
 session's own project folder, never in the folder Claude happens to be in: a cloned repo's `.claude/settings.json`
 must not get its command run without Claude's trust dialog. Sessions started before this existed report it after
@@ -283,8 +372,8 @@ re-renders keep keyboard focus on the same control (`paint()`, matching rebuilt 
 nothing from Claude is run or parsed as HTML. Invalid JSON or an unknown type shows "Widget not shown: <reason>"
 followed by the raw block. `choices` and `form` only fill your message box (asking first if it already holds a draft);
 you send it like any message. Claude learns the format from grovy's `SessionStart` hook (`additionalContext`, the
-`WIDGET_GUIDE` text in `grovy.py`), on every start, resume, `/clear` and `/compact`. Hooks run the current `grovy.py`,
-so a changed guide applies without a restart. `GROVY_WIDGETS=0` turns the guide off. The terminal shows the raw JSON,
+`WIDGET_GUIDE` text in `grovylib/claude.py`), on every start, resume, `/clear` and `/compact`. Hooks run the code
+as it is on disk, so a changed guide applies without a restart. `GROVY_WIDGETS=0` turns the guide off. The terminal shows the raw JSON,
 so Claude is told to keep the key facts in plain text too.
 
 **Image widget.** `grovy image FILE [--caption T]` checks the file is a real png/jpg/gif/webp (extension and magic

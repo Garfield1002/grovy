@@ -39,15 +39,6 @@ header h1 { font-size:17px; margin:0; flex:1; min-width:0; overflow:hidden; text
 .pill { display:inline-flex; align-items:center; gap:6px; font-size:13px; font-weight:600; padding:3px 10px;
   border-radius:99px; background:var(--card); border:1px solid var(--line); white-space:nowrap; }
 header { flex-wrap:wrap; }
-/* context bar: a full-width line just above the message box (below the reply chips), in place of the composer's top
-   border; its tap area is taller than it looks. The line is positioned against #composer (left/right 0) but keeps its
-   place in the flow (no top), so it spans the whole width whatever the column's max-width */
-#meta { position:static; display:block; width:100%; height:12px; margin:-2px 0 2px; padding:0; border:0; background:none;
-  cursor:pointer; }
-#composer:has(#meta:not(.hidden)) { border-top-color:transparent; }
-#meta i { position:absolute; left:0; right:0; display:block; height:3px; background:var(--line); }
-#meta b { display:block; height:100%; background:var(--ok); transition:width .4s ease; }
-#meta.warn b { background:var(--warn); } #meta.bad b { background:var(--bad); }
 .kv2 { display:flex; justify-content:space-between; gap:12px; padding:11px 2px; border-bottom:1px solid var(--line); }
 .kv2 span:first-child { color:var(--mut); }
 #live { font-size:12px; font-weight:600; color:var(--warn); white-space:nowrap; flex:none; }
@@ -442,7 +433,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   <div id="hint"></div>
   <div id="picker"></div>
   <div id="quick"></div>
-  <button id="meta" class="hidden" aria-label="Context used: tap for details"><i><b></b></i></button>
+  <div id="slot-composer"></div>
   <button id="resume" class="resume hidden">Resume session</button>
   <div id="atts"></div>
   <div class="cr">
@@ -464,6 +455,22 @@ textarea:focus-visible, input:focus-visible { outline:none; }
 <div id="sheet" class="hidden"><div class="panel"><div class="grab"></div><div id="sheetbody"></div></div></div>
 <script>
 "use strict";
+// Map of this script (each part starts with a "// ----" line):
+//   basics       h() builds DOM (never innerHTML), time/text helpers, api()
+//   markdown     Claude's replies, rendered as a safe subset
+//   widgets      ```widget blocks: WIDGETS has one renderer per type
+//   session list the home screen
+//   conversation one session: messages, tool calls, permission cards, the context bar, background work
+//   composer     the message box: send / steer / stop, slash commands, attachments, quoting a selection
+//   sheets       dialogs and menus: ask(), say(), the ⋯ menu, rename, search, new session
+//   pages        the full-screen page viewer and sharing
+//   sidebar      wide screens: sessions and pages beside the conversation
+//   keyboard     shortcuts and focus
+//   routing      #/ and #/s/NAME, errors, live updates (EventSource)
+//   extensions   window.grovy: all that extensions/*.js and ~/.config/grovy/custom.js use (see examples/custom.js)
+//   start-up
+
+// ---------------------------------------------------------------- basics
 const $ = id => document.getElementById(id);
 const main = $("main");
 let view = null, timer = null, cur = null, lastEventId = 0, first = true, turnStart = null, lastTool = "";
@@ -510,61 +517,13 @@ function paint(box, ...kids) {
   const t = had.isConnected ? had : key ? [...box.querySelectorAll("[data-fk]")].find(x => x.getAttribute("data-fk") === key) : null;
   if (t) t.focus({preventScroll: true});
 }
-const ATTACHED = /^Attached: (\/\S.*)$/;   // how a message names a file sent from the phone (see the composer)
-const attName = p => p.split("/").pop().replace(/^\d{8}-\d{6}-[0-9a-f]{4}-/, "");
-const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
-const attUrl = p => { const [s, f] = p.split("/").slice(-2); return `/api/attachments/${encodeURIComponent(s)}/${encodeURIComponent(f)}`; };
-function attNode(path) {   // a picture shows as a thumbnail (tap: full size); anything else, or a gone file, as a chip
-  const chip = () => h("span", {class: "attl", title: path}, "📎 " + attName(path));
-  if (!IMAGE.test(path)) return chip();
-  const a = h("a", {class: "attimg", href: attUrl(path), target: "_blank", rel: "noopener"});
-  a.append(h("img", {src: attUrl(path), alt: attName(path), loading: "lazy", onerror: () => a.replaceWith(chip())}));
-  return a;
-}
-const QUOTE_WHO = /^(Claude|You):$/;   // first line of a quote made by Quote: whose words follow
-const squashText = t => String(t).replace(/\s+/g, " ").trim();
-function jumpTo(quoted, from) {   // scroll to the message a quote came from, if it's loaded
-  const needle = squashText(quoted).slice(0, 60);
-  const hit = needle && [...main.querySelectorAll(".a .md, .u")].reverse()
-    .find(el => !el.contains(from) && !from.contains(el) && squashText(el.innerText || el.textContent).includes(needle));
-  if (!hit) return say("The original isn't loaded: scroll up and tap \"Show earlier\" to load more.");
-  const box = hit.closest(".a, .u");
-  box.scrollIntoView({block: "center", behavior: "smooth"});
-  box.classList.remove("found"); void box.offsetWidth; box.classList.add("found");
-}
-function quoteNode(lines) {
-  const who = lines.length > 1 && lines[0].match(QUOTE_WHO);
-  const body = (who ? lines.slice(1) : lines).join("\n");
-  const el = h("span", {class: "uq" + (who ? " " + who[1].toLowerCase() : "")}, ...(who ? [h("b", {}, who[1])] : []), body);
-  if (who) el.onclick = () => jumpTo(body, el);
-  return el;
-}
-function userText(t) {   // a user message; its "> " lines (from Quote) show as a quote block
-  const out = []; let q = [], txt = [];
-  const flush = () => {
-    if (q.length) out.push(quoteNode(q));
-    if (txt.length) {   // blocks already break the line
-      const t = txt.join("\n").replace(/\n+$/, "");
-      if (t) out.push(out.length ? t.replace(/^\n/, "") : t);
-    }
-    q = []; txt = [];
-  };
-  for (const l of String(t).split("\n")) {
-    const att = l.match(ATTACHED);
-    if (att) { flush(); out.push(attNode(att[1])); }
-    else if (/^>/.test(l)) { if (txt.length) flush(); q.push(l.replace(/^> ?/, "")); }
-    else { if (q.length) flush(); txt.push(l); }
-  }
-  flush();
-  return out;
-}
-
 const reqId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
 async function api(path, body) {
   // Actions carry a request id; the daemon runs each id once and replays its outcome, so a network
   // retry can never start two sessions or send a prompt twice. (crypto.randomUUID needs HTTPS.)
-  const opt = body === undefined ? {} :
-    {method: "POST", headers: {"Content-Type": "application/json", "X-Request-Id": reqId()}, body: JSON.stringify(body)};
+  // X-Grovy: a link or a navigation can't send it, so plugin GET routes answer only the page itself.
+  const opt = body === undefined ? {headers: {"X-Grovy": "1"}} :
+    {method: "POST", headers: {"Content-Type": "application/json", "X-Request-Id": reqId(), "X-Grovy": "1"}, body: JSON.stringify(body)};
   let r;
   try { r = await fetch(path, opt); }
   catch (e) {   // a dropped connection (e.g. one the server had just closed): retry once, same id
@@ -1018,6 +977,56 @@ async function removeSessions(names) {
   if (view && names.includes(view)) go("#/"); else refresh();
 }
 
+// ---------------------------------------------------------------- messages: attachments, quotes, the user's text
+const ATTACHED = /^Attached: (\/\S.*)$/;   // how a message names a file sent from the phone (see the composer)
+const attName = p => p.split("/").pop().replace(/^\d{8}-\d{6}-[0-9a-f]{4}-/, "");
+const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
+const attUrl = p => { const [s, f] = p.split("/").slice(-2); return `/api/attachments/${encodeURIComponent(s)}/${encodeURIComponent(f)}`; };
+function attNode(path) {   // a picture shows as a thumbnail (tap: full size); anything else, or a gone file, as a chip
+  const chip = () => h("span", {class: "attl", title: path}, "📎 " + attName(path));
+  if (!IMAGE.test(path)) return chip();
+  const a = h("a", {class: "attimg", href: attUrl(path), target: "_blank", rel: "noopener"});
+  a.append(h("img", {src: attUrl(path), alt: attName(path), loading: "lazy", onerror: () => a.replaceWith(chip())}));
+  return a;
+}
+const QUOTE_WHO = /^(Claude|You):$/;   // first line of a quote made by Quote: whose words follow
+const squashText = t => String(t).replace(/\s+/g, " ").trim();
+function jumpTo(quoted, from) {   // scroll to the message a quote came from, if it's loaded
+  const needle = squashText(quoted).slice(0, 60);
+  const hit = needle && [...main.querySelectorAll(".a .md, .u")].reverse()
+    .find(el => !el.contains(from) && !from.contains(el) && squashText(el.innerText || el.textContent).includes(needle));
+  if (!hit) return say("The original isn't loaded: scroll up and tap \"Show earlier\" to load more.");
+  const box = hit.closest(".a, .u");
+  box.scrollIntoView({block: "center", behavior: "smooth"});
+  box.classList.remove("found"); void box.offsetWidth; box.classList.add("found");
+}
+function quoteNode(lines) {
+  const who = lines.length > 1 && lines[0].match(QUOTE_WHO);
+  const body = (who ? lines.slice(1) : lines).join("\n");
+  const el = h("span", {class: "uq" + (who ? " " + who[1].toLowerCase() : "")}, ...(who ? [h("b", {}, who[1])] : []), body);
+  if (who) el.onclick = () => jumpTo(body, el);
+  return el;
+}
+function userText(t) {   // a user message; its "> " lines (from Quote) show as a quote block
+  const out = []; let q = [], txt = [];
+  const flush = () => {
+    if (q.length) out.push(quoteNode(q));
+    if (txt.length) {   // blocks already break the line
+      const t = txt.join("\n").replace(/\n+$/, "");
+      if (t) out.push(out.length ? t.replace(/^\n/, "") : t);
+    }
+    q = []; txt = [];
+  };
+  for (const l of String(t).split("\n")) {
+    const att = l.match(ATTACHED);
+    if (att) { flush(); out.push(attNode(att[1])); }
+    else if (/^>/.test(l)) { if (txt.length) flush(); q.push(l.replace(/^> ?/, "")); }
+    else { if (q.length) flush(); txt.push(l); }
+  }
+  flush();
+  return out;
+}
+
 // ---------------------------------------------------------------- conversation
 const SOURCE = {startup: "session started", resume: "session resumed", clear: "conversation cleared",
                 compact: "context compacted", fork: "session forked"};
@@ -1304,7 +1313,6 @@ async function renderDetail(name) {
   const stalled = s.state === "working" && serverNow() - s.last_event > STALL;
   const bgn = s.state !== "exited" ? s.background || 0 : 0;
   $("pdot").className = "dot " + s.state + (stalled ? " stalled" : "");
-  renderMeta(s.meta);
   $("ptext").replaceChildren(LABEL[s.state] || s.state, ...(bgn ? [" · ", runMark(bgn)] : []));
   renderTasks(s, bgn);
 
@@ -1322,7 +1330,7 @@ async function renderDetail(name) {
       prevUserTs = e.ts;
     }
     const latest = lastStop && e.id === lastStop.id;
-    const n = cached("e" + e.id + (latest ? "L" : "") + (e.type === "Page" ? (!pages[e.data.page] ? "x" : pages[e.data.page].share ? "s" : "") : "") + (e.type === "Live" ? "r" + e.data.rev : ""), () => eventNode(e, latest));
+    const n = cached("e" + e.id + (latest ? "L" : "") + (e.type === "Page" ? (!pages[e.data.page] ? "x" : pages[e.data.page].share ? "s" : "") : "") + (e.type === "Live" ? "r" + e.data.rev : ""), () => extend(eventNode(e, latest), e));
     if (n) items.push([e.ts, n]);
   }
   const outgoing = d.prompts.filter(p => p.status !== "submitted" && p.status !== "steered" &&
@@ -1379,6 +1387,7 @@ async function renderDetail(name) {
   else if (lastEventId && maxId > lastEventId) $("tobottom").classList.add("new");   // arrived while you read further up
   first = false; lastEventId = maxId;
   syncToBottom();
+  if (ext.on.update.length) emit("update", structuredClone(s));
 }
 let older = [], noMore = false, firstId = 0;
 async function loadEarlier() {
@@ -1395,28 +1404,6 @@ async function loadEarlier() {
   } catch (e) { if (btn) btn.textContent = "Load earlier (failed, retry)"; }
 }
 function quickSend(text) { fillComposer(text); }   // a stray tap while scrolling must not send anything
-const ctxLevel = c => c > 75 ? "bad" : c > 25 ? "warn" : "";   // green ≤25%, amber ≤75%, red above
-function renderMeta(m) {   // the context line; the rest of the terminal's status info is one tap away
-  const el = $("meta");
-  meta = m || null;
-  if (!m || m.context == null) return el.classList.add("hidden");
-  el.className = ctxLevel(m.context);
-  el.querySelector("b").style.width = m.context + "%";
-  el.setAttribute("aria-label", m.context + "% of the context window used: tap for details");
-}
-let meta = null;
-$("meta").onclick = () => {
-  const m = meta || {};
-  const row = (k, v) => v == null || v === "" ? null : h("div", {class: "kv2"}, h("span", {}, k), h("span", {}, v));
-  const bar = m.context == null ? null : h("div", {style: "margin:4px 0 14px"},
-    h("div", {style: "height:6px;border-radius:3px;background:var(--line);overflow:hidden"},
-      h("div", {style: `height:100%;width:${m.context}%;background:var(--${ctxLevel(m.context) === "bad" ? "bad" : ctxLevel(m.context) === "warn" ? "warn" : "ok"})`})));
-  openSheet(h("h2", {}, "Session status"), bar,
-    row("Context used", m.context == null ? null : m.context + "%"), row("Model", m.model), row("Effort", m.effort),
-    row("Fast mode", m.fast ? "on" : "off"),
-    h("div", {class: "note", style: "margin-top:10px;color:var(--mut);font-size:13px"},
-      "Near 100% Claude compacts the conversation to free up context."));
-};
 // Background work: Claude Code's own list (see Store._task_snapshot). Collapsed to one line; tap for each task.
 let tasksOpen = false, taskClocks = [];
 function renderTasks(s, n) {
@@ -1476,9 +1463,11 @@ async function sendNow() {
   if (atts.some(a => a.busy)) return say("Wait for the attachments to finish uploading.");
   const files = atts.filter(a => a.path), typed = input.value;
   if ((!typed.trim() && !files.length) || !view) return;
-  if (files.length && /^[/!]/.test(typed.trimStart()))
+  let text = [typed.trim(), files.map(a => "Attached: " + a.path).join("\n")].filter(Boolean).join("\n\n");
+  text = sendHooks(text);   // extensions may change the text, or keep it from being sent
+  if (text == null) return;
+  if (files.length && /^[/!]/.test(text.trimStart()))   // checked on what is sent, after the extensions
     return say("Attachments can't go with a / or ! command: send them in a normal message.");
-  const text = [typed.trim(), files.map(a => "Attached: " + a.path).join("\n")].filter(Boolean).join("\n\n");
   const force = !!(cur && cur.can_force) &&
     await ask("Claude's state is uncertain. Type this into the terminal anyway?\nOr queue it until Claude reports idle.",
               "Type anyway", {cancel: "Queue it"});
@@ -1491,6 +1480,12 @@ async function sendNow() {
   } catch (e) { say("Not sent: " + e.message); }
   $("send").disabled = false;
   syncSend();
+  refresh();
+}
+
+async function interrupt() {
+  if (!view || !await ask("Interrupt Claude? (Same as pressing Esc in the terminal.)", "Interrupt", {danger: true})) return;
+  try { await api(`/api/sessions/${encodeURIComponent(view)}/interrupt`, {}); } catch (e) { say(e.message); }
   refresh();
 }
 
@@ -1543,6 +1538,27 @@ $("file").onchange = () => {
   }
 };
 
+// ---------------------------------------------------------------- slash commands
+// The picker offers only commands that are safe from the phone (skills, custom commands, /clear, /compact).
+let commands = [];
+async function loadCommands() {
+  try { commands = (await api(`/api/sessions/${encodeURIComponent(view)}/commands`)).commands; } catch (e) { commands = []; }
+}
+function picker() {
+  const v = input.value, pk = $("picker");
+  if (!/^\/[\w:.-]*$/.test(v)) return pk.replaceChildren();
+  const q = v.slice(1).toLowerCase();
+  const hits = commands.filter(c => c.name.toLowerCase().startsWith(q))
+    .concat(commands.filter(c => !c.name.toLowerCase().startsWith(q) && c.name.toLowerCase().includes(q))).slice(0, 8);
+  pk.replaceChildren(...(hits.length ? hits.map((c, i) => h("button", {class: "cmd" + (i ? "" : " on"), onclick: () => {
+      input.value = "/" + c.name + " "; pk.replaceChildren(); input.focus(); autosize();
+      try { localStorage.setItem(draftKey(), input.value); } catch (e) {}
+    }}, h("b", {}, "/" + c.name), c.description ? h("span", {}, c.description) : null))
+    : [h("div", {class: "sys"}, "No phone-safe command matches. Menus like /model need the terminal.")]));
+}
+input.addEventListener("input", picker);
+input.addEventListener("input", () => $("quick").classList.toggle("hold", !!input.value.trim()));
+
 // ---------------------------------------------------------------- quoting a selection
 // Selecting conversation text shows a Quote button docked above the message box. Copy is left to the system's
 // own menu: a page can't hide or extend it on phones, so a floating bar of ours only stacked menus on menus.
@@ -1586,35 +1602,11 @@ quoteBtn.onclick = () => {
   quoteInto(t, selWho);
 };
 
-async function interrupt() {
-  if (!view || !await ask("Interrupt Claude? (Same as pressing Esc in the terminal.)", "Interrupt", {danger: true})) return;
-  try { await api(`/api/sessions/${encodeURIComponent(view)}/interrupt`, {}); } catch (e) { say(e.message); }
-  refresh();
-}
-
-// slash-command picker: only commands that are safe from the phone (skills, custom commands, /clear, /compact)
-let commands = [];
-async function loadCommands() {
-  try { commands = (await api(`/api/sessions/${encodeURIComponent(view)}/commands`)).commands; } catch (e) { commands = []; }
-}
-function picker() {
-  const v = input.value, pk = $("picker");
-  if (!/^\/[\w:.-]*$/.test(v)) return pk.replaceChildren();
-  const q = v.slice(1).toLowerCase();
-  const hits = commands.filter(c => c.name.toLowerCase().startsWith(q))
-    .concat(commands.filter(c => !c.name.toLowerCase().startsWith(q) && c.name.toLowerCase().includes(q))).slice(0, 8);
-  pk.replaceChildren(...(hits.length ? hits.map((c, i) => h("button", {class: "cmd" + (i ? "" : " on"), onclick: () => {
-      input.value = "/" + c.name + " "; pk.replaceChildren(); input.focus(); autosize();
-      try { localStorage.setItem(draftKey(), input.value); } catch (e) {}
-    }}, h("b", {}, "/" + c.name), c.description ? h("span", {}, c.description) : null))
-    : [h("div", {class: "sys"}, "No phone-safe command matches. Menus like /model need the terminal.")]));
-}
-input.addEventListener("input", picker);
-input.addEventListener("input", () => $("quick").classList.toggle("hold", !!input.value.trim()));
-
 // ---------------------------------------------------------------- sheets
 // In-page dialogs: Chrome's native confirm()/alert() freeze the page, which then lags catching up afterwards.
 let sheetDone = null;   // resolves the open ask() with false when the sheet is dismissed any other way
+let sheetReturn = null;   // what had focus before a sheet opened; it gets it back when the sheet closes
+const sheetOpen = () => !$("sheet").classList.contains("hidden");
 function openSheet(...kids) { if (sheetDone) { const d = sheetDone; sheetDone = null; d(false); }
   if (!sheetOpen()) sheetReturn = document.activeElement;
   $("sheetbody").replaceChildren(...kids.flat().filter(k => k != null && k !== false)); $("sheet").classList.remove("hidden");
@@ -1669,6 +1661,7 @@ function sessionMenu() {
           ask(`Stop session "${name}"? Claude exits; the conversation can be resumed later.`, "Stop", {danger: true})
             .then(yes => yes && act("kill"));
         }}, "Stop session"),
+    extMenu("session"),
     loginItem(),
     h("div", {class: "sub", style: "padding:10px 4px;color:var(--mut);font-size:13px"}, s.cwd || ""));
 }
@@ -1686,7 +1679,7 @@ async function loginSheet() {   // the link `grovy url` prints, for the address 
     h("p", {style: "color:var(--warn);font-size:13px"}, tok ? "Anyone with this link controls your Claude sessions: "
       + "only send it to yourself." : "This server has no token: anyone who can reach it can use grovy."));
 }
-$("menu").onclick = () => view ? sessionMenu() : openSheet(h("h2", {}, "grovy"), loginItem());
+$("menu").onclick = () => view ? sessionMenu() : openSheet(h("h2", {}, "grovy"), extMenu("home"), loginItem());
 async function updateSession(name) {   // the server decides whether it's safe; forcing is a separate, explicit tap
   if (!await ask(`Update "${name}"? Claude restarts with the latest grovy and resumes the same conversation.`, "Update")) return;
   const post = force => api(`/api/sessions/${encodeURIComponent(name)}/restart`, {force});
@@ -1843,162 +1836,6 @@ async function newSession(state = {}) {
 }
 $("add").onclick = newSession;
 
-// ---------------------------------------------------------------- sidebar (wide screens)
-// Beside a conversation, the other sessions stay in view. Only fetched while it's shown.
-const wide = matchMedia("(min-width: 1000px)"), finePointer = matchMedia("(pointer: fine)");
-let sideTimer = null, sideList = [], sidePages = {};   // every session's pages, for the sidebar
-function refreshSide(now = false) {
-  if (!view || !wide.matches || (sideTimer && !now)) return;
-  clearTimeout(sideTimer);
-  sideTimer = setTimeout(() => { sideTimer = null; renderSide().catch(() => {}); }, now ? 0 : 400);
-}
-async function renderSide() {
-  const [{sessions, now: srv}, {pages: all}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
-  if (typeof srv === "number") skew = srv - Date.now() / 1000;
-  sideList = sessions; sidePages = Object.fromEntries(all.map(p => [p.id, p]));
-  if (!view) return;
-  syncViewer();
-  const pageRows = all.length ? [h("div", {class: "ssec"}, "Pages"), ...all.map(p => h("button", {class: "srow", "data-fk": "pg:" + p.id,
-      onclick: () => openPage(p.id)}, lockIcon(!!p.share),
-    h("div", {class: "body"}, h("div", {class: "top"}, h("span", {class: "name"}, p.title || "page"), h("span", {class: "when"}, ago(p.updated))),
-      h("div", {class: "sub"}, `${p.session} · v${p.version}`))))] : [];
-  paint($("slist"), ...pageRows.length ? [h("div", {class: "ssec"}, "Sessions")] : [], ...sessions.map(s => h("button", {class: "srow" + (s.name === view ? " cur" : ""), "data-fk": "s:" + s.name,
-      "data-name": s.name, ...(s.name === view ? {"aria-current": "page"} : {}), onclick: () => go("#/s/" + s.name)},
-    h("span", {class: dotClass(s)}),
-    h("div", {class: "body"},
-      h("div", {class: "top"}, h("span", {class: "name"}, s.name),
-        s.background && s.state !== "exited" ? runMark(s.background, true) : null,
-        s.pending_permissions ? h("span", {class: "badge"}, String(s.pending_permissions)) : null,
-        h("span", {class: "when"}, ago(s.last_event))),
-      h("div", {class: "sub"}, s.state === "idle" || s.state === "working" ? s.activity || LABEL[s.state] : LABEL[s.state] || s.state)))),
-    ...pageRows);
-}
-function markSide() {   // highlight the open session at once, before the next fetch
-  for (const r of $("slist").children) {
-    const on = r.getAttribute("data-name") === view;
-    r.classList.toggle("cur", on);
-    if (on) { r.setAttribute("aria-current", "page"); r.scrollIntoView({block: "nearest"}); } else r.removeAttribute("aria-current");
-  }
-}
-wide.addEventListener("change", () => refreshSide(true));
-$("sadd").onclick = newSession;
-async function stepSession(d) {   // Alt+↑/↓: the previous/next session, in the list's order
-  let list = sideList;
-  if (!wide.matches || !list.length) { try { list = sideList = (await api("/api/sessions")).sessions; } catch (e) { return; } }
-  if (!list.length) return;
-  const i = list.findIndex(s => s.name === view);
-  const j = i < 0 ? (d > 0 ? 0 : list.length - 1) : (i + d + list.length) % list.length;
-  if (list[j].name !== view) go("#/s/" + list[j].name);
-}
-
-// ---------------------------------------------------------------- keyboard
-const sheetOpen = () => !$("sheet").classList.contains("hidden");
-const FOCUSABLE = 'button:not([disabled]), [href], input:not([type=hidden]), textarea, select, [tabindex]:not([tabindex="-1"])';
-const visibleIn = box => [...box.querySelectorAll(FOCUSABLE)].filter(e => e.offsetParent !== null || e === document.activeElement);
-input.addEventListener("keydown", e => {
-  if (e.isComposing) return;
-  const hits = [...$("picker").querySelectorAll(".cmd")];
-  if (hits.length && ["ArrowDown", "ArrowUp", "Tab", "Enter"].includes(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    let i = hits.findIndex(b => b.classList.contains("on"));
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      e.preventDefault();
-      i = i < 0 ? (e.key === "ArrowDown" ? 0 : hits.length - 1) : (i + (e.key === "ArrowDown" ? 1 : -1) + hits.length) % hits.length;
-      hits.forEach((b, k) => b.classList.toggle("on", k === i));
-      hits[i].scrollIntoView({block: "nearest"});
-      return;
-    }
-    if (e.shiftKey) return;
-    e.preventDefault(); (hits[i < 0 ? 0 : i]).click();   // Tab or Enter completes the highlighted command (the first by default)
-    return;
-  }
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (!$("send").disabled) sendNow(); return; }
-  if (e.key === "Escape" && !sheetOpen() && !viewing) {
-    if ($("picker").childElementCount) $("picker").replaceChildren(); else input.blur();
-  }
-});
-document.addEventListener("keydown", e => {
-  if (e.defaultPrevented || e.isComposing) return;
-  const a = document.activeElement;
-  if (e.key === "Escape") {
-    if (sheetOpen()) { e.preventDefault(); return closeSheet(); }
-    if (viewing) { e.preventDefault(); return $("vclose").click(); }
-    return;
-  }
-  if (sheetOpen() && e.key === "Tab") {   // keep Tab inside the open sheet
-    const f = visibleIn($("sheet"));
-    if (!f.length) return;
-    const i = f.indexOf(a);
-    if (i < 0 || (e.shiftKey && i === 0) || (!e.shiftKey && i === f.length - 1)) {
-      e.preventDefault(); f[e.shiftKey ? f.length - 1 : 0].focus();
-    }
-    return;
-  }
-  if ((e.key === "Enter" || e.key === " ") && a && a.getAttribute("role") === "button" && a.tagName !== "BUTTON") {
-    e.preventDefault(); a.click(); return;
-  }
-  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && !sheetOpen() && !viewing) {
-    e.preventDefault(); stepSession(e.key === "ArrowDown" ? 1 : -1); return;
-  }
-  // typing with nothing focused goes to the message box
-  if (view && !sheetOpen() && !viewing && (!a || a === document.body) && e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.metaKey && !e.altKey
-      && !$("composer").classList.contains("hidden") && !document.querySelector("#composer .cr").classList.contains("hidden")) {
-    input.focus();   // the key itself then lands in the box
-  }
-});
-let sheetReturn = null;   // what had focus before a sheet opened; it gets it back when the sheet closes
-function focusSheet() {
-  if (!$("sheet").contains(document.activeElement)) {
-    const f = visibleIn($("sheetbody"));
-    if (f.length) f[0].focus({preventScroll: true});
-  }
-}
-
-// ---------------------------------------------------------------- routing + live updates
-function go(hash) { location.hash = hash; }
-function route() {
-  const m = location.hash.match(/^#\/s\/([A-Za-z0-9_-]+)$/);
-  view = m ? m[1] : null; lastEventId = 0; cur = null; first = true; lastTool = ""; cache.clear();
-  older = []; noMore = false; closeSheet(); $("quick").replaceChildren(); canStop = false;
-  $("add").classList.toggle("hidden", !!view); $("menu").classList.remove("hidden");
-  $("title").classList.toggle("tap", !!view); $("resume").classList.add("hidden"); $("meta").classList.add("hidden");
-  $("back").classList.toggle("hidden", !view);
-  $("pill").classList.toggle("hidden", !view);
-  $("composer").classList.toggle("hidden", !view);
-  $("typing").classList.add("hidden");
-  $("title").textContent = view || "Sessions";
-  main.replaceChildren();
-  $("picker").replaceChildren(); commands = [];
-  if (view) { try { input.value = localStorage.getItem(draftKey()) || ""; } catch (e) { input.value = ""; } autosize(); loadAtts(); loadCommands(); }
-  document.body.classList.toggle("home", !view);
-  if (view) { $("title").setAttribute("tabindex", "0"); $("title").setAttribute("role", "button"); }
-  else { $("title").removeAttribute("tabindex"); $("title").removeAttribute("role"); }
-  if (view) { markSide(); refreshSide(true); }
-  if (view && finePointer.matches) input.focus({preventScroll: true});   // a desktop: ready to type (a phone would pop its keyboard)
-  refresh();
-}
-function refresh() {
-  clearTimeout(timer);
-  timer = setTimeout(() => (view ? renderDetail(view) : renderList())
-    .then(() => $("err").classList.add("hidden"))
-    .catch(e => { $("live").classList.remove("on"); showError(e); }), 80);
-}
-let lastReport = 0;
-function showError(e) {   // never fail silently: show it, and tell the daemon log (rate-limited)
-  if (e && e.message && /fetch|network|load failed/i.test(e.message)) return;   // just offline
-  $("err").textContent = "Display error: " + (e && e.message || e) + " (tap to retry)";
-  $("err").classList.remove("hidden");
-  if (Date.now() - lastReport > 30000) {
-    lastReport = Date.now();
-    api("/api/client-error", {message: String(e && e.message || e).slice(0, 500),
-      stack: String(e && e.stack || "").slice(0, 2000), view: view || ""}).catch(() => {});
-  }
-}
-addEventListener("error", ev => showError(ev.error || ev.message));
-$("err").onclick = () => { $("err").classList.add("hidden"); refresh(); };
-addEventListener("unhandledrejection", ev => showError(ev.reason));
-$("back").onclick = () => go("#/");
-addEventListener("hashchange", route);
-
 // ---------------------------------------------------------------- pages
 function pageCard(id, title, sub, deletable = false) {
   const gone = !pages[id];
@@ -2078,6 +1915,301 @@ async function pagesSheet(session) {
     list.length ? null : h("div", {class: "sys"}, "No pages."));
 }
 
+// ---------------------------------------------------------------- sidebar (wide screens)
+// Beside a conversation, the other sessions stay in view. Only fetched while it's shown.
+const wide = matchMedia("(min-width: 1000px)"), finePointer = matchMedia("(pointer: fine)");
+let sideTimer = null, sideList = [], sidePages = {};   // every session's pages, for the sidebar
+function refreshSide(now = false) {
+  if (!view || !wide.matches || (sideTimer && !now)) return;
+  clearTimeout(sideTimer);
+  sideTimer = setTimeout(() => { sideTimer = null; renderSide().catch(() => {}); }, now ? 0 : 400);
+}
+async function renderSide() {
+  const [{sessions, now: srv}, {pages: all}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
+  if (typeof srv === "number") skew = srv - Date.now() / 1000;
+  sideList = sessions; sidePages = Object.fromEntries(all.map(p => [p.id, p]));
+  if (!view) return;
+  syncViewer();
+  const pageRows = all.length ? [h("div", {class: "ssec"}, "Pages"), ...all.map(p => h("button", {class: "srow", "data-fk": "pg:" + p.id,
+      onclick: () => openPage(p.id)}, lockIcon(!!p.share),
+    h("div", {class: "body"}, h("div", {class: "top"}, h("span", {class: "name"}, p.title || "page"), h("span", {class: "when"}, ago(p.updated))),
+      h("div", {class: "sub"}, `${p.session} · v${p.version}`))))] : [];
+  paint($("slist"), ...pageRows.length ? [h("div", {class: "ssec"}, "Sessions")] : [], ...sessions.map(s => h("button", {class: "srow" + (s.name === view ? " cur" : ""), "data-fk": "s:" + s.name,
+      "data-name": s.name, ...(s.name === view ? {"aria-current": "page"} : {}), onclick: () => go("#/s/" + s.name)},
+    h("span", {class: dotClass(s)}),
+    h("div", {class: "body"},
+      h("div", {class: "top"}, h("span", {class: "name"}, s.name),
+        s.background && s.state !== "exited" ? runMark(s.background, true) : null,
+        s.pending_permissions ? h("span", {class: "badge"}, String(s.pending_permissions)) : null,
+        h("span", {class: "when"}, ago(s.last_event))),
+      h("div", {class: "sub"}, s.state === "idle" || s.state === "working" ? s.activity || LABEL[s.state] : LABEL[s.state] || s.state)))),
+    ...pageRows);
+}
+function markSide() {   // highlight the open session at once, before the next fetch
+  for (const r of $("slist").children) {
+    const on = r.getAttribute("data-name") === view;
+    r.classList.toggle("cur", on);
+    if (on) { r.setAttribute("aria-current", "page"); r.scrollIntoView({block: "nearest"}); } else r.removeAttribute("aria-current");
+  }
+}
+wide.addEventListener("change", () => refreshSide(true));
+$("sadd").onclick = newSession;
+async function stepSession(d) {   // Alt+↑/↓: the previous/next session, in the list's order
+  let list = sideList;
+  if (!wide.matches || !list.length) { try { list = sideList = (await api("/api/sessions")).sessions; } catch (e) { return; } }
+  if (!list.length) return;
+  const i = list.findIndex(s => s.name === view);
+  const j = i < 0 ? (d > 0 ? 0 : list.length - 1) : (i + d + list.length) % list.length;
+  if (list[j].name !== view) go("#/s/" + list[j].name);
+}
+
+// ---------------------------------------------------------------- keyboard
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([type=hidden]), textarea, select, [tabindex]:not([tabindex="-1"])';
+const visibleIn = box => [...box.querySelectorAll(FOCUSABLE)].filter(e => e.offsetParent !== null || e === document.activeElement);
+input.addEventListener("keydown", e => {
+  if (e.isComposing) return;
+  const hits = [...$("picker").querySelectorAll(".cmd")];
+  if (hits.length && ["ArrowDown", "ArrowUp", "Tab", "Enter"].includes(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    let i = hits.findIndex(b => b.classList.contains("on"));
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      i = i < 0 ? (e.key === "ArrowDown" ? 0 : hits.length - 1) : (i + (e.key === "ArrowDown" ? 1 : -1) + hits.length) % hits.length;
+      hits.forEach((b, k) => b.classList.toggle("on", k === i));
+      hits[i].scrollIntoView({block: "nearest"});
+      return;
+    }
+    if (e.shiftKey) return;
+    e.preventDefault(); (hits[i < 0 ? 0 : i]).click();   // Tab or Enter completes the highlighted command (the first by default)
+    return;
+  }
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (!$("send").disabled) sendNow(); return; }
+  if (e.key === "Escape" && !sheetOpen() && !viewing) {
+    if ($("picker").childElementCount) $("picker").replaceChildren(); else input.blur();
+  }
+});
+document.addEventListener("keydown", e => {
+  if (e.defaultPrevented || e.isComposing) return;
+  const combos = combosOf(e), own = ext.keys.find(k => combos.includes(k.combo));   // extensions' shortcuts
+  if (own) { e.preventDefault(); if (!e.repeat) runExt("key " + own.combo, own.run, e); return; }
+  const a = document.activeElement;
+  if (e.key === "Escape") {
+    if (sheetOpen()) { e.preventDefault(); return closeSheet(); }
+    if (viewing) { e.preventDefault(); return $("vclose").click(); }
+    return;
+  }
+  if (sheetOpen() && e.key === "Tab") {   // keep Tab inside the open sheet
+    const f = visibleIn($("sheet"));
+    if (!f.length) return;
+    const i = f.indexOf(a);
+    if (i < 0 || (e.shiftKey && i === 0) || (!e.shiftKey && i === f.length - 1)) {
+      e.preventDefault(); f[e.shiftKey ? f.length - 1 : 0].focus();
+    }
+    return;
+  }
+  if ((e.key === "Enter" || e.key === " ") && a && a.getAttribute("role") === "button" && a.tagName !== "BUTTON") {
+    e.preventDefault(); a.click(); return;
+  }
+  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && !sheetOpen() && !viewing) {
+    e.preventDefault(); stepSession(e.key === "ArrowDown" ? 1 : -1); return;
+  }
+  // typing with nothing focused goes to the message box
+  if (view && !sheetOpen() && !viewing && (!a || a === document.body) && e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.metaKey && !e.altKey
+      && !$("composer").classList.contains("hidden") && !document.querySelector("#composer .cr").classList.contains("hidden")) {
+    input.focus();   // the key itself then lands in the box
+  }
+});
+function focusSheet() {
+  if (!$("sheet").contains(document.activeElement)) {
+    const f = visibleIn($("sheetbody"));
+    if (f.length) f[0].focus({preventScroll: true});
+  }
+}
+
+// ---------------------------------------------------------------- routing + live updates
+function go(hash) { location.hash = hash; }
+function route() {
+  const m = location.hash.match(/^#\/s\/([A-Za-z0-9_-]+)$/);
+  view = m ? m[1] : null; lastEventId = 0; cur = null; first = true; lastTool = ""; cache.clear();
+  older = []; noMore = false; closeSheet(); $("quick").replaceChildren(); canStop = false;
+  $("add").classList.toggle("hidden", !!view); $("menu").classList.remove("hidden");
+  $("title").classList.toggle("tap", !!view); $("resume").classList.add("hidden");
+  $("back").classList.toggle("hidden", !view);
+  $("pill").classList.toggle("hidden", !view);
+  $("composer").classList.toggle("hidden", !view);
+  $("typing").classList.add("hidden");
+  $("title").textContent = view || "Sessions";
+  main.replaceChildren();
+  $("picker").replaceChildren(); commands = [];
+  if (view) { try { input.value = localStorage.getItem(draftKey()) || ""; } catch (e) { input.value = ""; } autosize(); loadAtts(); loadCommands(); }
+  document.body.classList.toggle("home", !view);
+  if (view) { $("title").setAttribute("tabindex", "0"); $("title").setAttribute("role", "button"); }
+  else { $("title").removeAttribute("tabindex"); $("title").removeAttribute("role"); }
+  if (view) { markSide(); refreshSide(true); }
+  if (view && finePointer.matches) input.focus({preventScroll: true});   // a desktop: ready to type (a phone would pop its keyboard)
+  refresh();
+  emit("route", view);
+}
+function refresh() {
+  clearTimeout(timer);
+  timer = setTimeout(() => (view ? renderDetail(view) : renderList())
+    .then(() => { if (!errSticky) $("err").classList.add("hidden"); })
+    .catch(e => { $("live").classList.remove("on"); showError(e); }), 80);
+}
+let lastReport = 0;
+let errSticky = false;   // an extension's error stays until tapped (a successful refresh hides the others)
+function showError(e, sticky = false) {   // never fail silently: show it, and tell the daemon log (rate-limited)
+  if (e && e.message && /fetch|network|load failed/i.test(e.message)) return;   // just offline
+  errSticky = errSticky || sticky;
+  $("err").textContent = "Display error: " + (e && e.message || e) + " (tap to retry)";
+  $("err").classList.remove("hidden");
+  if (Date.now() - lastReport > 30000) {
+    lastReport = Date.now();
+    api("/api/client-error", {message: String(e && e.message || e).slice(0, 500),
+      stack: String(e && e.stack || "").slice(0, 2000), view: view || ""}).catch(() => {});
+  }
+}
+addEventListener("error", ev => showError(ev.error || ev.message, !booted));   // before start-up: an extension's
+$("err").onclick = () => { errSticky = false; $("err").classList.add("hidden"); refresh(); };
+addEventListener("unhandledrejection", ev => showError(ev.reason));
+$("back").onclick = () => go("#/");
+addEventListener("hashchange", route);
+
+// ---------------------------------------------------------------- extensions
+// Run right after this script, before start-up: grovy's built-in extensions (extensions/*.js), then the user's
+// ~/.config/grovy/custom.js (grovyd adds each as an inline <script>, allowed by its CSP hash like this one). They use
+// only window.grovy below: everything else here may change. Named extensions (grovy.extension) start at start-up, so
+// custom.js can turn a built-in one off first. A failing extension shows an error (kept until tapped) and never stops
+// grovy itself. Guide and examples: examples/custom.js.
+const ext = {menu: [], keys: [], on: {render: [], update: [], route: [], send: []}, named: [], off: new Set()};
+let booted = false;
+const FAILED = Symbol("failed");
+function runExt(what, fn, ...args) {
+  try { return fn(...args); }
+  catch (e) { showError(new Error(`extension (${what}): ${e && e.message || e}`), true); return FAILED; }
+}
+function emit(name, ...args) { for (const fn of ext.on[name]) runExt(name, fn, ...args); }
+function extend(node, e) {   // a message was drawn: extensions may add to it (it is drawn once, then kept)
+  if (node && ext.on.render.length) { const copy = structuredClone(e); for (const fn of ext.on.render) runExt("render", fn, node, copy); }
+  return node;
+}
+function extMenu(where) {
+  return ext.menu.filter(m => m.where === where || m.where === "both").map(m =>
+    h("button", {class: "item", onclick: () => { closeSheet(); runExt("menu " + m.label, m.run, view); }}, m.label,
+      m.sub ? h("div", {class: "sub"}, m.sub) : null));
+}
+function sendHooks(text) {   // the text to send, or null when an extension stopped it (or failed: better not to send)
+  for (const fn of ext.on.send) {
+    const r = runExt("send", fn, text);
+    if (r && typeof r.then === "function") {
+      showError(new Error("extension (send): a send hook must answer at once (not async), so nothing was sent"), true);
+      return null;
+    }
+    if (r === FAILED || r === false || (typeof r === "string" && !r.trim())) return null;
+    if (typeof r === "string") text = r;
+  }
+  return text;
+}
+// Shortcuts. A combo is "Ctrl+K", "Alt+Shift+N", "Ctrl+?", "F2"... (Cmd counts as Ctrl). It needs Ctrl or Alt (except
+// F-keys), so it can't steal plain typing, and can't be one of grovy's own (or the browser's reload / developer tools).
+// With Alt alone (Option on a Mac, which turns Alt+R into "®"), letters and digits also match their physical key. Not
+// with AltGr (Ctrl+Alt on Windows): that types characters such as "@", and those must stay typeable.
+const KEY_NAMES = {enter: "Enter", esc: "Escape", escape: "Escape", tab: "Tab", space: "Space", backspace: "Backspace",
+  delete: "Delete", del: "Delete", up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight",
+  arrowup: "ArrowUp", arrowdown: "ArrowDown", arrowleft: "ArrowLeft", arrowright: "ArrowRight", home: "Home", end: "End",
+  pageup: "PageUp", pagedown: "PageDown", insert: "Insert"};
+for (let i = 1; i <= 12; i++) KEY_NAMES["f" + i] = "F" + i;
+const RESERVED = new Set(["Ctrl+Enter", "Alt+ArrowUp", "Alt+ArrowDown", "F5", "F12"]);
+const ALNUM = /^[A-Za-z0-9]$/;
+function comboKey(mods, key) { return [...["Ctrl", "Alt", "Shift"].filter(m => mods.includes(m)), key].join("+"); }
+const keyName = k => k === " " ? "Space" : /^[a-z]$/.test(k) ? k.toUpperCase() : k;   // ASCII only: "ß" stays "ß"
+const shiftCounts = key => key.length > 1 || ALNUM.test(key);   // a symbol already says Shift ("?" is Shift+/)
+function combosOf(e) {
+  if (typeof e.key !== "string" || !e.key || ["Control", "Alt", "Shift", "Meta", "AltGraph"].includes(e.key)) return [];
+  const mods = shift => [e.ctrlKey || e.metaKey ? "Ctrl" : "", e.altKey ? "Alt" : "", shift ? "Shift" : ""];
+  const out = [];
+  const key = keyName(e.key);
+  if (key !== "Dead") out.push(comboKey(mods(e.shiftKey && shiftCounts(key)), key));
+  const phys = /^(?:Key|Digit)([A-Z0-9])$/.exec(e.code || "");
+  const altGr = e.ctrlKey || (e.getModifierState && e.getModifierState("AltGraph"));
+  if (phys && e.altKey && !e.metaKey && !altGr && !ALNUM.test(e.key)) out.push(comboKey(mods(e.shiftKey), phys[1]));
+  return out;
+}
+function normCombo(c) {
+  const s = String(c).trim(), plus = s.endsWith("++");
+  const parts = (plus ? s.slice(0, -2) : s).split("+").map(p => p.trim());
+  const raw = plus ? "+" : parts.pop();
+  const bad = why => new Error(`grovy.key: "${c}" ${why} (e.g. "Ctrl+K", "Alt+Shift+N", "Ctrl+/", "F2")`);
+  if (parts.some(p => !p)) throw bad("isn't a key combination");
+  const mods = parts.map(p => ({ctrl: "Ctrl", control: "Ctrl", cmd: "Ctrl", command: "Ctrl", meta: "Ctrl", alt: "Alt",
+                                option: "Alt", opt: "Alt", shift: "Shift"})[p.toLowerCase()]);
+  if (!raw || mods.includes(undefined)) throw bad("isn't a key combination");
+  const key = raw.length === 1 ? keyName(raw) : KEY_NAMES[raw.toLowerCase()];
+  if (!key) throw bad(`has an unknown key "${raw}"`);
+  if (mods.includes("Shift") && !shiftCounts(key))   // Shift changes the symbol itself
+    throw bad(`uses Shift with a symbol: name the symbol it types instead (e.g. "Ctrl+?" rather than "Ctrl+Shift+/")`);
+  const combo = comboKey(mods, key);
+  if (!/^F\d+$/.test(key) && !mods.includes("Ctrl") && !mods.includes("Alt")) throw bad("needs Ctrl or Alt");
+  if (RESERVED.has(combo)) throw bad("is kept for grovy or the browser");
+  return combo;
+}
+const fnArg = (fn, what) => { if (typeof fn !== "function") throw new Error(what + " needs a function"); return fn; };
+const SLOTS = {composer: "slot-composer"};
+window.grovy = Object.freeze({
+  version: 1,
+  // building blocks: h(tag, attrs, ...children) makes DOM safely; md(text) renders markdown; api(path, body) calls grovyd
+  h, md, api,
+  ask: (msg, ok, opts) => ask(msg, ok, opts),   // -> Promise<boolean>
+  say: msg => say(msg),
+  sheet: (...kids) => openSheet(...kids), closeSheet,
+  css(text) {   // styles of your own: after grovy's, before the user's custom.css (which must keep the last word)
+    const el = h("style", {}, String(text)), user = $("custom-css");
+    if (user) user.before(el); else document.head.append(el);
+  },
+  slot(name) {   // a place in the page to put your own things: "composer" (above the message box, below the replies)
+    if (!SLOTS[name]) throw new Error(`grovy.slot: unknown slot "${name}" (${Object.keys(SLOTS).join(", ")})`);
+    return $(SLOTS[name]);
+  },
+  get session() { return view; },                                    // the open session's name, or null on the home screen
+  get state() { return cur ? structuredClone(cur) : null; },          // a copy of its state, as grovyd sent it
+  draft(text) {                                                      // put text in the message box for the user to send
+    if (!view) throw new Error("grovy.draft: no session is open");
+    fillComposer(String(text));
+  },
+  async send(text) {   // send a message now: the send hooks apply, as for the Send button; false if one stopped it
+    if (!view) throw new Error("grovy.send: no session is open");
+    const t = sendHooks(String(text));
+    if (t == null) return false;
+    await api(`/api/sessions/${encodeURIComponent(view)}/prompts`, {text: t, force: false});
+    refresh();
+    return true;
+  },
+  widget(type, render) {   // a ```widget type Claude can use: render(spec, live) returns a node (or an array of them)
+    if (!/^[a-z][a-z0-9-]{0,30}$/.test(type)) throw new Error(`grovy.widget: bad type name "${type}"`);
+    fnArg(render, "grovy.widget");
+    WIDGETS[type] = (spec, live) => render(spec, live);
+    if (booted) { cache.clear(); refresh(); }   // registered later on: redraw the messages that use it
+  },
+  menu(label, run, {where = "session", sub = ""} = {}) {   // a ⋯ menu item; where: "session", "home" or "both"
+    if (!["session", "home", "both"].includes(where)) throw new Error(`grovy.menu: where must be "session", "home" or "both"`);
+    ext.menu.push({label: String(label), run: fnArg(run, "grovy.menu"), where, sub: String(sub)});
+  },
+  key(combo, run) {   // a keyboard shortcut (see combosOf above)
+    ext.keys.push({combo: normCombo(combo), run: fnArg(run, "grovy.key")});
+  },
+  on(name, fn) {   // render(node, event) · update(state) · route(session) · send(text) -> text | false
+    if (!ext.on[name]) throw new Error(`grovy.on: unknown event "${name}" (${Object.keys(ext.on).join(", ")})`);
+    ext.on[name].push(fnArg(fn, "grovy.on"));
+  },
+  extension(name, setup) {   // a named extension: setup(grovy) runs at start-up unless grovy.disable(name) was called
+    if (booted) throw new Error("grovy.extension: only before start-up (from extensions/ or custom.js)");
+    ext.named.push({name: String(name), setup: fnArg(setup, "grovy.extension")});
+  },
+  disable(name) { ext.off.add(String(name)); },   // e.g. grovy.disable("context-bar"), from custom.js
+  get extensions() { return ext.named.map(x => ({name: x.name, on: !ext.off.has(x.name)})); },
+});
+
+// ---------------------------------------------------------------- start-up
+// Runs once the page is parsed, so after the extensions: what they add is there from the first paint.
 let es = null;
 function connect() {
   if (es) es.close();
@@ -2096,7 +2228,10 @@ setInterval(() => { if (document.visibilityState === "visible") { refresh(); ref
 setInterval(() => {
   if (document.visibilityState === "visible" && view && cur && /working|starting|needs_input/.test(cur.state)) refresh();
 }, 5000);
-route(); connect();
+document.addEventListener("DOMContentLoaded", () => {
+  for (const x of ext.named) if (!ext.off.has(x.name)) runExt("extension " + x.name, x.setup, window.grovy);
+  booted = true; route(); connect();
+});
 </script>
 </body>
 </html>

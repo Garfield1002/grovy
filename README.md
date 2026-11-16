@@ -76,8 +76,16 @@ grovy doctor                   # check that everything is in order
 - **Looks:** edit `~/.config/grovy/custom.css`. It starts with the colour names you can change (your message
   bubbles, accents, backgrounds, in light and dark mode). Reload the page to see it. It's outside the grovy
   folder, so updates never overwrite it.
-- **Anything else:** grovy is three small files, with no dependencies. The easiest way to change it is to ask
-  Claude, in a grovy session opened on the grovy folder: it knows how to change grovy safely while you use it.
+- **Your own buttons, shortcuts and widgets:** `~/.config/grovy/custom.js` can add items to the ⋯ menu, keyboard
+  shortcuts, buttons under Claude's replies, or new kinds of widgets, and switch off or replace built-in parts such as
+  the context bar. It starts with examples to uncomment (if you
+  installed grovy before it existed, copy `examples/custom.js` there). Reload the page to see it. To tell Claude something in every session (for example how to use your new widget), write it in
+  `~/.config/grovy/instructions.md`.
+- **Behind the scenes:** a Python file in `~/.config/grovy/plugins/` can react to what your sessions do (log it, send
+  it somewhere, answer in your place) and give your `custom.js` its own data. See `examples/plugin.py`.
+- **Anything else:** grovy is plain Python and one HTML file, with no dependencies and nothing to build. The easiest way
+  to change it is to ask Claude, in a grovy session opened on the grovy folder: it knows how to change grovy safely
+  while you use it.
 
 ## Safety
 
