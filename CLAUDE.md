@@ -104,3 +104,5 @@ Put scratch files in your scratchpad, not the repo.
 - Subagent reports and task notifications are injected as prompts, so they fire `UserPromptSubmit` too. The UI
   must not show them as the user's messages.
 - `claude --resume <id>` on a conversation that was never saved exits immediately with an error.
+- A `--settings` file's `autoMode` block (`environment`/`allow`, prose, `"$defaults"` keeps the built-ins) reaches the
+  auto-mode classifier: check with `claude --settings FILE auto-mode config`.

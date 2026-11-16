@@ -189,7 +189,11 @@ emits no hook, so grovy records the interrupt itself and sets the state to `unkn
   once it has ended; ended sessions also get a *Remove* button in the list). An exited session shows **Resume
   session**. Tapping the title switches between sessions. *Load earlier* pages back through the event log. Yes / No /
   Go ahead chips appear when Claude's last reply ends with a question; they fill the message box.
-* **Update session** (⋯ menu) restarts Claude with the latest grovy and resumes the same conversation. Hook changes
+* **Update session** (⋯ menu, shown only when the session is out of date) restarts Claude with the latest grovy and
+  resumes the same conversation. A session is out of date when what it was started with differs from what a start
+  now would give: `start_session` records a fingerprint of the `--settings` content plus `SESSION_ENV_VERSION` (bumped
+  when the session environment changes) in the registry, and the reconcile loop compares it (`outdated`). Sessions
+  started before the fingerprint existed count as out of date. Hook changes
   apply right away, but the per-session settings file (status line, hook list) is only read when Claude starts.
   It runs only when nothing would be cut off (idle, no background task, no open request, no message being sent).
   Otherwise it says what is going on and offers **Update anyway**, which cuts those off. That consent covers that
@@ -243,6 +247,16 @@ for your code. Sessions started earlier get the path spelled out in the guide un
 * **Limits.** 64 KB of JSON per widget, at most 30 new cards per session per minute (updates are unlimited), so a
   runaway loop can't push the conversation out of the history. The page validates and renders the widget, as for
   ` ```widget ` blocks; an invalid one shows "Widget not shown".
+
+**Auto mode.** Its classifier can't know grovy is local: in auto mode, a "make me a local page" request had
+`grovy page publish` blocked as *Unsanctioned Communication* (reproduced 2 of 2 times without the fix, 0 of 2 with
+it). The per-session settings therefore carry an `autoMode` block (`auto_mode_hints()`): an `environment` entry
+describing grovy as your own tool that only talks to your daemon over a private socket, and an `allow` entry saying
+that showing work to you through grovy (page, note, progress, show, tail, the Python functions) is answering you. It
+covers the grovy invocation only; anything else on the same command line is judged on its own. Both lists start with
+`"$defaults"`, and grovy never sets `soft_deny`/`hard_deny`, so every built-in rule stays. Check the effective
+config with `claude --settings $STATE/hooks/NAME.json auto-mode config`. The guide also tells Claude to run
+`page publish` as a command of its own.
 
 **Pages.** For anything bigger than a widget (a report, a dashboard, an interactive explorer), Claude writes an HTML
 file and runs `grovy page publish FILE --title "..."` (`grovy page ls`, `grovy page rm NAME`). The session comes from

@@ -959,6 +959,11 @@ class Store:
     # ------------------------------------------------------------ reconciliation
     def reconcile(self):
         changed = set()
+        try:   # outside the lock: reads the user's settings files
+            expected = {n: grovy.session_fingerprint(n) for n in grovy.registry()}
+        except (OSError, ValueError) as e:
+            print(f"grovyd: can't tell whether sessions are up to date: {e}", file=sys.stderr)
+            expected = {}
         with self.lock:
             # Snapshot under the state lock: a snapshot taken outside it could be applied after a
             # newer hook event and mark a just-started session "exited".
@@ -974,6 +979,11 @@ class Store:
                 if name in reg:
                     s["cwd"] = s.get("cwd") or reg[name].get("cwd")
                     s["claude_session_id"] = s.get("claude_session_id") or reg[name].get("claude_session_id")
+                    if name in expected:
+                        outdated = name in live and reg[name].get("config") != expected[name]
+                        if s.get("outdated") != outdated:
+                            s["outdated"] = outdated
+                            changed.add(name)
                 if name not in live and s["state"] != "exited":
                     self._expire_perms(name, "tmux session gone")
                     self._set(name, "exited", "tmux session gone")

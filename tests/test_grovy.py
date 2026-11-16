@@ -140,6 +140,12 @@ class TestHookAdapter(unittest.TestCase):
         self.assertEqual(self.run_hook(json.dumps(ev("Stop")))[1], "")
         with mock.patch.dict(os.environ, {"GROVY_WIDGETS": "0"}):
             self.assertEqual(self.run_hook(json.dumps(ev("SessionStart", source="startup")))[1], "")
+    def test_auto_mode_hints_in_session_settings(self):
+        with open(grovy.hook_settings("am")) as f:
+            am = json.load(f)["autoMode"]
+        self.assertEqual((am["environment"][0], am["allow"][0]), ("$defaults", "$defaults"))   # built-ins kept
+        self.assertIn(grovy.GROVY_BIN, am["environment"][1])
+        self.assertEqual(set(am), {"environment", "allow"})   # never soft_deny/hard_deny: those would replace rules
 
     def test_daemon_down_permission_falls_back(self):
         rc, out = self.run_hook(json.dumps(ev("PermissionRequest", tool_name="Bash")), exc=OSError("nope"))
@@ -954,6 +960,25 @@ class TestStatusLine(StoreCase):
             self.assertIsNone(grovy.user_statusline())
 
 
+class TestOutdated(StoreCase):
+    def test_update_offered_only_when_the_settings_changed(self):
+        fp = grovy.session_fingerprint("a")
+        reg = {"a": {"cwd": "/a", "config": fp}, "b": {"cwd": "/b", "config": "old"}}
+        with mock.patch.object(grovy, "registry", lambda: reg):
+            self.store.reconcile()
+            self.assertEqual((self.store.summary("a")["outdated"], self.store.summary("b")["outdated"]), (False, True))
+            del reg["a"]["config"]   # started before grovy recorded it
+            self.store.reconcile()
+            self.assertTrue(self.store.summary("a")["outdated"])
+            reg["a"]["config"] = fp
+            with mock.patch.object(grovy, "SESSION_ENV_VERSION", 99):   # e.g. a new variable in the environment
+                self.store.reconcile()
+            self.assertTrue(self.store.summary("a")["outdated"])
+            del self.live["b"]       # ended: Resume, not Update
+            self.store.reconcile()
+            self.assertFalse(self.store.summary("b")["outdated"])
+
+
 class TestRestart(StoreCase):
     def test_restart_only_when_nothing_is_cut_off(self):
         calls = []
@@ -1726,6 +1751,7 @@ class TestTmuxIntegration(unittest.TestCase):
 
     def test_session_can_import_grovy(self):
         grovy.start_session("py1", self.proj)
+        self.assertEqual(grovy.registry()["py1"]["config"], grovy.session_fingerprint("py1"))
         out = grovy.tmux("show-environment", "-t", "=grovy-py1", "PYTHONPATH", check=False).stdout
         self.assertIn(grovy.HERE, out.strip().split("=", 1)[1].split(os.pathsep))
         grovy.kill_session("py1")

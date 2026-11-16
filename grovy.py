@@ -221,9 +221,35 @@ def grovy_cmd():
     return [sys.executable, os.path.join(HERE, "grovy.py")]
 
 
-def hook_settings(name, file_name=None):
-    """Settings file passed to claude via --settings; registers `grovy hook NAME` for our events.
-    file_name lets a rename rewrite the file a running Claude already points at."""
+SESSION_ENV_VERSION = 1   # bump when start_session's environment changes (1: PYTHONPATH), so sessions show Update
+
+
+def auto_mode_hints():
+    """Auto mode's classifier can't know that grovy is local and blocked `grovy page publish` as "unsanctioned
+    communication". These entries describe it (prose; the classifier reads them) and say that showing work to the
+    user through grovy is fine. They cover grovy's own invocation only. "$defaults" keeps every built-in rule."""
+    bin_ = GROVY_BIN
+    return {
+        "environment": ["$defaults",
+                        f"**Org-specific CLIs**: grovy (`{bin_}`, also run as `python3 {HERE}/grovy.py`, and "
+                        "`import grovy` in Python scripts) is the user's own tool that mirrors this Claude Code "
+                        "session to the user's own phone. Its `page`, `note`, `progress`, `show` and `tail` "
+                        "subcommands, and the Python functions grovy.note/progress/track/log/show, deliver only to "
+                        "the user's grovy daemon on this machine over a private Unix socket, and the daemon shows the "
+                        "content to the user alone. Nothing leaves the machine unless the user, on the phone, chooses "
+                        "to share a page."],
+        "allow": ["$defaults",
+                  "grovy Display: showing work to the user through grovy (`grovy page publish|ls|rm`, `grovy note`, "
+                  "`grovy progress`, `grovy show`, piping output into `grovy tail`, or the grovy Python functions) "
+                  "is answering the user, not communication with others: not Unsanctioned Communication, External "
+                  "System Writes, Unrequested Artifact Publish or Data Exfiltration. It covers only the grovy "
+                  "invocation itself; judge any other command on the same line, including what is piped into "
+                  "`grovy tail`, on its own."],
+    }
+
+
+def session_settings(name):
+    """What a session started now gets via --settings: hooks, status line, auto-mode hints."""
     cmd = " ".join(_shquote(a) for a in grovy_cmd() + ["hook", name])
 
     def entry(timeout):
@@ -233,14 +259,28 @@ def hook_settings(name, file_name=None):
     # The hook gives up on the daemon at PERMISSION_TIMEOUT+10, well before Claude kills it.
     hooks["PermissionRequest"] = [{"matcher": "*", **entry(PERMISSION_TIMEOUT + 30)[0]}]
     hooks["PostToolUse"] = [{"matcher": "*", **entry(10)[0]}]
-    path = os.path.join(state_dir(), "hooks", f"{file_name or name}.json")
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     # The status line feeds the phone (model, effort, context) and then shows the user's own status line.
     status = {"type": "command", "command": " ".join(_shquote(a) for a in grovy_cmd() + ["statusline", name])}
     own = user_statusline()
     if own and isinstance(own.get("padding"), int):
         status["padding"] = own["padding"]
-    atomic_write_json(path, {"hooks": hooks, "statusLine": status})
+    return {"hooks": hooks, "statusLine": status, "autoMode": auto_mode_hints()}
+
+
+def session_fingerprint(name):
+    """Identifies what a session started now would run with. Claude reads its settings only at start, so a
+    session whose recorded fingerprint differs is out of date (offer ⋯ → Update session)."""
+    import hashlib
+    blob = json.dumps({"settings": session_settings(name), "env": SESSION_ENV_VERSION}, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def hook_settings(name, file_name=None):
+    """Settings file passed to claude via --settings; registers `grovy hook NAME` for our events.
+    file_name lets a rename rewrite the file a running Claude already points at."""
+    path = os.path.join(state_dir(), "hooks", f"{file_name or name}.json")
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    atomic_write_json(path, session_settings(name))
     return path
 
 
@@ -337,6 +377,7 @@ def start_session(name, cwd, extra_args=()):
         args = [a for a in args if a != "--fork-session"]
         reg[name] = {"name": name, "cwd": cwd, "created": prev.get("created", time.time()),
                      "started": time.time(), "claude_session_id": prev.get("claude_session_id"),
+                     "config": session_fingerprint(name),
                      "args": args if args or "args" not in prev else prev["args"]}
     notify_daemon({"type": "refresh"})
     return pane
@@ -722,10 +763,11 @@ text too. Use a widget only when it clearly beats text, usually at most one per 
 - form: {"type":"form","title":"..","submit":"..","fields":[{"name":"k","label":"..","kind":"text|textarea|number|select|toggle","options":[".."],"default":".."}]}
 - diagram: {"type":"diagram","direction":"down|right","nodes":[{"id":"a","label":"..","tone":"ok|warn|bad"}],"edges":[{"from":"a","to":"b","label":".."}]}
 choices/form only prefill the user's message box; they review and send it. Limits: ~12 bars, 8 pie slices, 30 nodes.
-Only when the user asks for a page, or the result is too big for widgets, make one: a self-contained HTML file \
+Only when the user asks for a page (they may say "local page": that means this), or the result is too big for \
+widgets, make one: a self-contained HTML file \
 (phone-first, light/dark; inline JS/CSS, pinned libraries from cdnjs/jsdelivr/unpkg, Google Fonts, data: images; \
 no fetch, storage or cookies, so embed the data; `grovy.send(text)` prefills the message box), then run \
-`GROVY page publish FILE --title T` (same file name updates it; `page ls`, `page rm NAME`). Mention it in your reply.
+`GROVY page publish FILE --title T` as a command of its own (same file name updates it; `page ls`, `page rm NAME`). Mention it in your reply.
 Commands you run that take more than ~30s (training, builds, long test runs, batch jobs) can show live cards on the \
 phone as they go. Python: `import grovy` (on PYTHONPATH; does nothing outside grovy): `for x in grovy.track(xs, "T")`; \
 `p = grovy.progress("T", total=N)` then `p.set(n, note="..")` or `p.advance()`; `grovy.note("markdown")`; \

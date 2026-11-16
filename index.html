@@ -1288,7 +1288,7 @@ function sessionMenu() {
     Object.keys(pages).length ? h("button", {class: "item", onclick: () => pagesSheet(name)}, "Pages",
       h("div", {class: "sub"}, Object.keys(pages).length + " published by Claude")) : null,
     h("button", {class: "item", onclick: () => renameSheet(name)}, "Rename"),
-    s.state !== "exited" ? h("button", {class: "item", onclick: () => updateSession(name)}, "Update session",
+    s.state !== "exited" && s.outdated ? h("button", {class: "item", onclick: () => updateSession(name)}, "Update session",
       h("div", {class: "sub"}, "Restart Claude with the latest grovy, same conversation")) : null,
     s.state === "exited"
       ? [h("button", {class: "item", onclick: () => act("resume")}, "Resume session"),
