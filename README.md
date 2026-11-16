@@ -44,6 +44,7 @@ in a terminal. grovy listens to Claude's hooks and shows everything on a phone-f
   with a link.
 - **Steering:** a message you send while Claude is working reaches it at its next step, so you can correct course
   without waiting or interrupting.
+- **Quote:** select part of Claude's reply and tap Quote to reply to just that.
 - **Live progress:** when Claude runs something long (a build, training, a batch job), its script can show a progress
   bar, notes or the latest output lines in the chat while it runs. Sessions started before you updated grovy get
   this after ⋯ → Update session.

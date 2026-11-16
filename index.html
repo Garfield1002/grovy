@@ -21,6 +21,13 @@ html, body { margin:0; background:var(--bg); color:var(--fg);
   font:16px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
 body { min-height:100vh; min-height:100dvh; display:flex; flex-direction:column; }
 button { font:inherit; color:inherit; cursor:pointer; }
+/* tap targets aren't text: only what you'd copy or quote is selectable (long-pressing a card mustn't start a selection) */
+body { -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+.u, .a, .err, .perm pre, .diff, .path, .rc, .q .qt, .wg, .link, .hit .s, .kv2 span:last-child, input, textarea, .field {
+  -webkit-user-select:text; user-select:text; -webkit-touch-callout:default; }
+button, .u .st, .wg .lf { -webkit-user-select:none; user-select:none; }
+#quotesel { display:block; width:100%; margin:0 0 8px; min-height:42px; border-radius:12px; border:1px solid var(--busy);
+  background:color-mix(in srgb, var(--busy) 12%, var(--card)); color:var(--busy); font-weight:650; animation:fadein .15s ease-out; }
 .hidden { display:none !important; }
 
 /* header */
@@ -83,6 +90,7 @@ body.home #backdrop { display:block; }
 .u .st.bad { color:var(--bad); } .u .st.warn { color:var(--warn); } .tk { display:inline-flex; margin-right:5px; font-size:14px; font-weight:600; }
 .tk i { font-style:normal; display:inline-block; transform:scaleY(.75); } .tk i+i { margin-left:-.45em; } .tk.rd { color:var(--busy); } .u .tm { margin-right:4px; }
 .u.pending { opacity:.75; }
+.uq { display:block; border-left:3px solid var(--busy); padding:1px 0 1px 9px; margin:2px 0 6px; color:var(--mut); font-size:14.5px; }
 .u button.link { border:0; background:none; color:var(--acc); padding:0 0 0 6px; font-size:12px; }
 .a { margin:6px 0 4px; overflow-wrap:anywhere; }
 .a.collapsed .md { max-height:22em; overflow:hidden; -webkit-mask-image:linear-gradient(#000 70%, transparent); }
@@ -377,6 +385,20 @@ const LABEL = {needs_input: "needs you", idle: "idle", working: "working", start
                exited: "exited", unknown: "unknown", error: "error"};
 const unwrap = t => String(t || "").replace(/<\/?pasted_content[^>]*>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 const STALL = 60;
+function userText(t) {   // a user message; its "> " lines (from Quote) show as a quote block
+  const out = []; let q = [], txt = [];
+  const flush = () => {
+    if (q.length) out.push(h("span", {class: "uq"}, q.join("\n")));
+    if (txt.length) { const t = txt.join("\n"); out.push(out.length ? t.replace(/^\n/, "") : t); }   // the block already breaks the line
+    q = []; txt = [];
+  };
+  for (const l of String(t).split("\n")) {
+    if (/^>/.test(l)) { if (txt.length) flush(); q.push(l.replace(/^> ?/, "")); }
+    else { if (q.length) flush(); txt.push(l); }
+  }
+  flush();
+  return out;
+}
 
 const reqId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
 async function api(path, body) {
@@ -863,7 +885,7 @@ function eventNode(e, isLatestReply) {
     case "UserPromptSubmit": {
       const m = String(d.prompt || "").match(MACHINE);
       if (m) return machineNode(m[1], d.prompt);      // not typed by you: subagent reports, task notices
-      return h("div", {class: "u"}, unwrap(d.prompt), h("span", {class: "st"}, sent(d.sent || e.ts), READ()));
+      return h("div", {class: "u"}, ...userText(unwrap(d.prompt)), h("span", {class: "st"}, sent(d.sent || e.ts), READ()));
     }
     case "Stop": {
       const text = d.last_assistant_message || "";
@@ -882,7 +904,7 @@ function eventNode(e, isLatestReply) {
     case "SessionStart": return sysLine(SOURCE[d.source] || "session started");
     case "SessionEnd": return sysLine("Claude exited", d.reason && d.reason !== "other" ? " (" + d.reason.replace(/_/g, " ") + ")" : "");
     case "Exited": return sysLine("terminal closed");
-    case "Steered": return h("div", {class: "u"}, unwrap(d.prompt), h("span", {class: "st"}, sent(d.sent || e.ts), READ(), "sent while Claude worked"));
+    case "Steered": return h("div", {class: "u"}, ...userText(unwrap(d.prompt)), h("span", {class: "st"}, sent(d.sent || e.ts), READ(), "sent while Claude worked"));
     case "Killed": return h("div", {class: "err"}, "⚠ Killed by the system's out-of-memory killer: memory ran short on this machine, "
       + "probably because of a big job (here or elsewhere). Resume continues the conversation.");
     case "Interrupted": return sysLine("■ interrupted from the phone");
@@ -1076,7 +1098,7 @@ function promptNode(p) {
     : PSTATUS[p.status] || [0, p.status, ""];
   const cancel = p.status === "queued" ? h("button", {class: "link", onclick: async () => {
     try { await api(`/api/prompts/${p.id}/cancel`, {}); } catch (e) { say(e.message); } refresh(); }}, "cancel") : null;
-  return h("div", {class: "u pending"}, p.text,
+  return h("div", {class: "u pending"}, ...userText(p.text),
     h("span", {class: "st " + cls}, sent(p.created), ...(n ? [ticks(n)] : []), label, p.error && p.status !== "unconfirmed" ? ": " + p.error : "", cancel));
 }
 function cached(key, make) {
@@ -1233,6 +1255,38 @@ $("send").onclick = async () => {
   } catch (e) { say("Not sent: " + e.message); }
   $("send").disabled = false;
   refresh();
+};
+
+// ---------------------------------------------------------------- quoting a selection
+// Selecting conversation text shows a Quote button docked above the message box. Copy is left to the system's
+// own menu: a page can't hide or extend it on phones, so a floating bar of ours only stacked menus on menus.
+const quoteBtn = h("button", {id: "quotesel", class: "hidden"}, "❝ Quote selection");
+$("hint").before(quoteBtn);
+let selText = "", selHide = null;
+const QUOTABLE = ".u, .a, .agent, .wg, .err, .perm";
+function selectedText() {
+  const sel = getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount || !view) return "";
+  const inMsg = n => { const el = n && (n.nodeType === 1 ? n : n.parentElement); return el && $("main").contains(el) && el.closest(QUOTABLE); };
+  return inMsg(sel.anchorNode) && inMsg(sel.focusNode) ? sel.toString().trim() : "";
+}
+document.addEventListener("selectionchange", () => {
+  const t = selectedText();
+  clearTimeout(selHide);
+  if (t) { selText = t; quoteBtn.classList.remove("hidden"); }
+  else selHide = setTimeout(() => quoteBtn.classList.add("hidden"), 250);   // let a tap on the button land first
+});
+for (const ev of ["pointerdown", "mousedown"]) quoteBtn.addEventListener(ev, e => e.preventDefault());   // keep the selection
+quoteBtn.onclick = () => {
+  if (!selText) return;
+  const q = selText.split("\n").map(l => l.trim() ? "> " + l : ">").join("\n") + "\n\n";
+  const had = input.value;
+  input.value = had + (had && !had.endsWith("\n\n") ? (had.endsWith("\n") ? "\n" : "\n\n") : "") + q;
+  try { localStorage.setItem(draftKey(), input.value); } catch (e) {}
+  selText = ""; quoteBtn.classList.add("hidden"); getSelection().removeAllRanges();
+  autosize(); picker();
+  input.focus(); input.setSelectionRange(input.value.length, input.value.length);
+  input.classList.remove("flash"); void input.offsetWidth; input.classList.add("flash");
 };
 
 $("stop").onclick = async () => {

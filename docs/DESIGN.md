@@ -158,6 +158,7 @@ Longer prompts take the literal bracketed-paste path, with control characters st
   take over a minute). **Prompts are never retried
   automatically**, and `injected` is persisted *before* typing, so a crash can't cause a double send.
 * Receipts, WhatsApp-style: ✓ `queued` (grovy has it); ✓✓ `injected` with `typed` set (Enter was pressed, so
+* Selection: the page is `user-select:none` except message text, code, tool input and widgets, so long-pressing a card or button doesn't start a selection. Selecting conversation text shows a "Quote selection" button docked above the message box; it appends the text as `> ` lines to the draft, and user bubbles render `>` lines as a quote block. Copy is left to the system's menu. A page can't hide or extend that menu on phones (cancelling `contextmenu` on a touch long-press doesn't stop Chrome on Android showing it, tested), so a floating bar of ours only stacked a second menu next to it.
   Claude Code has it; for `/compact` the UI says "compacting…"); blue ✓✓ on the chat bubble (`UserPromptSubmit`
   or `Steered`: Claude read it). `typed` is only set after a send that wasn't aborted. Bubbles show the time the user sent the message: `UserPromptSubmit` and `Steered` events from a grovy prompt carry `sent` (its `created`), since the event's own `ts` is when Claude read it; prompts typed in the terminal fall back to `ts`.
 * Typing re-checks between chunks and before Enter. If Claude starts something on its own meanwhile (a background
