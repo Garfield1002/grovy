@@ -69,13 +69,18 @@ CCS_BIND=100.101.102.103 ccs serve        # or 0.0.0.0 for every interface
 ccs url                                   # prints http://ADDR:7333/?token=... : open it once on the phone
 ```
 
-**A token is required whenever the daemon listens beyond loopback.** It's generated once into
-`$STATE/token` (mode 0600). `CCS_TOKEN` overrides it. Opening the `ccs url` link sets an HttpOnly, SameSite=Strict
+**A token is always required, loopback included**, because other local users and DNS-rebinding web pages can
+reach 127.0.0.1 too. It's generated once into `$STATE/token` (mode 0600). `CCS_TOKEN` overrides it. Opening the `ccs url` link sets an HttpOnly, SameSite=Strict
 cookie for a year. Without it the page shows "login needed" and the API returns 401. To rotate the token, delete the
 file and restart the daemon. `CCS_AUTH=off` temporarily accepts requests without a token while still setting the
 cookie from the link. That's useful for enrolling a phone whose only way to see the link is the ccs page itself.
 Without TLS the token protects against other peers on the network, not an on-path observer; the VPN provides the
-encryption. Hook ingestion is **never** on the network: it uses a Unix socket with mode 0600 in the state directory.
+encryption. Cookies aren't isolated by port, so another web service on the same host name/IP that your phone visits
+would also receive the cookie. Only browse services there that you trust.
+
+**Host check:** requests are accepted only when the `Host` header is an IP address, `localhost`, or this machine's
+host name. That defeats DNS rebinding, where a malicious page reaches the daemon through its own domain name. To use
+another name, such as a MagicDNS name, add it to `CCS_HOSTS` (comma-separated). Hook ingestion is **never** on the network: it uses a Unix socket with mode 0600 in the state directory.
 
 "Add to Home Screen" on the phone gives it an app-like icon.
 
@@ -84,7 +89,8 @@ encryption. Hook ingestion is **never** on the network: it uses a Unix socket wi
 | var | default | |
 |---|---|---|
 | `CCS_BIND`, `CCS_PORT` | `127.0.0.1`, `7333` | HTTP listener (`ccs serve --bind/--port` too) |
-| `CCS_TOKEN` | `$STATE/token` | web UI token (auto-generated when binding beyond loopback) |
+| `CCS_TOKEN` | `$STATE/token` | web UI token (auto-generated) |
+| `CCS_HOSTS` | unset | extra accepted `Host` names, comma-separated |
 | `CCS_AUTH` | `on` | `off` = don't require the token (enrollment only) |
 | `CCS_STATE_DIR` | `$XDG_STATE_HOME/ccs` → `~/.local/state/ccs` | all state, mode 0700 |
 | `CCS_PERMISSION_TIMEOUT` | `600` | seconds a permission waits for the phone (fixed per session at `ccs new`) |
@@ -158,9 +164,12 @@ The terminal picker stays live in parallel, and whichever is answered first wins
 are **typed** in 64-character `send-keys -l` chunks with 15ms pauses, with `C-j` for newlines and every `;` sent as a
 raw byte (tmux drops a trailing `;` from an argument). Small bursts aren't detected as a paste, so Claude receives the
 text as the user's own words. A real paste gets wrapped as `<pasted_content>`, which Claude treats as quoted material.
-Longer prompts, and prompts starting with `!` or with ` /` (a leading space), take the literal bracketed-paste path:
+Longer prompts take the literal bracketed-paste path, with control characters stripped:
 `tmux load-buffer -` (stdin, no shell) → `paste-buffer -p`. Then `send-keys Enter`. Safety rules:
 
+* Permission cards show the complete tool input: special renderings (commands, diffs) plus every remaining field
+  under "other fields". If the input is too large to show completely (over 512 KB), **Allow is disabled** on the
+  phone and you approve or deny it in the terminal.
 * Prompts are typed only when hook-derived state is `idle`/`error`, no permission is pending, the pane still
   belongs to that session (re-checked just before pasting), and no other web prompt is in flight.
   Otherwise they **queue**, survive daemon restarts (`prompts.json`), and are typed on the next `Stop`.
@@ -169,14 +178,17 @@ Longer prompts, and prompts starting with `!` or with ` /` (a leading space), ta
   automatically**, and `injected` is persisted *before* typing, so a crash can't cause a double send.
 * `unknown` state blocks automatic typing. Send then asks "type anyway?" and only that prompt is forced.
 
-**Slash commands.** A message starting with `/` in the first column is a command, and only phone-safe ones are
+**Slash commands.** Claude Code trims leading whitespace and newlines before it looks for a command (verified: a
+pasted `" /model"` or `"\n/model"` opens the model menu). So any message whose first non-blank character is `/` is
+treated as a command, and only phone-safe ones are
 accepted:
 * skills and custom commands from `PROJECT/.claude/{skills,commands}` and `~/.claude/{skills,commands}`
 * claude.ai-synced skills, as `anthropic-skills:NAME` (not yet verified by typing one)
 * `/clear` and `/compact`
 
 Anything else (`/model`, `/config`, `/resume`, …) opens a terminal menu or prints only to the terminal, so it's
-refused with a pointer to `ccs attach`. Commands are typed followed by a space, which closes Claude Code's fuzzy menu so
+refused with a pointer to `ccs attach`. Skill names that would shadow a built-in or alias (compared case-insensitively)
+are ignored. A message starting with `!` (bash mode) is refused as well. Commands are typed followed by a space, which closes Claude Code's fuzzy menu so
 Enter can't pick a neighbour. Skills confirm through `UserPromptSubmit`; `/clear` and `/compact` emit none and confirm
 through `SessionStart(source=clear|compact)`. Typing `/` in the composer opens a picker of the allowed commands.
 

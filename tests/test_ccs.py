@@ -134,6 +134,12 @@ class TestState(StoreCase):
         self.store.ingest("a", ev("SessionEnd", reason="other"))
         self.assertEqual(st(), "exited")
 
+    def test_injected_agent_prompt_is_not_shown_as_the_user(self):
+        self.store.ingest("a", ev("UserPromptSubmit", prompt='<agent-message from="x">\nreport</agent-message>'))
+        self.assertEqual(self.store.sessions["a"]["activity"], "subagent report")
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="<task-notification>\n<status>done</status>"))
+        self.assertEqual(self.store.sessions["a"]["activity"], "task notification")
+
     def test_terminal_only_dialog(self):
         self.store.ingest("a", ev("Notification", notification_type="permission_prompt", message="x"))
         self.assertEqual(self.store.sessions["a"]["state"], "needs_input")
@@ -357,10 +363,20 @@ class TestCommands(StoreCase):
         self.wait_pasted(1)
         self.assertEqual(self.pasted, [("a", "/hello world", True)])
 
-    def test_literal_slash_text(self):
-        self.assertEqual(self.store.enqueue("a", " /home/x is broken")[0], 200)  # leading space = text
+    def test_leading_whitespace_does_not_bypass_the_allowlist(self):
+        """Regression: Claude Code trims input, so a pasted " /model" or "\n/model" opened the menu."""
+        for t in (" /model", "\n/model", "\t /config x", "/MODEL", "  !rm -rf ~", " /home/x is broken"):
+            self.assertEqual(self.store.enqueue("a", t)[0], 400, t)
+        self.assertEqual(self.store.enqueue("a", "  /hello world")[0], 200)
         self.wait_pasted(1)
-        self.assertEqual(self.pasted[0][2], False)
+        self.assertEqual(self.pasted[0][2], True)
+
+    def test_reserved_names_case_insensitive(self):
+        os.makedirs(os.path.join(self.proj, ".claude", "skills", "Settings"))
+        with open(os.path.join(self.proj, ".claude", "skills", "Settings", "SKILL.md"), "w") as f:
+            f.write("---\nname: Settings\n---\n")
+        ccsd._cmd_cache.clear()
+        self.assertNotIn("Settings", [c["name"] for c in ccsd.commands_for(self.proj)])
 
     def test_clear_confirms_on_session_start(self):
         self.store.enqueue("a", "/clear")
@@ -415,6 +431,147 @@ class TestLifecycle(StoreCase):
         hits = self.store.history("a", q="TABLES")
         self.assertEqual([r["data"]["prompt"] for r in hits][:2], ["prompt 4 about Tables", "prompt 3 about Tables"])
         self.assertTrue(all(r["ccs"] == "a" for r in hits))
+
+
+class TestReviewRegressions(StoreCase):
+    """Findings from the adversarial review (correctness + security)."""
+
+    def test_repeated_event_is_not_a_duplicate(self):
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="continue"))
+        self.store.ingest("a", ev("Stop", last_assistant_message="step 1 done"))
+        with mock.patch.object(ccsd, "now", lambda: time.time() + 5):     # the user types it again later
+            self.store.ingest("a", ev("UserPromptSubmit", prompt="continue"))
+        self.assertEqual(self.store.sessions["a"]["state"], "working")
+        self.store.enqueue("a", "phone prompt")
+        time.sleep(0.05)
+        self.assertEqual(self.pasted, [])
+
+    def test_forgotten_sessions_queued_prompt_never_reaches_namesake(self):
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="busy"))
+        self.store.enqueue("a", "rm the build dir")
+        del self.live["a"]
+        with mock.patch.object(ccs, "registry", lambda: {"b": {"cwd": "/b"}}):   # `ccs forget a`
+            self.store.reconcile()
+        self.assertEqual(self.store.prompts[-1]["status"], "failed")
+        self.live["a"] = "%9"
+        self.store.reconcile()
+        self.store.ingest("a", ev("SessionStart", sid="NEW"))
+        time.sleep(0.05)
+        self.assertEqual(self.pasted, [])
+
+    def test_newest_injected_prompt_gets_the_confirmation(self):
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.prompts.append({"id": "o" * 32, "ccs": "a", "text": "run the tests", "status": "unconfirmed",
+                                   "created": 1, "updated": 1, "error": None})
+        self.store.enqueue("a", "run the tests")
+        self.wait_pasted(1)
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="run the tests"))
+        self.assertEqual([p["status"] for p in self.store.prompts], ["unconfirmed", "submitted"])
+
+    def test_auto_compaction_mid_turn_keeps_working(self):
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="big task"))
+        self.store.enqueue("a", "next")
+        self.store.ingest("a", ev("SessionStart", source="compact"))
+        time.sleep(0.05)
+        self.assertEqual(self.store.sessions["a"]["state"], "working")
+        self.assertEqual(self.pasted, [])
+
+    def test_clear_end_does_not_exit(self):
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.ingest("a", ev("SessionStart", sid="S2", source="clear"))   # arrives first
+        self.store.ingest("a", ev("SessionEnd", reason="clear"))
+        self.assertEqual(self.store.sessions["a"]["state"], "idle")
+
+    def test_interrupt_holds_lock_across_keypress(self):
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="go"))
+        opened = []
+
+        def key(n, k):   # a permission request racing the key press must wait for the lock
+            t = threading.Thread(target=lambda: opened.append(
+                self.store.open_permission("a", ev("PermissionRequest", tool_name="Bash"))))
+            t.start(); t.join(0.2)
+            self.assertEqual(opened, [])
+        self.store.key = key
+        self.assertEqual(self.store.interrupt("a")[0], 200)
+        for _ in range(100):
+            if opened:
+                break
+            time.sleep(0.01)
+        self.assertEqual(self.store.sessions["a"]["state"], "needs_input")   # not overwritten
+
+    def test_reserved_command_names(self):
+        proj = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(proj, ".claude", "skills", "evil"))
+        with open(os.path.join(proj, ".claude", "skills", "evil", "SKILL.md"), "w") as f:
+            f.write("---\nname: model\n---\n")
+        ccsd._cmd_cache.clear()
+        names = [c["name"] for c in ccsd.commands_for(proj)]
+        self.assertNotIn("model", names)
+
+    def test_live_request_shows_full_input(self):
+        big = {"command": "echo " + "x" * 6000, "edits": list(range(60))}
+        p = self.store.open_permission("a", ev("PermissionRequest", tool_name="Bash", tool_input=big))
+        pub = ccsd._public(p)
+        self.assertEqual(pub["tool_input"], big)
+        self.assertFalse(pub["truncated"])
+        self.assertIn("more items not shown", str(p["tool_input"]["edits"][-1]))   # log copy says so
+        huge = self.store.open_permission("a", ev("PermissionRequest", tool_name="Write",
+                                                  tool_input={"content": "y" * (ccsd.MAX_REVIEW + 10)}))
+        self.assertTrue(ccsd._public(huge)["truncated"])
+
+
+class TestSecondPassRegressions(StoreCase):
+    def test_stale_phone_compact_does_not_end_a_turn(self):
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.prompts.append({"id": "c" * 32, "ccs": "a", "text": "/compact", "command": "compact",
+                                   "status": "unconfirmed", "created": 1, "updated": 1, "error": None})
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="big task"))
+        self.store.enqueue("a", "rm -rf build")
+        self.store.ingest("a", ev("SessionStart", source="compact"))     # automatic, mid-turn
+        time.sleep(0.05)
+        self.assertEqual(self.store.sessions["a"]["state"], "working")
+        self.assertEqual(self.pasted, [])
+
+    def test_exit_fails_queued_prompts_before_a_namesake_starts(self):
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="busy"))
+        self.store.enqueue("a", "delete the old migrations")
+        self.store.ingest("a", ev("SessionEnd", reason="prompt_input_exit"))
+        self.store.reconcile()                                            # `ccs new a ~/other` refresh
+        self.store.ingest("a", ev("SessionStart", sid="NEW"))
+        time.sleep(0.05)
+        self.assertEqual(self.pasted, [])
+        self.assertEqual(self.store.prompts[-1]["status"], "failed")
+
+    def test_hung_tmux_skips_reconcile_instead_of_freezing_or_guessing(self):
+        self.store.ingest("a", ev("SessionStart"))
+        def hung():
+            raise RuntimeError("tmux list-panes timed out after 5s")
+        self.store.tmux_live = hung
+        self.store.reconcile()
+        self.assertEqual(self.store.sessions["a"]["state"], "idle")      # not marked exited
+
+    def test_tmux_wrapper_times_out(self):
+        with mock.patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("tmux", 5)):
+            with self.assertRaises(RuntimeError):
+                ccs.tmux("list-panes")
+
+
+class TestEventLogRotation(unittest.TestCase):
+    def test_ids_keep_counting_after_rotation(self):
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "events.jsonl"), "w") as f:
+            f.write(json.dumps({"id": 41, "ts": 1, "ccs": "a", "claude_session_id": None, "type": "Stop", "data": {}}) + "\n")
+        with mock.patch.object(os.path, "getsize", lambda p: 60 * 1024 * 1024), \
+                mock.patch.object(ccs, "registry", lambda: {}):
+            s = ccsd.Store(d, tmux_live=lambda: {}, paste=lambda *a: None)
+        self.assertEqual(s.seq, 41)
+        self.assertTrue(os.path.exists(os.path.join(d, "events.jsonl.1")))
+        self.assertEqual(len(s.events["a"]), 1)
 
 
 class TestInterrupt(StoreCase):
@@ -575,6 +732,41 @@ class TestHttp(unittest.TestCase):
         self.assertEqual(h["X-Frame-Options"], "DENY")
         self.assertNotIn("Access-Control-Allow-Origin", h)
 
+    def test_slowloris_deadline_and_connection_cap(self):
+        class Small(ccsd.HttpServer):
+            MAX_CONNECTIONS = 3
+        with mock.patch.object(ccsd.Http, "HEADER_DEADLINE", 0.5):
+            srv = Small(("127.0.0.1", 0), ccsd.Http)
+            srv.store, srv.token = self.store, ""
+            srv.index, srv.csp = ccsd.load_index()
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            port = srv.server_address[1]
+            try:
+                s = socket.create_connection(("127.0.0.1", port))
+                s.sendall(b"GET / HTTP/1.1\r\n")       # never finishes its headers
+                s.settimeout(3)
+                t0 = time.time()
+                self.assertEqual(s.recv(1), b"")         # cut by the deadline, not left open
+                self.assertLess(time.time() - t0, 2.5)
+                s.close()
+                time.sleep(0.2)
+                held = [socket.create_connection(("127.0.0.1", port)) for _ in range(3)]
+                extra = socket.create_connection(("127.0.0.1", port))
+                extra.settimeout(2)
+                self.assertEqual(extra.recv(1), b"")     # over the cap: refused at once
+                for c in held + [extra]:
+                    c.close()
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_dns_rebinding_host_rejected(self):
+        self.assertEqual(self.req("/api/sessions", headers={"Host": "evil.example:80"})[0], 403)
+        self.assertEqual(self.req("/api/sessions/a/prompts", {"text": "x"},
+                                  {"Host": "evil.example", "Origin": "http://evil.example"})[0], 403)
+        self.assertEqual(self.req("/api/sessions", headers={"Host": "localhost:1"})[0], 200)
+        self.assertEqual(self.req("/api/sessions", headers={"Host": "[::1]:1"})[0], 200)
+
     def test_api(self):
         self.assertEqual(self.req("/api/sessions")[0], 200)
         self.assertEqual(self.req("/api/sessions/a")[0], 200)
@@ -691,6 +883,8 @@ class TestTmuxIntegration(unittest.TestCase):
         self.wait_for("it1", "GOT[" + long + "    end]")
         ccs.paste_prompt("it1", "/literal slash stays literal")  # paste path
         self.wait_for("it1", "GOT[/literal slash stays literal]")
+        ccs.paste_prompt("it1", "!echo a\x1b[201~INJECTED\x1b[200~")      # can't break out of the paste
+        self.wait_for("it1", "GOT[!echo a[201~INJECTED[200~]")
         self.assertNotIn("GOT", ccs.capture("it2"))  # isolation
         reg = ccs.registry()
         self.assertEqual(reg["it1"]["cwd"], os.path.realpath(self.proj))

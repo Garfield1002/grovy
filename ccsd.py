@@ -10,6 +10,8 @@ import base64
 import hashlib
 import hmac
 import http.server
+import ipaddress
+import socket
 import json
 import os
 import re
@@ -30,9 +32,11 @@ HISTORY = 300            # events kept in memory per session
 MAX_FIELD = 20000        # chars kept of any one text field in the event log
 MAX_PROMPT = 100_000     # chars accepted for a browser prompt
 MAX_BODY = 256 * 1024
+MAX_REVIEW = 512 * 1024  # bytes of tool input shown for approval; beyond that, approve in the terminal
 CONFIRM_TIMEOUT = 30     # seconds for UserPromptSubmit to confirm an injected prompt
 RECONCILE_EVERY = 10
 INPUT_STATES = ("idle", "error")  # states in which we will type into the session
+DUP_WINDOW = 1.0  # seconds
 FORCE_STALE = 60  # a "working" session silent this long may be force-typed into, if the user confirms
 PERM_TIMEOUT = ccs.PERMISSION_TIMEOUT
 
@@ -48,6 +52,7 @@ def norm(text):
 
 
 PASTE_TAG = re.compile(r"</?pasted_content[^>]*>")
+MACHINE_PROMPT = re.compile(r"\s*<(agent-message|task-notification)\b")
 
 
 def squash(text):
@@ -62,7 +67,7 @@ def clip(v, n=MAX_FIELD):
     if isinstance(v, dict):
         return {k: clip(x, min(n, 4000)) for k, x in list(v.items())[:50]}
     if isinstance(v, list):
-        return [clip(x, min(n, 4000)) for x in v[:50]]
+        return [clip(x, min(n, 4000)) for x in v[:50]] + ([f"… {len(v) - 50} more items not shown"] if len(v) > 50 else [])
     return v
 
 
@@ -92,7 +97,7 @@ class Store:
         self.events = {}        # name -> deque of event records
         self.perms = {}         # id -> permission dict (includes threading.Event under "_ev")
         self.prompts = []       # list of prompt dicts, persisted
-        self.seen = deque(maxlen=500)  # recent payload digests, for duplicate hook delivery
+        self.seen = {}  # payload digest -> time; only a re-delivery within DUP_WINDOW is a duplicate
         self.subscribers = set()
         self.seq = 0
         self.log_path = os.path.join(sdir, "events.jsonl")
@@ -116,11 +121,6 @@ class Store:
             if p.get("status") == "injected":  # crashed between typing and confirmation: never re-send
                 p["status"], p["error"] = "unconfirmed", "daemon restarted before confirmation"
         try:
-            if os.path.getsize(self.log_path) > 50 * 1024 * 1024:
-                os.replace(self.log_path, self.log_path + ".1")
-        except OSError:
-            pass
-        try:
             with open(self.log_path, "rb") as f:
                 for line in f:
                     try:
@@ -136,6 +136,11 @@ class Store:
                     if f.read(1) != b"\n":
                         f.write(b"\n")
         except FileNotFoundError:
+            pass
+        try:  # rotate only after reading, so ids keep counting up and recent history stays in memory
+            if os.path.getsize(self.log_path) > 50 * 1024 * 1024:
+                os.replace(self.log_path, self.log_path + ".1")
+        except OSError:
             pass
         # Prompts left "unconfirmed" by an older matcher: confirm them if Claude did receive them.
         seen = {squash(r["data"].get("prompt", "")) for q in self.events.values() for r in q
@@ -198,9 +203,15 @@ class Store:
         sid = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
         digest = hashlib.sha256(json.dumps([name, payload], sort_keys=True).encode()).hexdigest()
         with self.lock:
-            if digest in self.seen:
+            t = now()
+            # Hook payloads carry no unique id, so identical content can be a genuine repeat
+            # ("continue" typed twice, the same idle notification). Only a near-instant re-delivery
+            # of the same payload is treated as a duplicate.
+            if t - self.seen.get(digest, -1e9) < DUP_WINDOW:
                 return False
-            self.seen.append(digest)
+            self.seen[digest] = t
+            if len(self.seen) > 1000:
+                self.seen = {k: v for k, v in self.seen.items() if t - v < DUP_WINDOW}
             s = self._session(name)
             if payload.get("cwd"):
                 s["cwd"] = str(payload["cwd"])
@@ -213,13 +224,21 @@ class Store:
                 s["claude_session_id"] = sid
                 s["last_error"] = None
                 src = payload.get("source")
+                ours = False
                 for p in self.prompts:  # /clear and /compact emit no UserPromptSubmit; this is their receipt
-                    if p["ccs"] == name and p["status"] in ("injected", "unconfirmed") and p.get("command") == src:
-                        p["status"], p["updated"] = "submitted", now()
+                    if p["ccs"] == name and p["status"] == "injected" and p.get("command") == src \
+                            and now() - p["updated"] < 600:  # a stale one must not turn auto-compaction into "idle"
+                        p["status"], p["updated"], ours = "submitted", now(), True
                         self._save_prompts()
-                self._set(name, "idle", f"session {payload.get('source', 'start')}")
+                if src == "compact" and not ours and s["state"] == "working":
+                    s["last_event"] = now()  # automatic compaction mid-turn: Claude is still working
+                else:
+                    self._set(name, "idle", f"session {src or 'start'}")
             elif ev == "UserPromptSubmit":
-                self._set(name, "working", "prompt: " + norm(payload.get("prompt", ""))[:120])
+                text = norm(payload.get("prompt", ""))
+                m = MACHINE_PROMPT.match(text)  # injected by Claude Code itself, not typed by the user
+                self._set(name, "working", ("subagent report" if m.group(1) == "agent-message" else "task notification")
+                          if m else "prompt: " + text[:120])
                 self._confirm_prompt(name, payload.get("prompt", ""))
             elif ev == "PostToolUse":
                 if s["state"] != "exited" and not self._pending(name):
@@ -249,8 +268,12 @@ class Store:
                 else:
                     s["last_event"] = now()
             elif ev == "SessionEnd":
-                self._expire_perms(name, "Claude session ended")
-                self._set(name, "exited", f"conversation ended ({payload.get('reason', '')})")
+                if payload.get("reason") in ("clear", "resume"):
+                    s["last_event"] = now()  # same process continues with a new conversation (SessionStart)
+                else:
+                    self._expire_perms(name, "Claude session ended")
+                    self._set(name, "exited", f"conversation ended ({payload.get('reason', '')})")
+                    self._fail_queued(name, "Claude exited before it was sent")
             self._save_state()
         self.publish(name)
         self.try_deliver(name)
@@ -269,13 +292,13 @@ class Store:
                  "created": now(), "expires": now() + PERM_TIMEOUT, "status": "pending",
                  "decision": None, "answers": None, "_input": raw, "_ev": threading.Event()}
             p["kind"] = "question" if p["tool_name"] == QUESTION_TOOL and _questions(raw) else "permission"
-            self.perms[pid] = p
             self._record(name, "PermissionRequest", {"id": pid, "tool_name": p["tool_name"], "kind": p["kind"],
                                                       "tool_input": p["tool_input"]}, p["claude_session_id"])
             what = ("question: " + str(_questions(raw)[0].get("header") or "Claude asks")) if p["kind"] == "question" \
                 else f"permission: {p['tool_name']}"
             self._set(name, "needs_input", what)
             self._save_state()
+            self.perms[pid] = p  # only once logged: a failure above can't leave a phantom pending request
         self.publish(name)
         self._notify(name, "input", what)
         return p
@@ -390,13 +413,16 @@ class Store:
             if name not in self.sessions:
                 return 404, "unknown session"
             command = None
-            m = CMD_RE.match(text)  # only a "/" in the very first column counts as a command
-            if m:
-                command = m.group(1)
-                if command not in {c["name"] for c in commands_for(self.sessions[name].get("cwd"))}:
-                    return 400, (f"/{command} can't be run from the phone (only skills, custom commands, "
-                                 f"/clear and /compact). Use the terminal: ccs attach {name}. "
-                                 "To send it as plain text, start the message with a space.")
+            lead = text.lstrip()  # Claude Code trims leading whitespace/newlines before parsing (verified)
+            if lead.startswith("!"):
+                return 400, "Bash mode (!) isn't available from the phone. Ask Claude to run the command instead."
+            if lead.startswith("/"):
+                m = CMD_RE.match(lead)
+                command = m.group(1) if m else None
+                if not command or command.lower() in RESERVED_COMMANDS - {"clear", "compact"} or \
+                        command not in {c["name"] for c in commands_for(self.sessions[name].get("cwd"))}:
+                    return 400, (f"{lead.split()[0]} can't be run from the phone (only skills, custom commands, "
+                                 f"/clear and /compact). Use the terminal: ccs attach {name}.")
             p = {"id": uuid.uuid4().hex, "ccs": name, "text": text, "status": "queued", "force": force is True,
                  "command": command, "created": now(), "updated": now(), "error": None}
             self.prompts.append(p)
@@ -469,17 +495,16 @@ class Store:
 
     def interrupt(self, name):
         """Press Esc for the user, only while Claude is known to be working (never into a dialog)."""
-        with self.lock:
+        with self.lock:  # held across the key press, so no permission can be registered in between
             s = self.sessions.get(name)
             if not s:
                 return 404, "unknown session"
             if s["state"] != "working" or self._pending(name):
                 return 409, f"nothing to interrupt (Claude is {s['state']})"
-        try:
-            self.key(name, "Escape")
-        except Exception as e:
-            return 409, str(e)
-        with self.lock:
+            try:
+                self.key(name, "Escape")
+            except Exception as e:
+                return 409, str(e)
             # Esc emits no hook. We pressed it, so say so instead of leaving a stale "working".
             self._record(name, "Interrupted", {})
             self._set(name, "unknown", "interrupted from the phone")
@@ -501,10 +526,19 @@ class Store:
         self.publish(p["ccs"])
         return 200, "cancelled"
 
+    def _fail_queued(self, name, why):
+        """Queued prompts belong to the session instance that was running when they were queued."""
+        for p in self.prompts:
+            if p["ccs"] == name and p["status"] == "queued":
+                p["status"], p["error"], p["updated"] = "failed", why, now()
+        self._save_prompts()
+
     def _confirm_prompt(self, name, text):
         t = squash(text)
-        for p in self.prompts:
-            if p["ccs"] == name and p["status"] in ("injected", "unconfirmed") and \
+        order = sorted((p for p in self.prompts if p["ccs"] == name), reverse=True,
+                       key=lambda p: (p["status"] == "injected", p["created"]))  # the one in flight first
+        for p in order:
+            if p["status"] in ("injected", "unconfirmed") and \
                     (squash(p["text"]) == t or squash(p["text"])[:200] == t[:200]):
                 p["status"], p["updated"] = "submitted", now()
                 self._save_prompts()
@@ -552,10 +586,16 @@ class Store:
 
     # ------------------------------------------------------------ reconciliation
     def reconcile(self):
-        live = self.tmux_live()
-        reg = ccs.registry()
         changed = set()
         with self.lock:
+            # Snapshot under the state lock: a snapshot taken outside it could be applied after a
+            # newer hook event and mark a just-started session "exited".
+            try:
+                live = self.tmux_live()
+            except RuntimeError as e:  # tmux unresponsive: skip this round rather than guess "exited"
+                print(f"ccsd: reconcile skipped: {e}", file=sys.stderr)
+                return
+            reg = ccs.registry()
             for name in set(reg) | set(live) | set(self.sessions):
                 s = self._session(name)
                 if name in reg:
@@ -565,6 +605,7 @@ class Store:
                     self._expire_perms(name, "tmux session gone")
                     self._set(name, "exited", "tmux session gone")
                     self._record(name, "Exited", {"note": "tmux session no longer exists"})
+                    self._fail_queued(name, "session exited before it was sent")
                     changed.add(name)
                 elif name in live and s["state"] == "exited":
                     self._set(name, "starting", "process started")
@@ -583,7 +624,8 @@ class Store:
                     s = self.sessions.get(p["ccs"])
                     if s and s["state"] == "working" and s["activity"] == "sending prompt from web":
                         self._set(p["ccs"], "unknown", "prompt not confirmed")
-                elif p["status"] == "queued" and p["ccs"] not in live and p["ccs"] in self.sessions:
+                elif p["status"] == "queued" and p["ccs"] not in live:  # incl. forgotten sessions: never
+                    # deliver into a future session that merely reuses the name
                     p["status"], p["error"], p["updated"] = "failed", "session not running", now()
                     changed.add(p["ccs"])
             if changed:
@@ -636,6 +678,14 @@ BUILTIN_COMMANDS = [{"name": "clear", "description": "Start a new conversation (
                     {"name": "compact", "description": "Summarize the conversation to free up context",
                      "source": "built-in"}]
 _cmd_cache = {}
+# Claude Code built-ins (and common aliases) that open menus or act outside the conversation.
+# Names are compared lowercased. Skills can't shadow these: the phone must never open a built-in menu.
+RESERVED_COMMANDS = set("""add-dir agents allowed-tools approved-tools bashes btw bug chrome clear compact config
+context continue copy cost doctor effort exit export extra-usage fast feedback fork help hooks ide init
+install-github-app install-slack-app keybindings login logout mcp memory migrate-installer model new
+output-style permissions plan plugin plugins pr-comments privacy-settings quit release-notes reload-plugins
+remote-env rename reset resume review rewind sandbox security-review settings skills stats status statusline
+tasks teleport terminal-setup theme todos upgrade usage vim""".split())
 
 
 def _frontmatter(path):
@@ -668,6 +718,8 @@ def commands_for(cwd):
     found = {}
 
     def add(name, desc, source):
+        if name.lower() in RESERVED_COMMANDS:  # a repo's SKILL.md named "model"/"Model" must not unlock /model
+            return
         if name and re.fullmatch(r"[A-Za-z0-9][\w:.-]*", name) and name not in found:
             found[name] = {"name": name, "description": desc[:140], "source": source}
 
@@ -719,7 +771,14 @@ def _count(v):
 
 
 def _public(p):
-    return {k: v for k, v in p.items() if not k.startswith("_")}
+    """A live request as the browser sees it: the full tool input (not the clipped log copy) when it
+    fits, otherwise flagged so the UI refuses to let the user approve what it can't show."""
+    d = {k: v for k, v in p.items() if not k.startswith("_")}
+    raw = p.get("_input")
+    if raw is not None:
+        fits = len(json.dumps(raw, ensure_ascii=False)) <= MAX_REVIEW
+        d["tool_input"], d["truncated"] = (raw if fits else p["tool_input"]), not fits
+    return d
 
 
 # ---------------------------------------------------------------- notifications
@@ -872,7 +931,43 @@ class Http(http.server.BaseHTTPRequestHandler):
                 got = got or v
         return hmac.compare_digest(got.encode(), token.encode())
 
+    timeout = 30  # seconds of client silence before a connection is dropped
+    HEADER_DEADLINE = 15  # whole request line + headers must arrive within this (per-recv timeouts can be trickled)
+
+    def handle_one_request(self):
+        t = self._deadline = threading.Timer(self.HEADER_DEADLINE, self._abort)
+        t.daemon = True
+        t.start()
+        try:
+            super().handle_one_request()
+        finally:
+            t.cancel()
+
+    def parse_request(self):
+        ok = super().parse_request()  # reads the headers; past this point the deadline no longer applies
+        self._deadline.cancel()
+        return ok
+
+    def _abort(self):
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def _host_ok(self):
+        """DNS-rebinding guard: a browser reaching us through an attacker's name sends that name as
+        Host. Accept only IP literals, localhost, this machine's names, and CCS_HOSTS."""
+        host = (self.headers.get("Host") or "").strip().lower()
+        name = host[1:host.find("]")] if host.startswith("[") else host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+        try:
+            ipaddress.ip_address(name)
+            return True
+        except ValueError:
+            return name in self.server.allowed_hosts
+
     def do_GET(self):
+        if not self._host_ok():
+            return self._err(403, "unknown Host header (add the name to CCS_HOSTS)")
         url = urlsplit(self.path)
         path = url.path
         if path == "/" and self.server.token:
@@ -920,6 +1015,8 @@ class Http(http.server.BaseHTTPRequestHandler):
         self._err(404, "not found")
 
     def do_POST(self):
+        if not self._host_ok():
+            return self._err(403, "unknown Host header (add the name to CCS_HOSTS)")
         if not self._authed():
             return self._err(401, "unauthorized")
         # CSRF: JSON content type forces a CORS preflight we never answer; Origin, when sent, must be us.
@@ -1011,6 +1108,28 @@ class HttpServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     stopping = False
     enforce = True
+    allowed_hosts = {"localhost"}
+    MAX_CONNECTIONS = 64
+
+    def server_activate(self):
+        super().server_activate()
+        self._slots = threading.BoundedSemaphore(self.MAX_CONNECTIONS)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):  # connection cap: refuse instead of spawning threads
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
     index_mtime = None
 
     def refresh_index(self):
@@ -1046,10 +1165,13 @@ def serve(bind, port):
 
     httpd = HttpServer((bind, port), Http)
     httpd.store = store
-    # Beyond loopback a token is always required (generated once into the state dir; see `ccs url`).
-    # CCS_AUTH=off keeps it optional, e.g. while enrolling a phone that can't read the link otherwise.
+    # A token is always required, loopback included: other local users and DNS-rebinding pages can
+    # reach 127.0.0.1 too. Generated once into the state dir; see `ccs url`. CCS_AUTH=off keeps it
+    # optional, e.g. while enrolling a phone that can only read the link through this page.
     loopback = bind in ("127.0.0.1", "::1", "localhost")
-    httpd.token = ccs.load_token(create=not loopback)
+    httpd.token = ccs.load_token(create=True)
+    httpd.allowed_hosts = {"localhost", socket.gethostname().lower(), socket.getfqdn().lower()} | {
+        h.strip().lower() for h in os.environ.get("CCS_HOSTS", "").split(",") if h.strip()}
     httpd.enforce = os.environ.get("CCS_AUTH", "on") != "off"
     httpd.refresh_index()
     url = f"http://{bind}:{port}/"

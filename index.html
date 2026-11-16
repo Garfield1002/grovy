@@ -64,6 +64,9 @@ main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px
 .u button.link { border:0; background:none; color:var(--acc); padding:0 0 0 6px; font-size:12px; }
 .a { margin:6px 0 4px; overflow-wrap:anywhere; }
 .a.collapsed .md { max-height:22em; overflow:hidden; -webkit-mask-image:linear-gradient(#000 70%, transparent); }
+.agent { border:1px solid var(--line); border-left:3px solid var(--mut); border-radius:10px; padding:8px 12px; margin:14px 0; }
+.agent .ah { font-size:13px; font-weight:650; color:var(--mut); margin-bottom:4px; }
+.agent.collapsed .a { max-height:7.5em; overflow:hidden; -webkit-mask-image:linear-gradient(#000 40%, transparent); }
 .more { border:0; background:none; color:var(--acc); font-weight:600; padding:6px 0; min-height:36px; }
 .sys { text-align:center; font-size:12.5px; color:var(--mut); margin:10px 0; }
 .sys span { padding:0 8px; }
@@ -395,11 +398,30 @@ async function renderList() {
 // ---------------------------------------------------------------- conversation
 const SOURCE = {startup: "session started", resume: "session resumed", clear: "conversation cleared",
                 compact: "context compacted", fork: "session forked"};
+// Prompts Claude Code injects itself (they still fire UserPromptSubmit) start with a wrapper tag.
+const MACHINE = /^\s*<(agent-message|task-notification)\b/;
+function machineNode(kind, text) {
+  let body = String(text).replace(/^\s*<[^>]+>\s*/, "").replace(/<\/(agent-message|task-notification)>\s*$/, "");
+  const i = body.indexOf("The report follows:");             // drop the harness preamble
+  if (i >= 0) body = body.slice(i + "The report follows:".length);
+  const lines = body.split("\n"), ind = Math.min(...lines.filter(l => l.trim()).map(l => l.match(/^ */)[0].length));
+  body = lines.map(l => l.slice(ind)).join("\n").trim();
+  const el = h("div", {class: "agent collapsed"},
+    h("div", {class: "ah"}, kind === "agent-message" ? "🤖 Subagent report" : "⚙ Task notification"), h("div", {class: "a"}, md(body)));
+  const btn = h("button", {class: "more"}, "Show report");
+  btn.onclick = () => { el.classList.toggle("collapsed"); btn.textContent = el.classList.contains("collapsed") ? "Show report" : "Hide"; };
+  el.append(btn);
+  return el;
+}
 function sysLine(...t) { return h("div", {class: "sys"}, h("span", {}, ...t)); }
 function eventNode(e, isLatestReply) {
   const d = e.data || {};
   switch (e.type) {
-    case "UserPromptSubmit": return h("div", {class: "u"}, unwrap(d.prompt));
+    case "UserPromptSubmit": {
+      const m = String(d.prompt || "").match(MACHINE);
+      if (m) return machineNode(m[1], d.prompt);      // not typed by you: subagent reports, task notices
+      return h("div", {class: "u"}, unwrap(d.prompt));
+    }
     case "Stop": {
       const text = d.last_assistant_message || "";
       if (!text.trim()) return null;
@@ -456,21 +478,46 @@ function diffBlock(oldS, newS) {
   fill(CAP);
   return box;
 }
+// Invisible/bidi characters can make a card *display* something other than what runs
+// ("echo done" vs "rm -rf"), so they're shown as visible markers everywhere on approval cards.
+const INVIS = /[­؜᠎​-‏‪-‮⁠-⁩﻿]/g;
+const vis = s => s.replace(INVIS, c => "⟨U+" + c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0") + "⟩");
+const deepVis = v => typeof v === "string" ? vis(v) : Array.isArray(v) ? v.map(deepVis)
+  : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [vis(k), deepVis(x)])) : v;
+// Every field is either rendered by a special case *as the type it expects* or listed under
+// "other fields", so nothing the user approves is ever hidden.
 function toolBody(p) {
-  const i = p.tool_input || {}, t = p.tool_name;
-  const path = x => typeof x === "string" ? h("div", {class: "path"}, x) : null;
-  if (t === "Bash" && typeof i.command === "string")
-    return [i.description ? h("div", {class: "note"}, i.description) : null, h("pre", {}, i.command)];
-  if (t === "Edit") return [path(i.file_path), i.replace_all ? h("div", {class: "note"}, "replace all occurrences") : null,
-    diffBlock(i.old_string, i.new_string)];
-  if (t === "MultiEdit" && Array.isArray(i.edits)) return [path(i.file_path), ...i.edits.map(x => diffBlock(x.old_string, x.new_string))];
-  if (t === "Write") return [path(i.file_path), h("div", {class: "note"}, "write file:"), capped(String(i.content ?? "").split("\n"), "add")];
-  if (t === "NotebookEdit") return [path(i.notebook_path), capped(String(i.new_source ?? "").split("\n"), "add")];
-  if (t === "WebFetch") return [h("pre", {}, i.url || ""), i.prompt ? h("div", {class: "note"}, i.prompt) : null];
-  if (t === "WebSearch") return [h("pre", {}, i.query || "")];
-  if (typeof i.file_path === "string" || typeof i.path === "string" || typeof i.pattern === "string")
-    return [h("pre", {}, [i.file_path || i.path, i.pattern].filter(Boolean).join("\n"))];
-  return [h("pre", {}, JSON.stringify(i, null, 2))];
+  const i = deepVis(p.tool_input || {});
+  const {parts, shown} = toolMain(p.tool_name, i);
+  const rest = Object.fromEntries(Object.entries(i).filter(([k]) => !shown.has(k)));
+  return Object.keys(rest).length ? [...parts, h("div", {class: "note"}, "other fields:"), h("pre", {}, JSON.stringify(rest, null, 2))] : parts;
+}
+function toolMain(t, i) {
+  const parts = [], shown = new Set();
+  const str = k => typeof i[k] === "string" && (shown.add(k), true);
+  const take = (k, render) => { if (str(k)) parts.push(render(i[k])); };
+  const path = k => take(k, x => h("div", {class: "path"}, x));
+  if (t === "Bash") { take("description", x => h("div", {class: "note"}, x)); take("command", x => h("pre", {}, x)); }
+  else if (t === "Edit") {
+    path("file_path");
+    if (i.replace_all === true || i.replace_all === false) { shown.add("replace_all"); if (i.replace_all) parts.push(h("div", {class: "note"}, "replace all occurrences")); }
+    if (typeof i.old_string === "string" && typeof i.new_string === "string") { shown.add("old_string").add("new_string"); parts.push(diffBlock(i.old_string, i.new_string)); }
+  } else if (t === "MultiEdit" && Array.isArray(i.edits)) {
+    path("file_path"); shown.add("edits");
+    i.edits.forEach((x, n) => {
+      const ok = x && typeof x === "object" && typeof x.old_string === "string" && typeof x.new_string === "string";
+      const extra = ok ? Object.fromEntries(Object.entries(x).filter(([k]) => k !== "old_string" && k !== "new_string")) : x;
+      parts.push(h("div", {class: "note"}, `edit ${n + 1}` + (ok && x.replace_all === true ? ": replace all occurrences" : "")));
+      if (ok) parts.push(diffBlock(x.old_string, x.new_string));
+      if (!ok || Object.keys(extra).some(k => k !== "replace_all" || typeof extra[k] !== "boolean"))
+        parts.push(h("pre", {}, JSON.stringify(extra, null, 2)));
+    });
+  } else if (t === "Write") { path("file_path"); take("content", x => capped(x.split("\n"), "add")); }
+  else if (t === "NotebookEdit") { path("notebook_path"); take("new_source", x => capped(x.split("\n"), "add")); }
+  else if (t === "WebFetch") { take("url", x => h("pre", {}, x)); take("prompt", x => h("div", {class: "note"}, x)); }
+  else if (t === "WebSearch") take("query", x => h("pre", {}, x));
+  else ["file_path", "path", "pattern"].forEach(k => take(k, x => h("pre", {}, x)));   // each one, separately
+  return {parts, shown};
 }
 function questionNode(p) {
   const qs = (p.tool_input || {}).questions || [], answers = {}, others = {};
@@ -494,7 +541,7 @@ function questionNode(p) {
   const sendAll = () => send("answer", Object.fromEntries(qs.map(q => [q.question, value(q)])));
   const blocks = qs.map(q => {
     const opts = (q.options || []).map(o => {
-      const b = h("button", {class: "opt"}, o.label, o.description ? h("span", {class: "d"}, o.description) : null);
+      const b = h("button", {class: "opt"}, vis(String(o.label)), o.description ? h("span", {class: "d"}, vis(String(o.description))) : null);
       b.onclick = () => {
         if (q.multiSelect) {
           const set = answers[q.question] = answers[q.question] || new Set();
@@ -539,6 +586,10 @@ function permNode(p) {
   };
   allow.onclick = () => decide("allow"); deny.onclick = () => decide("deny");
   allow.disabled = deny.disabled = deciding;
+  if (p.truncated && !deciding) {   // never let the user approve input the page can't show in full
+    allow.disabled = true;
+    note.textContent = "Too large to show completely here. Review and allow it in the terminal, or deny.";
+  }
   return h("div", {class: "perm"}, h("div", {class: "h"}, "🔐 Claude wants to use " + p.tool_name), ...toolBody(p), note,
     h("div", {class: "row"}, deny, allow));
 }

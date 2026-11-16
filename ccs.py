@@ -146,9 +146,14 @@ def registry():
 
 # ---------------------------------------------------------------- tmux
 
-def tmux(*args, input=None, check=True):
-    r = subprocess.run(["tmux", *args], input=input, capture_output=True,
-                       text=isinstance(input, str) or input is None)
+def tmux(*args, input=None, check=True, timeout=5):
+    """Run tmux with an argument array (never a shell). Bounded: a hung tmux server raises instead of
+    blocking the daemon, which calls some of these while holding its state lock."""
+    try:
+        r = subprocess.run(["tmux", *args], input=input, capture_output=True, timeout=timeout,
+                           text=isinstance(input, str) or input is None)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"tmux {args[0]} timed out after {timeout}s")
     if check and r.returncode != 0:
         err = r.stderr if isinstance(r.stderr, str) else r.stderr.decode(errors="replace")
         raise RuntimeError(f"tmux {args[0]} failed: {err.strip()}")
@@ -359,7 +364,10 @@ def paste_prompt(name, text, command=False):
                 time.sleep(TYPE_PAUSE)
     else:
         buf = f"ccs-{name}-{os.getpid()}-{time.monotonic_ns()}"
-        tmux("load-buffer", "-b", buf, "-", input=text.encode())
+        # Strip control characters (ESC especially): "\x1b[201~" would end the bracketed paste early
+        # and turn the rest of the text into raw keystrokes.
+        safe = "".join(c for c in text.replace("\r\n", "\n") if c in "\n\t" or c.isprintable())
+        tmux("load-buffer", "-b", buf, "-", input=safe.encode())
         try:
             _own_pane(name)  # re-verify right before pasting
         except RuntimeError:
