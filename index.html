@@ -878,6 +878,7 @@ function eventNode(e, isLatestReply) {
     case "SessionStart": return sysLine(SOURCE[d.source] || "session started");
     case "SessionEnd": return sysLine("Claude exited", d.reason && d.reason !== "other" ? " (" + d.reason.replace(/_/g, " ") + ")" : "");
     case "Exited": return sysLine("terminal closed");
+    case "Steered": return h("div", {class: "u"}, unwrap(d.prompt), h("span", {class: "st"}, "sent while Claude worked"));
     case "Killed": return h("div", {class: "err"}, "⚠ Killed by the system's out-of-memory killer: memory ran short on this machine, "
       + "probably because of a big job (here or elsewhere). Resume continues the conversation.");
     case "Interrupted": return sysLine("■ interrupted from the phone");
@@ -1056,7 +1057,7 @@ function permNode(p) {
   return h("div", {class: "perm"}, h("div", {class: "h"}, "🔐 Claude wants to use " + p.tool_name), ...toolBody(p), note,
     h("div", {class: "row"}, deny, allow));
 }
-const PSTATUS = {queued: ["queued: sends when Claude is idle", ""], injected: ["sending…", ""],
+const PSTATUS = {queued: ["waiting: Claude gets it at its next step, or when it's done", ""], injected: ["sending…", ""],
   unconfirmed: ["not confirmed: check the terminal", "warn"], failed: ["failed", "bad"], cancelled: ["cancelled", ""]};
 function promptNode(p) {
   const [label, cls] = PSTATUS[p.status] || [p.status, ""];
@@ -1104,7 +1105,7 @@ async function renderDetail(name) {
     const n = cached("e" + e.id + (latest ? "L" : "") + (e.type === "Page" ? (!pages[e.data.page] ? "x" : pages[e.data.page].share ? "s" : "") : "") + (e.type === "Live" ? "r" + e.data.rev : ""), () => eventNode(e, latest));
     if (n) items.push([e.ts, n]);
   }
-  const outgoing = d.prompts.filter(p => p.status !== "submitted" &&
+  const outgoing = d.prompts.filter(p => p.status !== "submitted" && p.status !== "steered" &&
     (p.status !== "cancelled" && p.status !== "failed" || Date.now() / 1000 - p.updated < 3600));
   const live = p => p.status === "queued" || p.status === "injected";
   for (const p of outgoing.filter(p => !live(p))) items.push([p.created, cached("p" + p.id + p.status, () => promptNode(p))]);
@@ -1136,7 +1137,7 @@ async function renderDetail(name) {
     : s.state === "needs_input" ? "Claude is waiting on a terminal dialog (grovy attach " + s.name + "). Messages will queue."
     : s.state === "starting" && Date.now() / 1000 - (s.last_event || 0) > 20 ? "Still starting: Claude is probably showing "
         + "the workspace-trust dialog for this folder. Accept it once in the terminal: grovy attach " + s.name + "."
-    : "Claude is busy. Messages will queue and send when it's done.";
+    : "Claude is working. A message goes to it at its next step (or when it finishes).";
   $("send").disabled = s.state === "exited";
   $("resume").classList.toggle("hidden", s.state !== "exited");
   document.querySelector("#composer .cr").classList.toggle("hidden", s.state === "exited");

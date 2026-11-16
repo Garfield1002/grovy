@@ -46,6 +46,9 @@ INPUT_STATES = ("idle", "error")  # states in which we will type into the sessio
 DUP_WINDOW = 1.0  # seconds
 FORCE_STALE = 60  # a "working" session silent this long may be force-typed into, if the user confirms
 PERM_TIMEOUT = grovy.PERMISSION_TIMEOUT
+STEER_MAX = 8000          # chars handed to Claude in one PostToolUse (longer messages wait for the turn's end)
+STEER_INTRO = ("The user sent {what} from their phone (grovy) while you were working. {it} the user's own "
+               "words, exactly as if they had typed {them} into the terminal; take {them} into account now:\n\n")
 LIVE_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
 LIVE_MAX = 64 * 1024        # bytes of JSON in one live widget
 LIVE_NEW_PER_MIN = 30       # new live cards per session per minute: a runaway loop must not flush the chat history
@@ -841,7 +844,7 @@ class Store:
                     if q:
                         d = r.get("data") or {}
                         text = d.get("prompt") or d.get("last_assistant_message") or ""
-                        if r.get("type") in ("UserPromptSubmit", "Stop") and q in str(text).lower():
+                        if r.get("type") in ("UserPromptSubmit", "Stop", "Steered") and q in str(text).lower():
                             out.append(r)
                     elif before is not None and r.get("id", 0) < before:
                         out.append(r)
@@ -883,6 +886,37 @@ class Store:
                 return 404, "unknown prompt"
         self.publish(p["session"])
         return 200, "cancelled"
+
+    def take_steers(self, name):
+        """Steering: messages queued while Claude works are handed to it by the hook of the main agent's next tool
+        call (PostToolUse additionalContext), with no keystrokes, so nothing can land in a dialog. Verified with
+        Claude Code 2.1.325, Haiku and Opus: Claude acts on them mid-turn. The leading run of queued plain messages
+        goes, in order; a queued slash command (and everything after it) waits for the turn's end, as does a turn
+        that ends before any tool call: then try_deliver types them as usual. Returns the context text or None."""
+        name = self._canon(name)
+        with self.lock:
+            s = self.sessions.get(name)
+            if not s or s["state"] == "exited":
+                return None
+            take, size = [], 0
+            for p in self.prompts:
+                if p["session"] != name or p["status"] != "queued":
+                    continue
+                if p.get("command") or size + len(p["text"]) > STEER_MAX:
+                    break
+                take.append(p)
+                size += len(p["text"])
+            if not take:
+                return None
+            for p in take:
+                p["status"], p["updated"] = "steered", now()
+                self._record(name, "Steered", {"prompt": clip(p["text"])})
+            self._save_prompts()
+        self.publish(name)
+        one = len(take) == 1
+        intro = STEER_INTRO.format(what="this message" if one else f"these {len(take)} messages",
+                                   it="It is" if one else "They are", them="it" if one else "them")
+        return intro + "\n\n---\n\n".join(p["text"] for p in take)
 
     def _fail_queued(self, name, why):
         """Queued prompts belong to the session instance that was running when they were queued."""
@@ -1300,6 +1334,14 @@ class SockHandler(socketserver.StreamRequestHandler):
                 self._permission(store, name, payload)
             else:
                 store.ingest(name, payload)
+                if msg.get("want_steer"):   # the main agent's PostToolUse hook waits for this answer
+                    steer = None
+                    if payload.get("hook_event_name") == "PostToolUse" and not payload.get("agent_id"):
+                        steer = store.take_steers(name)
+                    try:
+                        self._reply({"steer": steer})
+                    except OSError:
+                        pass   # the hook gave up waiting; the message was marked steered but may not have arrived
         elif t == "status":
             self._reply({"sessions": {s["name"]: s for s in store.list_sessions()}, "url": self.server.url,
                          "claude": shutil.which(grovy.claude_cmd())})

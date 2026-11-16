@@ -106,6 +106,9 @@ Put scratch files in your scratchpad, not the repo.
 - `claude --resume <id>` on a conversation that was never saved exits immediately with an error.
 - Hooks fired inside a subagent carry `agent_id`/`agent_type` and the parent's `session_id`. A background subagent's
   `PostToolUse` can arrive after the parent's `Stop`.
+- Text typed while Claude works is queued by Claude Code (fires `UserPromptSubmit` at once, read at the next tool
+  boundary). `PostToolUse` `hookSpecificOutput.additionalContext` reaches Claude mid-turn and it acts on it: grovy's
+  steering uses that, never typing while busy.
 - (systemd 257) systemd-oomd watches `user@UID.service` and kills whole scopes; each tmux pane is one. A scope's
   `ManagedOOMPreference=avoid` is honoured only if given when the scope is created (`user.oomd_avoid` xattr), not via
   `set-property`. Killed scopes are garbage-collected; the reason stays in `journalctl --user -u SCOPE`.

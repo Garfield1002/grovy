@@ -885,6 +885,19 @@ def cmd_hook(name):
         except OSError as e:
             print(f"grovy hook: registry update failed: {e}", file=sys.stderr)
     msg = {"type": "hook", "session": name, "event": payload, "pid": os.getppid()}
+    if event == "PostToolUse" and not payload.get("agent_id"):
+        # Steering: messages sent from the phone while Claude works come back here and are handed to Claude.
+        try:
+            reply = sock_request({**msg, "want_steer": True}, timeout=3.0)
+        except (OSError, ValueError) as e:
+            print(f"grovy hook: daemon unreachable ({e}); event not recorded", file=sys.stderr)
+            return 0
+        steer = (reply or {}).get("steer")
+        if isinstance(steer, str) and steer:
+            sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
+                                                                "additionalContext": steer}}))
+            sys.stdout.flush()
+        return 0
     if event != "PermissionRequest":
         try:
             sock_request(msg, timeout=2.0, wait_reply=False)

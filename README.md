@@ -42,6 +42,8 @@ in a terminal. grovy listens to Claude's hooks and shows everything on a phone-f
 - **Widgets and pages:** Claude can answer with charts, checklists, diagrams or buttons to pick from, and
   publish full HTML pages (reports, dashboards) that open full-screen. A page can be shared on your network
   with a link.
+- **Steering:** a message you send while Claude is working reaches it at its next step, so you can correct course
+  without waiting or interrupting.
 - **Live progress:** when Claude runs something long (a build, training, a batch job), its script can show a progress
   bar, notes or the latest output lines in the chat while it runs. Sessions started before you updated grovy get
   this after ⋯ → Update session.

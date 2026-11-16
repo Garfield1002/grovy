@@ -1072,6 +1072,89 @@ class TestOomHelpers(unittest.TestCase):
             self.assertIsNone(grovy.oom_protect("a", 1))
 
 
+class TestSteering(StoreCase):
+    """A message sent while Claude works is handed to it by the main agent's next PostToolUse hook (no typing)."""
+
+    def statuses(self, name="a"):
+        return [p["status"] for p in self.store.prompts if p["session"] == name]
+
+    def busy(self):
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="long job"))
+
+    def test_steered_at_the_next_tool_call(self):
+        self.busy()
+        self.store.enqueue("a", "use the staging db")
+        self.store.enqueue("a", "and be quick")
+        self.assertEqual(self.statuses(), ["queued", "queued"])
+        ctx = self.store.take_steers("a")
+        self.assertIn("these 2 messages", ctx)
+        self.assertTrue(ctx.endswith("use the staging db\n\n---\n\nand be quick"))
+        self.assertEqual(self.statuses(), ["steered", "steered"])
+        self.assertEqual([e["data"]["prompt"] for e in self.store.events["a"] if e["type"] == "Steered"],
+                         ["use the staging db", "and be quick"])
+        self.assertIsNone(self.store.take_steers("a"))             # handed over once
+        self.store.ingest("a", ev("Stop", last_assistant_message="ok"))
+        time.sleep(0.1)
+        self.assertEqual(self.pasted, [])                          # never typed as well
+
+    def test_turn_ends_before_any_tool_call(self):
+        self.busy()
+        self.store.enqueue("a", "one more thing")
+        self.store.ingest("a", ev("Stop", last_assistant_message="done, no tools used"))
+        self.wait_pasted(1)
+        self.assertEqual(self.pasted, [("a", "one more thing")])    # typed as a normal message
+        self.assertIsNone(self.store.take_steers("a"))
+
+    def test_commands_and_long_messages_keep_their_place(self):
+        self.busy()
+        self.store.enqueue("a", "first")
+        self.assertEqual(self.store.enqueue("a", "/compact")[0], 200)
+        self.store.enqueue("a", "after the compaction")
+        self.assertIn("this message", self.store.take_steers("a"))
+        self.assertEqual(self.statuses(), ["steered", "queued", "queued"])   # nothing jumps the command
+        self.assertIsNone(self.store.take_steers("a"))
+        self.store.enqueue("b", "x" * (grovyd.STEER_MAX + 1))
+        self.assertIsNone(self.store.take_steers("b"))
+
+    def test_socket_hands_it_to_the_main_agent_only(self):
+        self.busy()
+        self.store.enqueue("a", "steer me")
+        replies = []
+        def ask(payload):
+            h = grovyd.SockHandler.__new__(grovyd.SockHandler)
+            h.server = type("S", (), {"store": self.store})()
+            h.rfile = io.BytesIO(json.dumps({"type": "hook", "session": "a", "event": payload,
+                                             "want_steer": True}).encode() + b"\n")
+            h.wfile = io.BytesIO()
+            h.handle()
+            replies.append(json.loads(h.wfile.getvalue() or b"null"))
+        ask(ev("PostToolUse", tool_name="Bash", agent_id="sub1"))      # a subagent's tool call: not it
+        ask(ev("PostToolUse", tool_name="Read"))
+        self.assertIsNone(replies[0]["steer"])
+        self.assertIn("steer me", replies[1]["steer"])
+        self.assertEqual(self.store.sessions["a"]["state"], "working")   # the event itself was recorded
+
+    def test_hook_adapter_outputs_the_context(self):
+        out = io.StringIO()
+        with mock.patch.object(grovy, "sock_request", lambda m, timeout=2.0, wait_reply=True:
+                               {"steer": "CTX"} if m.get("want_steer") else None), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(ev("PostToolUse")))), redirect_stdout(out):
+            grovy.cmd_hook("a")
+        self.assertEqual(json.loads(out.getvalue()), {"hookSpecificOutput": {"hookEventName": "PostToolUse",
+                                                                              "additionalContext": "CTX"}})
+        for reply in ({"steer": None}, None, OSError("down")):
+            out = io.StringIO()
+            def fake(m, timeout=2.0, wait_reply=True, r=reply):
+                if isinstance(r, Exception):
+                    raise r
+                return r
+            with mock.patch.object(grovy, "sock_request", fake), mock.patch("sys.stderr", io.StringIO()), \
+                    mock.patch("sys.stdin", io.StringIO(json.dumps(ev("PostToolUse")))), redirect_stdout(out):
+                self.assertEqual(grovy.cmd_hook("a"), 0)
+            self.assertEqual(out.getvalue(), "")
+
+
 class TestRestart(StoreCase):
     def test_restart_only_when_nothing_is_cut_off(self):
         calls = []

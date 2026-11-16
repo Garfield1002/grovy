@@ -162,6 +162,22 @@ Longer prompts take the literal bracketed-paste path, with control characters st
   a dialog, and marks the prompt failed. Part of it may be left in the terminal input.
 * `unknown` state blocks automatic typing. Send then asks "type anyway?" and only that prompt is forced.
 
+**Steering.** A message sent while Claude works isn't typed (typing while Claude is busy could land in a permission
+dialog that opens meanwhile: digits pick options, Enter confirms "Yes", and grovy hears of the dialog only ~100ms
+later). It waits in the queue, and the hook of the main agent's next tool call (`PostToolUse`, not a subagent's)
+asks the daemon for it and hands it to Claude as `additionalContext`, introduced as the user's own words sent from
+the phone. The chat shows it as your message, marked "sent while Claude worked" (event `Steered`, prompt status
+`steered`). Verified with Claude Code 2.1.325 (Haiku and Opus, and end to end through a scratch daemon): Claude acts
+on it in the same turn.
+* Queued plain messages go in order, up to 8,000 characters at a time. A queued slash command, and everything after
+  it, waits for the turn's end, so nothing jumps it.
+* If the turn ends before another tool call (e.g. Claude was only writing), the message is typed as usual once
+  Claude is idle. A message also waits for a long-running tool call to finish; ■ interrupts.
+* Steered messages don't appear in the terminal (only in the conversation itself). If the hook gives up waiting
+  for the daemon's answer (3s), a message marked steered may not have reached Claude.
+* (Typing in the terminal while Claude works is Claude Code's own steering: verified, it's queued at once, fires
+  `UserPromptSubmit` immediately and is read at the next tool boundary.)
+
 **Slash commands.** Claude Code trims leading whitespace and newlines before it looks for a command (verified: a
 pasted `" /model"` or `"\n/model"` opens the model menu). So any message whose first non-blank character is `/` is
 treated as a command, and only phone-safe ones are
