@@ -1,0 +1,94 @@
+{
+ "hooks": {
+  "SessionStart": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "'python3' '/path/to/ccs/ccs.py' 'hook' 'NAME'",
+      "timeout": 10
+     }
+    ]
+   }
+  ],
+  "SessionEnd": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "'python3' '/path/to/ccs/ccs.py' 'hook' 'NAME'",
+      "timeout": 10
+     }
+    ]
+   }
+  ],
+  "UserPromptSubmit": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "'python3' '/path/to/ccs/ccs.py' 'hook' 'NAME'",
+      "timeout": 10
+     }
+    ]
+   }
+  ],
+  "PermissionRequest": [
+   {
+    "matcher": "*",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "'python3' '/path/to/ccs/ccs.py' 'hook' 'NAME'",
+      "timeout": 630
+     }
+    ]
+   }
+  ],
+  "Notification": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "'python3' '/path/to/ccs/ccs.py' 'hook' 'NAME'",
+      "timeout": 10
+     }
+    ]
+   }
+  ],
+  "Stop": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "'python3' '/path/to/ccs/ccs.py' 'hook' 'NAME'",
+      "timeout": 10
+     }
+    ]
+   }
+  ],
+  "StopFailure": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "'python3' '/path/to/ccs/ccs.py' 'hook' 'NAME'",
+      "timeout": 10
+     }
+    ]
+   }
+  ],
+  "PostToolUse": [
+   {
+    "matcher": "*",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "'python3' '/path/to/ccs/ccs.py' 'hook' 'NAME'",
+      "timeout": 10
+     }
+    ]
+   }
+  ]
+ }
+}

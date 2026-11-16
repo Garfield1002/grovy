@@ -1,0 +1,846 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#161615" media="(prefers-color-scheme: dark)">
+<title>ccs</title>
+<style>
+:root { --bg:#f7f6f3; --fg:#1d1d1b; --mut:#77756e; --faint:#a9a69e; --card:#fff; --line:#e4e2dc;
+  --acc:#c96442; --user:#dfe8fb; --code:#efede7; --ok:#2f8a4c; --warn:#c27c0e; --bad:#c2402f; --busy:#3a6fd8; }
+@media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ebe9e4; --mut:#9c998f; --faint:#64625c;
+  --card:#21211f; --line:#33322f; --acc:#e08a67; --user:#25365c; --code:#252523; --ok:#5cc47e; --warn:#f0a63a;
+  --bad:#f0705f; --busy:#7aa2ff; } }
+* { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html, body { margin:0; background:var(--bg); color:var(--fg);
+  font:16px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+body { min-height:100vh; min-height:100dvh; display:flex; flex-direction:column; }
+button { font:inherit; color:inherit; cursor:pointer; }
+.hidden { display:none !important; }
+
+/* header */
+header { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:8px;
+  padding:8px 12px; padding-top:calc(8px + env(safe-area-inset-top)); background:var(--bg);
+  border-bottom:1px solid var(--line); min-height:56px; }
+#back { border:0; background:none; font-size:28px; line-height:1; padding:4px 10px 6px 2px; min-height:44px; }
+header h1 { font-size:18px; margin:0; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pill { display:inline-flex; align-items:center; gap:7px; font-size:14px; font-weight:600; padding:5px 11px;
+  border-radius:99px; background:var(--card); border:1px solid var(--line); white-space:nowrap; }
+#live { width:8px; height:8px; border-radius:50%; background:var(--faint); flex:none; }
+#live.on { background:var(--ok); }
+
+/* state dots */
+.dot { width:10px; height:10px; border-radius:50%; flex:none; background:var(--faint); }
+.dot.idle { background:var(--ok); } .dot.error { background:var(--bad); }
+.dot.working, .dot.starting { background:var(--busy); animation:breathe 2s ease-in-out infinite; }
+.dot.needs_input { background:var(--warn); animation:breathe .9s ease-in-out infinite; }
+.dot.unknown { background:var(--warn); } .dot.exited { background:var(--faint); }
+.dot.stalled { background:var(--faint); animation:none; }
+@keyframes breathe { 0%,100% { transform:scale(1); opacity:1 } 50% { transform:scale(.6); opacity:.45 } }
+
+/* session list */
+main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px; }
+.sess { display:flex; gap:12px; align-items:flex-start; width:100%; text-align:left; border:0; background:none;
+  padding:14px 4px; border-bottom:1px solid var(--line); }
+.sess .dot { margin-top:7px; }
+.sess .body { flex:1; min-width:0; }
+.sess .top { display:flex; gap:8px; align-items:baseline; }
+.sess .name { font-weight:650; font-size:17px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.sess .when { font-size:13px; color:var(--mut); flex:none; }
+.sess .sub { font-size:13px; color:var(--mut); }
+.sess .prev { font-size:15px; margin-top:2px; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2;
+  -webkit-box-orient:vertical; overflow-wrap:anywhere; }
+.sess .badge { font-size:12px; font-weight:700; color:#fff; background:var(--warn); border-radius:99px; padding:1px 8px; }
+.empty { text-align:center; color:var(--mut); padding:48px 10px; }
+
+/* conversation */
+.u { margin:18px 0 6px auto; max-width:86%; width:fit-content; background:var(--user); padding:9px 13px;
+  border-radius:18px 18px 4px 18px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.u .st { display:block; font-size:12px; color:var(--mut); margin-top:3px; text-align:right; }
+.u .st.bad { color:var(--bad); } .u .st.warn { color:var(--warn); }
+.u.pending { opacity:.75; }
+.u button.link { border:0; background:none; color:var(--acc); padding:0 0 0 6px; font-size:12px; }
+.a { margin:6px 0 4px; overflow-wrap:anywhere; }
+.a.collapsed .md { max-height:22em; overflow:hidden; -webkit-mask-image:linear-gradient(#000 70%, transparent); }
+.more { border:0; background:none; color:var(--acc); font-weight:600; padding:6px 0; min-height:36px; }
+.sys { text-align:center; font-size:12.5px; color:var(--mut); margin:10px 0; }
+.sys span { padding:0 8px; }
+.time { text-align:center; font-size:12px; color:var(--faint); margin:22px 0 0; }
+.err { border:1px solid var(--bad); color:var(--bad); border-radius:12px; padding:10px 12px; margin:10px 0;
+  white-space:pre-wrap; }
+
+/* markdown */
+.md > :first-child { margin-top:0 } .md > :last-child { margin-bottom:0 }
+.md p { margin:0 0 .7em; }
+.md h1, .md h2, .md h3, .md h4 { margin:1.1em 0 .4em; line-height:1.3; }
+.md h1 { font-size:1.25em } .md h2 { font-size:1.15em } .md h3, .md h4 { font-size:1.03em }
+.md ul, .md ol { margin:0 0 .7em; padding-left:1.4em; } .md li { margin:.2em 0; }
+.md li > ul, .md li > ol { margin:.2em 0 0; }
+.md blockquote { margin:0 0 .7em; padding:2px 0 2px 12px; border-left:3px solid var(--line); color:var(--mut); }
+.md hr { border:0; border-top:1px solid var(--line); margin:1em 0; }
+.md a { color:var(--acc); }
+.md code { font:.88em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background:var(--code);
+  padding:.1em .35em; border-radius:5px; }
+.cb { position:relative; margin:0 0 .8em; }
+.cb pre { margin:0; padding:12px; padding-right:52px; background:var(--code); border-radius:10px; overflow-x:auto;
+  font:13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.cb pre code { background:none; padding:0; font-size:inherit; }
+.cb .copy { position:absolute; top:6px; right:6px; border:1px solid var(--line); background:var(--card);
+  border-radius:8px; font-size:12px; padding:5px 9px; min-height:32px; }
+.tw { overflow-x:auto; margin:0 0 .8em; }
+.tw table { border-collapse:collapse; font-size:14px; }
+.tw th, .tw td { border-bottom:1px solid var(--line); padding:6px 10px 6px 0; text-align:left; vertical-align:top; }
+.rc { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin:0 0 8px; }
+.rc .t { font-weight:650; margin-bottom:4px; }
+.rc .kv { font-size:14.5px; margin:3px 0; } .rc .k { color:var(--mut); }
+
+/* typing indicator (lives outside the re-rendered list so its animation never restarts) */
+#typing { max-width:760px; margin:0 auto; width:100%; padding:2px 14px 10px; display:flex; align-items:center; gap:10px; }
+.dots { display:inline-flex; gap:5px; padding:11px 14px; background:var(--card); border:1px solid var(--line);
+  border-radius:18px 18px 18px 4px; }
+.dots i { width:7px; height:7px; border-radius:50%; background:var(--busy); animation:hop 1.3s ease-in-out infinite; }
+.dots i:nth-child(2) { animation-delay:.16s } .dots i:nth-child(3) { animation-delay:.32s }
+@keyframes hop { 0%,60%,100% { transform:translateY(0); opacity:.5 } 30% { transform:translateY(-5px); opacity:1 } }
+#typing.stalled .dots i { background:var(--faint); animation-duration:3.2s; }
+.tool { font:12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background:var(--code); border-radius:7px;
+  padding:3px 8px; max-width:45vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tool.fade { animation:fadein .45s ease-out; }
+@keyframes fadein { from { opacity:0; transform:translateY(3px) } to { opacity:1; transform:none } }
+.elapsed { font-size:13px; color:var(--mut); font-variant-numeric:tabular-nums; }
+
+/* permission card */
+.perm { border:2px solid var(--warn); border-radius:14px; padding:12px; margin:14px 0; background:var(--card);
+  animation:slideup .35s ease-out; }
+@keyframes slideup { from { opacity:0; transform:translateY(16px) } to { opacity:1; transform:none } }
+.perm .h { font-weight:650; margin-bottom:6px; } .perm .note { font-size:13px; color:var(--mut); margin-top:6px; }
+.perm pre { margin:6px 0 0; padding:10px; background:var(--code); border-radius:8px; white-space:pre-wrap;
+  overflow-wrap:anywhere; font:13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; max-height:45vh; overflow:auto; }
+.row { display:flex; gap:10px; margin-top:12px; }
+.btn { flex:1; min-height:48px; border-radius:12px; border:1px solid var(--line); background:var(--card); font-weight:650; }
+.btn.allow { background:var(--ok); border-color:var(--ok); color:#fff; }
+.btn.deny { color:var(--bad); border-color:var(--bad); }
+.btn:disabled { opacity:.45; }
+
+/* bottom sheet (switcher, menu, new session, search) */
+#sheet { position:fixed; inset:0; z-index:20; display:flex; align-items:flex-end; background:rgba(0,0,0,.35);
+  animation:fadebg .2s ease-out; }
+#sheet .panel { width:100%; max-width:760px; margin:0 auto; max-height:85vh; overflow-y:auto; background:var(--bg);
+  border-radius:18px 18px 0 0; padding:8px 16px calc(16px + env(safe-area-inset-bottom)); animation:slideup .25s ease-out; }
+#sheet .grab { width:40px; height:4px; border-radius:2px; background:var(--line); margin:4px auto 12px; }
+#sheet h2 { font-size:17px; margin:4px 0 12px; }
+@keyframes fadebg { from { background:rgba(0,0,0,0) } }
+.item { display:flex; align-items:center; gap:12px; width:100%; text-align:left; border:0; background:none;
+  padding:12px 4px; min-height:52px; border-bottom:1px solid var(--line); font-size:16px; }
+.item.danger { color:var(--bad); } .item .sub { font-size:13px; color:var(--mut); }
+.item.cur { font-weight:700; }
+.field { display:block; width:100%; font:inherit; font-size:16px; padding:11px 14px; border-radius:12px;
+  border:1px solid var(--line); background:var(--card); color:var(--fg); margin:0 0 12px; }
+.lbl { font-size:13px; color:var(--mut); margin:0 0 6px; }
+.folders { max-height:38vh; overflow-y:auto; border:1px solid var(--line); border-radius:12px; margin-bottom:12px; }
+.folders .item { padding:10px 12px; min-height:48px; }
+.folders .item.sel { background:color-mix(in srgb, var(--busy) 12%, var(--bg)); font-weight:650; }
+.toggle { display:flex; align-items:center; gap:10px; margin:0 0 14px; font-size:15px; }
+.toggle input { width:22px; height:22px; }
+.hit { border:1px solid var(--line); background:var(--card); border-radius:12px; padding:10px 12px; margin:0 0 8px;
+  width:100%; text-align:left; }
+.hit .w { font-size:12px; color:var(--mut); } .hit .s { overflow:hidden; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; }
+mark { background:color-mix(in srgb, var(--warn) 35%, transparent); color:inherit; border-radius:3px; }
+#title.tap { cursor:pointer; } #title.tap::after { content:" ▾"; font-size:13px; color:var(--mut); }
+.hbtn { border:0; background:none; font-size:24px; line-height:1; min-width:44px; min-height:44px; padding:0 6px; color:var(--fg); }
+.earlier { display:block; margin:6px auto 10px; border:1px solid var(--line); background:var(--card); border-radius:99px;
+  padding:6px 16px; font-size:14px; min-height:36px; }
+#quick { display:flex; gap:8px; margin:0 0 8px; flex-wrap:wrap; }
+#quick:empty { display:none; }
+.chip { border:1px solid var(--line); background:var(--card); border-radius:99px; padding:8px 16px; min-height:40px; font-weight:600; }
+.resume { width:100%; min-height:48px; border-radius:12px; border:0; background:var(--acc); color:#fff; font-weight:650; }
+
+/* readable tool input on permission cards */
+.diff { margin:6px 0 0; border-radius:8px; overflow:hidden; font:13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.diff div { white-space:pre-wrap; overflow-wrap:anywhere; padding:0 8px; }
+.diff .del { background:color-mix(in srgb, var(--bad) 16%, transparent); }
+.diff .add { background:color-mix(in srgb, var(--ok) 18%, transparent); }
+.diff .del::before { content:"− "; color:var(--bad); } .diff .add::before { content:"+ "; color:var(--ok); }
+.path { font:13px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--mut); overflow-wrap:anywhere; margin-top:2px; }
+
+/* question card */
+.q { border:2px solid var(--busy); }
+.q .qh { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--busy); margin-top:4px; }
+.q .qt { font-weight:650; margin:2px 0 8px; }
+.opt { display:block; width:100%; text-align:left; border:1px solid var(--line); background:var(--bg); border-radius:12px;
+  padding:10px 12px; margin:0 0 8px; min-height:48px; }
+.opt .d { display:block; font-size:13px; color:var(--mut); margin-top:2px; }
+.opt.sel { border-color:var(--busy); background:color-mix(in srgb, var(--busy) 12%, var(--bg)); }
+.opt.sel::before { content:"✓ "; color:var(--busy); font-weight:700; }
+.q textarea { width:100%; min-height:44px; border-radius:12px; margin-bottom:4px; }
+.q + .q, .qs + .qs { margin-top:14px; }
+
+/* composer */
+#composer { position:sticky; bottom:0; z-index:4; background:var(--bg); border-top:1px solid var(--line);
+  padding:8px 12px calc(8px + env(safe-area-inset-bottom)); }
+#composer .inner { max-width:760px; margin:0 auto; }
+#hint { font-size:12.5px; color:var(--mut); margin:0 4px 6px; }
+#hint:empty { display:none; }
+.cr { display:flex; gap:8px; align-items:flex-end; }
+textarea { flex:1; font:inherit; font-size:16px; padding:11px 14px; border-radius:22px; border:1px solid var(--line);
+  background:var(--card); color:var(--fg); min-height:46px; max-height:40vh; resize:none; outline:none; }
+textarea:focus { border-color:var(--mut); }
+#send { width:46px; height:46px; border-radius:50%; border:0; background:var(--acc); color:#fff; flex:none;
+  display:grid; place-items:center; }
+#send:disabled { opacity:.35; }
+#stop { width:46px; height:46px; border-radius:50%; border:1px solid var(--line); background:var(--card); flex:none;
+  display:grid; place-items:center; color:var(--bad); }
+#stop i { width:14px; height:14px; border-radius:3px; background:currentColor; }
+#picker { display:flex; flex-direction:column; gap:2px; margin:0 0 8px; max-height:40vh; overflow-y:auto; }
+#picker:empty { display:none; }
+.cmd { text-align:left; border:0; background:var(--card); border-radius:10px; padding:8px 12px; min-height:44px; }
+.cmd b { font:600 14px ui-monospace, SFMono-Regular, Menlo, monospace; } .cmd span { display:block; font-size:12.5px; color:var(--mut); }
+#send svg { width:20px; height:20px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation:none !important; transition:none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <button id="back" class="hidden" aria-label="Back">‹</button>
+  <h1 id="title">Sessions</h1>
+  <button id="add" class="hbtn" aria-label="New session">＋</button>
+  <span id="pill" class="pill hidden"><span id="pdot" class="dot"></span><span id="ptext"></span></span>
+  <span id="live" title="live updates"></span>
+  <button id="menu" class="hbtn hidden" aria-label="Menu">⋯</button>
+</header>
+<main id="main"></main>
+<div id="typing" class="hidden">
+  <span class="dots"><i></i><i></i><i></i></span>
+  <span id="tool" class="tool hidden"></span>
+  <span id="elapsed" class="elapsed"></span>
+</div>
+<div id="composer" class="hidden"><div class="inner">
+  <div id="hint"></div>
+  <div id="picker"></div>
+  <div id="quick"></div>
+  <button id="resume" class="resume hidden">Resume session</button>
+  <div class="cr">
+    <button id="stop" class="hidden" aria-label="Interrupt Claude"><i></i></button>
+    <textarea id="input" rows="1" placeholder="Message Claude…" enterkeyhint="enter"></textarea>
+    <button id="send" aria-label="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+      stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+  </div>
+</div></div>
+<div id="sheet" class="hidden"><div class="panel"><div class="grab"></div><div id="sheetbody"></div></div></div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const main = $("main");
+let view = null, timer = null, cur = null, lastEventId = 0, first = true, turnStart = null, lastTool = "";
+const cache = new Map();   // rendered nodes by key: keeps "show more" state and avoids re-render churn
+
+function h(tag, attrs, ...kids) {           // never uses innerHTML: all text is inserted as text
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) e.append(k instanceof Node ? k : String(k));
+  return e;
+}
+function ago(ts) {
+  if (!ts) return "";
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 45) return "now";
+  if (s < 3600) return Math.round(s / 60) + "m";
+  if (s < 86400) return Math.round(s / 3600) + "h";
+  return Math.round(s / 86400) + "d";
+}
+const mmss = s => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+const clock = ts => new Date(ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+const base = p => (p || "?").split("/").filter(Boolean).pop() || p;
+const LABEL = {needs_input: "needs you", idle: "idle", working: "working", starting: "starting",
+               exited: "exited", unknown: "unknown", error: "error"};
+const unwrap = t => String(t || "").replace(/<\/?pasted_content[^>]*>/g, "").replace(/\n{3,}/g, "\n\n").trim();
+const STALL = 60;
+
+async function api(path, body) {
+  const opt = body === undefined ? {} :
+    {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)};
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+// ---------------------------------------------------------------- markdown (subset, DOM-built, no HTML)
+function inline(text) {
+  // One left-to-right scan; a code span wins at its position and nothing inside it is parsed,
+  // while bold/italic may contain code spans (handled by recursion).
+  const out = [];
+  const re = /(`+)([^`]|[^`].*?[^`])\1(?!`)|\*\*(.+?)\*\*|__(.+?)__|\*([^\s*](?:.*?[^\s*])?)\*|(?<![\w])_([^\s_](?:.*?[^\s_])?)_(?![\w])|~~(.+?)~~|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>()`]*[^\s<>().,;:!?'"*_`])/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[1]) out.push(h("code", {}, m[2]));
+    else if (m[3] || m[4]) out.push(h("strong", {}, inline(m[3] || m[4])));
+    else if (m[5] || m[6]) out.push(h("em", {}, inline(m[5] || m[6])));
+    else if (m[7]) out.push(h("s", {}, inline(m[7])));
+    else if (m[8]) out.push(h("a", {href: m[9], target: "_blank", rel: "noopener noreferrer"}, inline(m[8])));
+    else out.push(h("a", {href: m[10], target: "_blank", rel: "noopener noreferrer"}, m[10]));
+    last = re.lastIndex;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+function copyText(text, btn) {
+  const done = () => { btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1500); };
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text).then(done);
+  const ta = h("textarea", {readonly: "", style: "position:fixed;top:0;left:0;opacity:0"});   // plain-HTTP fallback
+  ta.value = text; document.body.append(ta); ta.select();
+  try { document.execCommand("copy"); done(); } catch (e) { btn.textContent = "Failed"; }
+  ta.remove();
+}
+const SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+const cells = l => l.trim().replace(/^\|/, "").replace(/\|$/, "").split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, "|"));
+function table(head, rows) {
+  const longest = Math.max(...head.map(c => c.length), ...rows.flat().map(c => c.length));
+  if (head.length <= 2 || (head.length === 3 && longest <= 24)) {
+    const thead = h("thead", {}, h("tr", {}, head.map(c => h("th", {}, inline(c)))));
+    const tbody = h("tbody", {}, rows.map(r => h("tr", {}, head.map((_, i) => h("td", {}, inline(r[i] || ""))))));
+    return h("div", {class: "tw"}, h("table", {}, thead, tbody));
+  }
+  // wide or wordy: one card per row so nothing scrolls sideways on a phone
+  return h("div", {}, rows.map(r => h("div", {class: "rc"}, h("div", {class: "t"}, inline(r[0] || "")),
+    head.slice(1).map((k, i) => (r[i + 1] || "").trim() ?
+      h("div", {class: "kv"}, h("span", {class: "k"}, inline(k), ": "), inline(r[i + 1])) : null))));
+}
+function md(src) {
+  const lines = String(src).replace(/\r\n?/g, "\n").split("\n"), root = h("div", {class: "md"});
+  let i = 0, para = [];
+  const flush = () => { if (para.length) { root.append(h("p", {}, para.flatMap((l, k) => k ? [h("br"), ...inline(l)] : inline(l)))); para = []; } };
+  const LI = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+  while (i < lines.length) {
+    const l = lines[i];
+    let m;
+    if ((m = l.match(/^\s*(```+|~~~+)\s*([\w+-]*)/))) {               // fenced code
+      flush(); const fence = m[1], code = []; i++;
+      while (i < lines.length && !lines[i].trim().startsWith(fence)) code.push(lines[i++]);
+      i++;
+      const text = code.join("\n"), btn = h("button", {class: "copy"}, "Copy");
+      btn.onclick = () => copyText(text, btn);
+      root.append(h("div", {class: "cb"}, h("pre", {}, h("code", {}, text)), btn));
+      continue;
+    }
+    if (!l.trim()) { flush(); i++; continue; }
+    if ((m = l.match(/^(#{1,6})\s+(.*)$/))) { flush(); root.append(h("h" + Math.min(4, m[1].length), {}, inline(m[2]))); i++; continue; }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)) { flush(); root.append(h("hr")); i++; continue; }
+    if (l.includes("|") && i + 1 < lines.length && SEP.test(lines[i + 1])) {
+      flush(); const head = cells(l), rows = []; i += 2;
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) rows.push(cells(lines[i++]));
+      root.append(table(head, rows)); continue;
+    }
+    if (/^\s*>/.test(l)) {
+      flush(); const q = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) q.push(lines[i++].replace(/^\s*>\s?/, ""));
+      const bq = md(q.join("\n")); bq.className = ""; root.append(h("blockquote", {}, ...bq.childNodes)); continue;
+    }
+    if (LI.test(l)) {                                                  // (nested) lists by indentation
+      flush(); const stack = [];
+      while (i < lines.length && (LI.test(lines[i]) || (/^\s{2,}\S/.test(lines[i]) && stack.length))) {
+        const lm = lines[i].match(LI);
+        if (!lm) {   // continuation of the current item: an indented code block, or more text
+          const li = stack[stack.length - 1].list.lastChild, fm = lines[i].trim().match(/^(```+|~~~+)/);
+          if (fm) {
+            const code = []; i++;
+            while (i < lines.length && !lines[i].trim().startsWith(fm[1])) code.push(lines[i++].replace(/^\s{0,4}/, ""));
+            i++; li.append(md("```\n" + code.join("\n") + "\n```").firstChild);
+          } else { li.append(h("br"), ...inline(lines[i].trim())); i++; }
+          continue;
+        }
+        const ind = lm[1].replace(/\t/g, "    ").length, ordered = /\d/.test(lm[2]);
+        while (stack.length && ind < stack[stack.length - 1].ind) stack.pop();
+        let top = stack[stack.length - 1];
+        if (!top || ind > top.ind) {
+          const list = h(ordered ? "ol" : "ul", ordered && parseInt(lm[2]) > 1 ? {start: parseInt(lm[2])} : {});
+          (top ? top.list.lastChild : root).append(list);
+          stack.push(top = {ind, list});
+        }
+        top.list.append(h("li", {}, inline(lm[3]))); i++;
+      }
+      continue;
+    }
+    para.push(l); i++;
+  }
+  flush();
+  return root;
+}
+
+// ---------------------------------------------------------------- session list
+async function renderList() {
+  const {sessions} = await api("/api/sessions");
+  if (view !== null) return;
+  document.title = "ccs" + (sessions.some(s => s.pending_permissions || s.state === "needs_input") ? " (!)" : "");
+  main.replaceChildren(...(sessions.length ? sessions.map(s => {
+    const stalled = s.state === "working" && Date.now() / 1000 - s.last_event > STALL;
+    return h("button", {class: "sess", onclick: () => go("#/s/" + s.name)},
+      h("span", {class: "dot " + s.state + (stalled ? " stalled" : "")}),
+      h("div", {class: "body"},
+        h("div", {class: "top"}, h("span", {class: "name"}, s.name),
+          s.pending_permissions ? h("span", {class: "badge"}, s.pending_permissions + " waiting") : null,
+          h("span", {class: "when"}, ago(s.last_event))),
+        h("div", {class: "sub"}, base(s.cwd), " · ", LABEL[s.state] || s.state,
+          s.queued_prompts ? ` · ${s.queued_prompts} queued` : "", s.background ? ` · ${s.background} bg` : ""),
+        s.activity ? h("div", {class: "prev"}, s.activity) : null));
+  }) : [h("div", {class: "empty"}, "No sessions yet.\nStart one with: ccs new NAME PATH")]));
+}
+
+// ---------------------------------------------------------------- conversation
+const SOURCE = {startup: "session started", resume: "session resumed", clear: "conversation cleared",
+                compact: "context compacted", fork: "session forked"};
+function sysLine(...t) { return h("div", {class: "sys"}, h("span", {}, ...t)); }
+function eventNode(e, isLatestReply) {
+  const d = e.data || {};
+  switch (e.type) {
+    case "UserPromptSubmit": return h("div", {class: "u"}, unwrap(d.prompt));
+    case "Stop": {
+      const text = d.last_assistant_message || "";
+      if (!text.trim()) return null;
+      const el = h("div", {class: "a"}, md(text));
+      if (!isLatestReply && text.split("\n").length > 40) {
+        el.classList.add("collapsed");
+        const btn = h("button", {class: "more"}, "Show more");
+        btn.onclick = () => { el.classList.toggle("collapsed"); btn.textContent = el.classList.contains("collapsed") ? "Show more" : "Show less"; };
+        el.append(btn);
+      }
+      if (d.background_tasks) el.append(sysLine(d.background_tasks + " background task(s) still running"));
+      return el;
+    }
+    case "StopFailure": return h("div", {class: "err"}, "⚠ " + (d.error || "error") + (d.last_assistant_message ? "\n" + d.last_assistant_message : ""));
+    case "SessionStart": return sysLine(SOURCE[d.source] || "session started");
+    case "SessionEnd": return sysLine("Claude exited", d.reason && d.reason !== "other" ? " (" + d.reason.replace(/_/g, " ") + ")" : "");
+    case "Exited": return sysLine("terminal closed");
+    case "Interrupted": return sysLine("■ interrupted from the phone");
+    case "PermissionResult": {
+      if (d.kind === "question") return sysLine(d.status === "delivered"
+        ? (d.decision === "answer" ? "✓ answered from phone: " + Object.values(d.answers || {}).join(" · ") : "skipped from phone")
+        : d.status === "timeout" ? "question timed out: answer it in the terminal" : "answered in the terminal");
+      const n = d.status === "delivered" ? (d.decision === "allow" ? "✓ allowed from phone" : "✕ denied from phone")
+        : d.status === "timeout" ? "permission timed out: answer it in the terminal"
+        : /terminal|went away/.test(d.note || "") ? "answered in the terminal" : (d.note || d.status);
+      return sysLine(n);
+    }
+    case "Notification":
+      if (/idle_prompt|permission_prompt/.test(d.notification_type || "")) return null;   // already shown elsewhere
+      return sysLine(d.message || d.notification_type);
+    default: return null;   // PermissionRequest is shown as a live card, then as its result line
+  }
+}
+const CAP = 40;
+function capped(lines, cls) {   // first CAP lines, with "show all" for the rest
+  const box = h("div", {class: "diff"});
+  const fill = n => box.replaceChildren(...lines.slice(0, n).map(l => h("div", {class: cls}, l || " ")),
+    ...(lines.length > n ? [h("button", {class: "more", onclick: () => fill(lines.length)}, `show all ${lines.length} lines`)] : []));
+  fill(CAP);
+  return box;
+}
+function diffBlock(oldS, newS) {
+  const a = String(oldS ?? "").split("\n"), b = String(newS ?? "").split("\n");
+  let s = 0; while (s < a.length && s < b.length && a[s] === b[s]) s++;             // trim common head/tail
+  let e = 0; while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++;
+  const ctx = l => h("div", {}, l || " ");
+  const rows = [...a.slice(Math.max(0, s - 2), s).map(ctx),
+    ...a.slice(s, a.length - e).map(l => h("div", {class: "del"}, l || " ")),
+    ...b.slice(s, b.length - e).map(l => h("div", {class: "add"}, l || " ")),
+    ...a.slice(a.length - e, a.length - e + 2).map(ctx)];
+  const box = h("div", {class: "diff"});
+  const fill = n => box.replaceChildren(...rows.slice(0, n),
+    ...(rows.length > n ? [h("button", {class: "more", onclick: () => fill(rows.length)}, `show all ${rows.length} lines`)] : []));
+  fill(CAP);
+  return box;
+}
+function toolBody(p) {
+  const i = p.tool_input || {}, t = p.tool_name;
+  const path = x => typeof x === "string" ? h("div", {class: "path"}, x) : null;
+  if (t === "Bash" && typeof i.command === "string")
+    return [i.description ? h("div", {class: "note"}, i.description) : null, h("pre", {}, i.command)];
+  if (t === "Edit") return [path(i.file_path), i.replace_all ? h("div", {class: "note"}, "replace all occurrences") : null,
+    diffBlock(i.old_string, i.new_string)];
+  if (t === "MultiEdit" && Array.isArray(i.edits)) return [path(i.file_path), ...i.edits.map(x => diffBlock(x.old_string, x.new_string))];
+  if (t === "Write") return [path(i.file_path), h("div", {class: "note"}, "write file:"), capped(String(i.content ?? "").split("\n"), "add")];
+  if (t === "NotebookEdit") return [path(i.notebook_path), capped(String(i.new_source ?? "").split("\n"), "add")];
+  if (t === "WebFetch") return [h("pre", {}, i.url || ""), i.prompt ? h("div", {class: "note"}, i.prompt) : null];
+  if (t === "WebSearch") return [h("pre", {}, i.query || "")];
+  if (typeof i.file_path === "string" || typeof i.path === "string" || typeof i.pattern === "string")
+    return [h("pre", {}, [i.file_path || i.path, i.pattern].filter(Boolean).join("\n"))];
+  return [h("pre", {}, JSON.stringify(i, null, 2))];
+}
+function questionNode(p) {
+  const qs = (p.tool_input || {}).questions || [], answers = {}, others = {};
+  const deciding = p.status !== "pending";
+  const note = h("div", {class: "note"}, deciding ? "Sent, waiting for Claude…" : "");
+  const quick = qs.length === 1 && !qs[0].multiSelect;   // one single-choice question: a tap answers it
+  const submit = h("button", {class: "btn allow"}, "Send answer"), skip = h("button", {class: "btn"}, "Skip");
+  const value = q => {
+    const parts = q.multiSelect ? [...(answers[q.question] || [])] : (answers[q.question] ? [answers[q.question]] : []);
+    if ((others[q.question] || "").trim()) parts.push(others[q.question].trim());
+    return parts.join(", ");
+  };
+  const ready = () => qs.every(q => value(q));
+  const send = async (decision, payload) => {
+    submit.disabled = skip.disabled = true; card.querySelectorAll(".opt, textarea").forEach(b => b.disabled = true);
+    note.textContent = "Sending…";
+    try { await api(`/api/permissions/${p.id}/decision`, {decision, answers: payload}); note.textContent = "Sent, waiting for Claude…"; }
+    catch (err) { note.textContent = "Failed: " + err.message; submit.disabled = skip.disabled = false; }
+    refresh();
+  };
+  const sendAll = () => send("answer", Object.fromEntries(qs.map(q => [q.question, value(q)])));
+  const blocks = qs.map(q => {
+    const opts = (q.options || []).map(o => {
+      const b = h("button", {class: "opt"}, o.label, o.description ? h("span", {class: "d"}, o.description) : null);
+      b.onclick = () => {
+        if (q.multiSelect) {
+          const set = answers[q.question] = answers[q.question] || new Set();
+          set.has(o.label) ? set.delete(o.label) : set.add(o.label); b.classList.toggle("sel");
+        } else {
+          answers[q.question] = o.label; others[q.question] = "";
+          b.parentNode.querySelectorAll(".opt").forEach(x => x.classList.toggle("sel", x === b));
+          if (quick) return sendAll();
+        }
+        submit.disabled = !ready();
+      };
+      return b;
+    });
+    const other = h("textarea", {rows: "1", placeholder: q.multiSelect ? "Add something else…" : "Or type your own answer…"});
+    other.oninput = () => {
+      others[q.question] = other.value;
+      if (!q.multiSelect && other.value.trim()) { delete answers[q.question]; other.parentNode.querySelectorAll(".opt").forEach(x => x.classList.remove("sel")); }
+      submit.disabled = !ready();
+    };
+    return h("div", {class: "qs"}, q.header ? h("div", {class: "qh"}, q.header) : null, h("div", {class: "qt"}, q.question),
+      ...opts, other);
+  });
+  submit.onclick = sendAll;
+  skip.onclick = () => send("deny");
+  submit.disabled = true;
+  if (deciding) { submit.disabled = skip.disabled = true; }
+  const card = h("div", {class: "perm q"}, h("div", {class: "h"}, "💬 Claude asks"), ...blocks, note,
+    h("div", {class: "row"}, skip, submit));
+  if (deciding) card.querySelectorAll(".opt, textarea").forEach(b => b.disabled = true);
+  return card;
+}
+function permNode(p) {
+  if (p.kind === "question") return questionNode(p);
+  const deciding = p.status !== "pending";
+  const note = h("div", {class: "note"}, deciding ? `Sent “${p.decision}”, waiting for Claude…` : "");
+  const allow = h("button", {class: "btn allow"}, "Allow once"), deny = h("button", {class: "btn deny"}, "Deny");
+  const decide = async d => {
+    allow.disabled = deny.disabled = true; note.textContent = "Sending…";
+    try { await api(`/api/permissions/${p.id}/decision`, {decision: d}); note.textContent = "Sent, waiting for Claude…"; }
+    catch (err) { note.textContent = "Failed: " + err.message; }
+    refresh();
+  };
+  allow.onclick = () => decide("allow"); deny.onclick = () => decide("deny");
+  allow.disabled = deny.disabled = deciding;
+  return h("div", {class: "perm"}, h("div", {class: "h"}, "🔐 Claude wants to use " + p.tool_name), ...toolBody(p), note,
+    h("div", {class: "row"}, deny, allow));
+}
+const PSTATUS = {queued: ["queued: sends when Claude is idle", ""], injected: ["sending…", ""],
+  unconfirmed: ["not confirmed: check the terminal", "warn"], failed: ["failed", "bad"], cancelled: ["cancelled", ""]};
+function promptNode(p) {
+  const [label, cls] = PSTATUS[p.status] || [p.status, ""];
+  const cancel = p.status === "queued" ? h("button", {class: "link", onclick: async () => {
+    try { await api(`/api/prompts/${p.id}/cancel`, {}); } catch (e) { alert(e.message); } refresh(); }}, "cancel") : null;
+  return h("div", {class: "u pending"}, p.text,
+    h("span", {class: "st " + cls}, label, p.error && p.status !== "unconfirmed" ? ": " + p.error : "", cancel));
+}
+function cached(key, make) {
+  if (!cache.has(key)) { const n = make(); if (!n) return null; cache.set(key, n); }
+  return cache.get(key);
+}
+
+async function renderDetail(name) {
+  let d;
+  try { d = await api("/api/sessions/" + encodeURIComponent(name)); }
+  catch (e) { if (view === name) main.replaceChildren(h("div", {class: "empty"}, e.message)); return; }
+  if (view !== name) return;
+  const s = d.session; cur = s;
+  const nearBottom = innerHeight + scrollY >= document.documentElement.scrollHeight - 160;
+  const stalled = s.state === "working" && Date.now() / 1000 - s.last_event > STALL;
+  $("pdot").className = "dot " + s.state + (stalled ? " stalled" : "");
+  $("ptext").textContent = LABEL[s.state] || s.state;
+
+  firstId = d.events.length ? d.events[0].id : 0;
+  const recentIds = new Set(d.events.map(e => e.id));
+  d.events = older.filter(e => !recentIds.has(e.id)).concat(d.events);
+  const lastStop = [...d.events].reverse().find(e => e.type === "Stop");
+  const items = [];   // [ts, node]
+  let prevUserTs = 0;
+  for (const e of d.events) {
+    if (e.type === "UserPromptSubmit") {
+      if (e.ts - prevUserTs > 300) items.push([e.ts - 1e-6, cached("t" + e.id, () => h("div", {class: "time"}, clock(e.ts)))]);
+      prevUserTs = e.ts;
+    }
+    const latest = lastStop && e.id === lastStop.id;
+    const n = cached("e" + e.id + (latest ? "L" : ""), () => eventNode(e, latest));
+    if (n) items.push([e.ts, n]);
+  }
+  const outgoing = d.prompts.filter(p => p.status !== "submitted" &&
+    (p.status !== "cancelled" && p.status !== "failed" || Date.now() / 1000 - p.updated < 3600));
+  const live = p => p.status === "queued" || p.status === "injected";
+  for (const p of outgoing.filter(p => !live(p))) items.push([p.created, cached("p" + p.id + p.status, () => promptNode(p))]);
+  items.sort((a, b) => a[0] - b[0]);
+  const earlier = d.events.length >= 100 && !noMore ? cached("earlier", () => h("button", {class: "earlier", onclick: loadEarlier}, "Load earlier")) : null;
+  main.replaceChildren(...(earlier ? [earlier] : []), ...(items.length ? items.map(x => x[1]) : [h("div", {class: "empty"}, "No activity yet.")]),
+    ...outgoing.filter(live).map(p => cached("p" + p.id + p.status, () => promptNode(p))),
+    ...d.permissions.map(p => cached("perm" + p.id + p.status, () => permNode(p))));
+
+  // typing indicator
+  const busy = (s.state === "working" || s.state === "starting") && !d.permissions.length;
+  $("typing").classList.toggle("hidden", !busy);
+  $("typing").classList.toggle("stalled", stalled);
+  const lastUser = [...d.events].reverse().find(e => e.type === "UserPromptSubmit");
+  turnStart = busy ? (lastUser && (!lastStop || lastUser.id > lastStop.id) ? lastUser.ts : s.last_event) : null;
+  const m = (s.activity || "").match(/^ran (\S+)/);
+  const tool = busy ? (m ? m[1] : s.state === "starting" ? "starting" : "thinking") : "";
+  const tl = $("tool");
+  tl.classList.toggle("hidden", !tool);
+  if (tool !== lastTool) { tl.textContent = tool; tl.classList.remove("fade"); void tl.offsetWidth; tl.classList.add("fade"); lastTool = tool; }
+  tick();
+
+  const hint = $("hint");
+  hint.textContent = s.state === "exited" ? "Session exited. Resume continues the last conversation."
+    : s.accepts_input ? ""
+    : d.permissions.length ? (d.permissions.some(p => p.kind === "question") ? "Answer Claude's question above first." : "Answer the request above first.") + " Messages will queue."
+    : s.can_force ? (s.state === "unknown" ? "Claude's state is unknown (e.g. a dialog was answered in the terminal)."
+        : "No activity for a while (an Esc interrupt sends no event).") + " Sending will ask first."
+    : s.state === "needs_input" ? "Claude is waiting on a terminal dialog (ccs attach " + s.name + "). Messages will queue."
+    : "Claude is busy. Messages will queue and send when it's done.";
+  $("send").disabled = s.state === "exited";
+  $("resume").classList.toggle("hidden", s.state !== "exited");
+  document.querySelector("#composer .cr").classList.toggle("hidden", s.state === "exited");
+  // quick replies: the last thing said was Claude asking something, and Claude is ready for input
+  const lastConv = [...d.events].reverse().find(e => e.type === "Stop" || e.type === "UserPromptSubmit");
+  const asks = lastConv && lastConv.type === "Stop" &&
+    /\?[\s*_`)"'»]*$/.test(lastConv.data.last_assistant_message || "") && s.accepts_input && !input.value.trim();
+  $("quick").replaceChildren(...(asks ? ["Yes", "No", "Go ahead"].map(t => h("button", {class: "chip", onclick: () => quickSend(t)}, t)) : []));
+  $("stop").classList.toggle("hidden", !(s.state === "working" && !d.permissions.length));
+
+  // scrolling: new reply -> its first line; otherwise stick to the bottom if we were there
+  const maxId = d.events.length ? d.events[d.events.length - 1].id : 0;
+  const newReply = lastEventId && lastStop && lastStop.id > lastEventId;
+  if (newReply) cache.get("e" + lastStop.id + "L")?.scrollIntoView({block: "start", behavior: "smooth"});
+  else if (first || nearBottom) scrollTo(0, document.documentElement.scrollHeight);
+  first = false; lastEventId = maxId;
+}
+let older = [], noMore = false, firstId = 0;
+async function loadEarlier() {
+  const btn = cache.get("earlier"); if (btn) btn.textContent = "Loading…";
+  try {
+    const before = older.length ? older[0].id : firstId;
+    const {events} = await api(`/api/sessions/${encodeURIComponent(view)}/history?before=${before}`);
+    if (!events.length) noMore = true;
+    older = events.concat(older);
+    const y = document.documentElement.scrollHeight - scrollY;     // keep the reading position
+    if (btn) btn.textContent = "Load earlier";
+    await renderDetail(view);
+    scrollTo(0, document.documentElement.scrollHeight - y);
+  } catch (e) { if (btn) btn.textContent = "Load earlier (failed, retry)"; }
+}
+async function quickSend(text) {
+  try { await api(`/api/sessions/${encodeURIComponent(view)}/prompts`, {text}); first = true; } catch (e) { alert(e.message); }
+  refresh();
+}
+function tick() {
+  if (turnStart && !$("typing").classList.contains("hidden")) {
+    const idle = cur ? Date.now() / 1000 - cur.last_event : 0;
+    $("elapsed").textContent = idle > STALL ? "no activity for " + mmss(idle) : mmss(Date.now() / 1000 - turnStart);
+  }
+}
+setInterval(tick, 1000);
+
+// ---------------------------------------------------------------- composer
+const input = $("input");
+const draftKey = () => "ccs-draft:" + view;
+function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight + 2, innerHeight * .4) + "px"; }
+input.addEventListener("input", () => { try { localStorage.setItem(draftKey(), input.value); } catch (e) {} autosize(); });
+$("send").onclick = async () => {
+  const text = input.value;
+  if (!text.trim() || !view) return;
+  const force = !!(cur && cur.can_force) &&
+    confirm("Claude's state is uncertain. Type this into the terminal anyway?\n(Cancel = queue it until Claude reports idle.)");
+  $("send").disabled = true;
+  try {
+    await api(`/api/sessions/${encodeURIComponent(view)}/prompts`, {text, force});
+    input.value = ""; try { localStorage.removeItem(draftKey()); } catch (e) {} autosize(); $("picker").replaceChildren();
+    first = true;   // jump to the bottom to show the outgoing message
+  } catch (e) { alert("Not sent: " + e.message); }
+  $("send").disabled = false;
+  refresh();
+};
+
+$("stop").onclick = async () => {
+  if (!view || !confirm("Interrupt Claude? (Same as pressing Esc in the terminal.)")) return;
+  try { await api(`/api/sessions/${encodeURIComponent(view)}/interrupt`, {}); } catch (e) { alert(e.message); }
+  refresh();
+};
+
+// slash-command picker: only commands that are safe from the phone (skills, custom commands, /clear, /compact)
+let commands = [];
+async function loadCommands() {
+  try { commands = (await api(`/api/sessions/${encodeURIComponent(view)}/commands`)).commands; } catch (e) { commands = []; }
+}
+function picker() {
+  const v = input.value, pk = $("picker");
+  if (!/^\/[\w:.-]*$/.test(v)) return pk.replaceChildren();
+  const q = v.slice(1).toLowerCase();
+  const hits = commands.filter(c => c.name.toLowerCase().startsWith(q))
+    .concat(commands.filter(c => !c.name.toLowerCase().startsWith(q) && c.name.toLowerCase().includes(q))).slice(0, 8);
+  pk.replaceChildren(...(hits.length ? hits.map(c => h("button", {class: "cmd", onclick: () => {
+      input.value = "/" + c.name + " "; pk.replaceChildren(); input.focus(); autosize();
+      try { localStorage.setItem(draftKey(), input.value); } catch (e) {}
+    }}, h("b", {}, "/" + c.name), c.description ? h("span", {}, c.description) : null))
+    : [h("div", {class: "sys"}, "No phone-safe command matches. Menus like /model need the terminal.")]));
+}
+input.addEventListener("input", picker);
+input.addEventListener("input", () => { if (input.value.trim()) $("quick").replaceChildren(); });
+
+// ---------------------------------------------------------------- sheets
+function openSheet(...kids) { $("sheetbody").replaceChildren(...kids); $("sheet").classList.remove("hidden"); }
+function closeSheet() { $("sheet").classList.add("hidden"); $("sheetbody").replaceChildren(); }
+$("sheet").addEventListener("click", e => { if (e.target.id === "sheet") closeSheet(); });
+
+async function switcher() {   // tap the title: jump to another session
+  const {sessions} = await api("/api/sessions");
+  openSheet(h("h2", {}, "Sessions"), ...sessions.map(s => h("button", {class: "item" + (s.name === view ? " cur" : ""),
+    onclick: () => { closeSheet(); go("#/s/" + s.name); }},
+    h("span", {class: "dot " + s.state}), h("div", {}, s.name, h("div", {class: "sub"}, base(s.cwd) + " · " + (LABEL[s.state] || s.state))))),
+    h("button", {class: "item", onclick: () => { closeSheet(); go("#/"); }}, "All sessions…"));
+}
+$("title").onclick = () => { if (view) switcher(); };
+
+function sessionMenu() {
+  const s = cur || {}, name = view;
+  const act = async (verb, ok) => {
+    closeSheet();
+    try { const r = await api(`/api/sessions/${encodeURIComponent(name)}/${verb}`, {}); if (ok) ok(r); }
+    catch (e) { alert(e.message); }
+    refresh();
+  };
+  openSheet(h("h2", {}, name),
+    h("button", {class: "item", onclick: searchSheet}, "🔍  Search this conversation"),
+    s.state === "exited"
+      ? h("button", {class: "item", onclick: () => act("resume")}, "▶  Resume session")
+      : h("button", {class: "item danger", onclick: () => {
+          if (confirm(`Stop session "${name}"? Claude exits; the conversation can be resumed later.`)) act("kill");
+        }}, "■  Stop session"),
+    h("div", {class: "sub", style: "padding:10px 4px;color:var(--mut);font-size:13px"}, s.cwd || ""));
+}
+$("menu").onclick = sessionMenu;
+$("resume").onclick = async () => {
+  $("resume").disabled = true; $("resume").textContent = "Starting…";
+  try { await api(`/api/sessions/${encodeURIComponent(view)}/resume`, {}); } catch (e) { alert(e.message); }
+  $("resume").disabled = false; $("resume").textContent = "Resume session";
+  refresh();
+};
+
+function searchSheet() {
+  const q = h("input", {class: "field", type: "search", placeholder: "Search prompts and replies…", enterkeyhint: "search"});
+  const results = h("div", {});
+  let t = null;
+  const run = async () => {
+    const v = q.value.trim();
+    if (v.length < 2) return results.replaceChildren();
+    const {events} = await api(`/api/sessions/${encodeURIComponent(view)}/history?q=${encodeURIComponent(v)}`);
+    if (q.value.trim() !== v) return;
+    results.replaceChildren(...(events.length ? events.map(e => {
+      const text = unwrap(e.data.prompt || e.data.last_assistant_message || "");
+      const i = text.toLowerCase().indexOf(v.toLowerCase()), from = Math.max(0, i - 60);
+      const snip = (from ? "…" : "") + text.slice(from, i), hit = text.slice(i, i + v.length), rest = text.slice(i + v.length, i + v.length + 160);
+      return h("button", {class: "hit", onclick: () => openSheet(
+          h("button", {class: "more", onclick: searchSheet}, "‹ Back to results"),
+          h("div", {class: "w"}, new Date(e.ts * 1000).toLocaleString()),
+          e.type === "UserPromptSubmit" ? h("div", {class: "u"}, text) : h("div", {class: "a"}, md(text)))},
+        h("div", {class: "w"}, (e.type === "UserPromptSubmit" ? "You · " : "Claude · ") + new Date(e.ts * 1000).toLocaleString()),
+        h("div", {class: "s"}, snip, h("mark", {}, hit), rest));
+    }) : [h("div", {class: "sys"}, "No matches.")]));
+  };
+  q.oninput = () => { clearTimeout(t); t = setTimeout(run, 250); };
+  openSheet(h("h2", {}, "Search"), q, results);
+  setTimeout(() => q.focus(), 50);
+}
+
+async function newSession() {
+  let folders = [];
+  try { folders = (await api("/api/projects")).projects; } catch (e) { return alert(e.message); }
+  let picked = null;
+  const name = h("input", {class: "field", placeholder: "name (letters, digits, - _)", autocapitalize: "off", autocorrect: "off"});
+  const filter = h("input", {class: "field", type: "search", placeholder: "Filter folders…"});
+  const list = h("div", {class: "folders"});
+  const ask = h("input", {type: "checkbox"});
+  const go_ = h("button", {class: "btn allow", disabled: ""}, "Start");
+  const note = h("div", {class: "note"});
+  const valid = () => { go_.disabled = !(picked && /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(name.value)); };
+  const draw = () => list.replaceChildren(...folders.filter(f => f.toLowerCase().includes(filter.value.toLowerCase())).map(f =>
+    h("button", {class: "item" + (f === picked ? " sel" : ""), onclick: () => {
+      picked = f; if (!name.value || name.dataset.auto) { name.value = base(f).replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 32); name.dataset.auto = "1"; }
+      draw(); valid(); }},
+      h("div", {}, base(f), h("div", {class: "sub"}, f)))));
+  name.oninput = () => { delete name.dataset.auto; valid(); };
+  filter.oninput = draw;
+  go_.onclick = async () => {
+    go_.disabled = true; note.textContent = "Starting Claude…";
+    try { await api("/api/sessions", {name: name.value, path: picked, ask: ask.checked}); closeSheet(); go("#/s/" + name.value); }
+    catch (e) { note.textContent = e.message; valid(); }
+  };
+  draw();
+  openSheet(h("h2", {}, "New session"), h("div", {class: "lbl"}, "Folder (ones Claude already trusts)"), filter, list,
+    h("div", {class: "lbl"}, "Name"), name,
+    h("label", {class: "toggle"}, ask, "Ask before running tools"), note, h("div", {class: "row"}, go_));
+}
+$("add").onclick = newSession;
+
+// ---------------------------------------------------------------- routing + live updates
+function go(hash) { location.hash = hash; }
+function route() {
+  const m = location.hash.match(/^#\/s\/([A-Za-z0-9_-]+)$/);
+  view = m ? m[1] : null; lastEventId = 0; cur = null; first = true; lastTool = ""; cache.clear();
+  older = []; noMore = false; closeSheet(); $("quick").replaceChildren();
+  $("add").classList.toggle("hidden", !!view); $("menu").classList.toggle("hidden", !view);
+  $("title").classList.toggle("tap", !!view); $("resume").classList.add("hidden");
+  $("back").classList.toggle("hidden", !view);
+  $("pill").classList.toggle("hidden", !view);
+  $("composer").classList.toggle("hidden", !view);
+  $("typing").classList.add("hidden");
+  $("title").textContent = view || "Sessions";
+  main.replaceChildren();
+  $("picker").replaceChildren(); commands = [];
+  if (view) { try { input.value = localStorage.getItem(draftKey()) || ""; } catch (e) { input.value = ""; } autosize(); loadCommands(); }
+  refresh();
+}
+function refresh() {
+  clearTimeout(timer);
+  timer = setTimeout(() => (view ? renderDetail(view) : renderList()).catch(() => $("live").classList.remove("on")), 80);
+}
+$("back").onclick = () => go("#/");
+addEventListener("hashchange", route);
+
+let es = null;
+function connect() {
+  if (es) es.close();
+  es = new EventSource("/api/events");
+  es.onopen = () => { $("live").classList.add("on"); refresh(); };
+  es.onmessage = ev => { try { const m = JSON.parse(ev.data); if (!m.session || !view || m.session === view) refresh(); } catch (e) {} };
+  es.onerror = () => $("live").classList.remove("on");
+}
+function wake() { if (!es || es.readyState === 2) connect(); refresh(); }   // phone woke up / tab restored
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") wake(); });
+addEventListener("pageshow", wake);
+addEventListener("focus", wake);
+addEventListener("online", connect);
+setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 30000);
+// Backup for mobile browsers that silently drop the event stream: poll while Claude is busy.
+setInterval(() => {
+  if (document.visibilityState === "visible" && view && cur && /working|starting|needs_input/.test(cur.state)) refresh();
+}, 5000);
+route(); connect();
+</script>
+</body>
+</html>
