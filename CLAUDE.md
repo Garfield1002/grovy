@@ -1,7 +1,8 @@
 # Working on grovy
 
-grovy runs Claude Code sessions in tmux and serves a phone UI for them. Read `README.md` for what it
-does and the invariants it promises. This file covers **how to change it safely**.
+grovy runs Claude Code sessions in tmux and serves a phone UI for them. `README.md` documents behaviour,
+invariants and limitations: read the section you are changing (not the whole file) and keep it in sync.
+This file covers **how to change it safely**.
 
 ## You may be running inside grovy
 
@@ -49,7 +50,7 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 ## Testing
 
 ```sh
-python3 -m unittest discover -s tests        # ~5s, no API key, private tmux server
+python3 -m unittest discover -s tests        # ~10s, no API key, private tmux server
 ```
 
 **Scratch daemon** (never the live one, never `~/.local/state/grovy`, never port 7333). Keep the state dir short:

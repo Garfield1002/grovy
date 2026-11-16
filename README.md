@@ -28,10 +28,25 @@ claude ──hooks──► grovy hook NAME ──unix socket──► grovyd �
 
 ## Install
 
+Needs Linux or macOS, Python 3.11+, tmux and Claude Code. Quick start:
+
 ```sh
-ln -s "$PWD/grovy" ~/.local/bin/grovy          # any dir on PATH
-grovy doctor
+git clone <this repo> ~/grovy && cd ~/grovy
+mkdir -p ~/.local/bin && ln -s "$PWD/grovy" ~/.local/bin/grovy   # any dir on your PATH
+grovy doctor                                  # checks python, tmux, claude
+tmux new -d -s grovyd 'grovy serve --bind 0.0.0.0'   # or the systemd unit below; only on a LAN/VPN you trust
+grovy url                                     # open the printed link once on your phone (it sets a login cookie)
 ```
+
+Then tap **＋** on the phone. It offers folders where Claude already trusts the workspace: Claude holds back all
+hooks until its trust dialog is accepted, so run `claude` once in a new project on the computer first.
+
+**What grovy changes in your Claude sessions** (only the ones it starts; your other `claude` processes are untouched):
+* hooks that report events to the daemon and route permission requests to the phone;
+* a status line wrapper that forwards model, effort and context use, then prints your own status line;
+* about 450 tokens of context at each start, resume, `/clear` and `/compact`, telling Claude about widgets and
+  pages (see **Widgets**). Set `GROVY_WIDGETS=0` where sessions are started (the daemon's environment for the
+  phone, your shell for `grovy new`) to leave it out.
 
 **No changes to `~/.claude/settings.json` are needed.** `grovy new` writes a per-session
 settings file (`$STATE/hooks/NAME.json`, see `examples/claude-hooks.json`) and starts
@@ -103,7 +118,7 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 | `GROVY_NOTIFY_CMD` | unset | command run with a short message on stdin (see below) |
 | `GROVY_PUBLIC_URL` | unset | appended to notifications as a link |
 | `GROVY_DEBUG` | unset | log HTTP requests |
-| `GROVY_WIDGETS` | `1` | `0` = don't tell Claude sessions about widgets |
+| `GROVY_WIDGETS` | `1` | `0` = don't tell Claude sessions about widgets and pages (applies to sessions started afterwards) |
 
 ### Notifications (Telegram or anything else)
 
@@ -184,6 +199,9 @@ Longer prompts take the literal bracketed-paste path, with control characters st
   `UserPromptSubmit`; their receipt is `SessionStart` once they finish, so they get 10 minutes (compaction can
   take over a minute). **Prompts are never retried
   automatically**, and `injected` is persisted *before* typing, so a crash can't cause a double send.
+* Typing re-checks between chunks and before Enter. If Claude starts something on its own meanwhile (a background
+  task finishing) or opens a permission request, grovy stops **without pressing Enter**, so the Enter can't answer
+  a dialog, and marks the prompt failed. Part of it may be left in the terminal input.
 * `unknown` state blocks automatic typing. Send then asks "type anyway?" and only that prompt is forced.
 
 **Slash commands.** Claude Code trims leading whitespace and newlines before it looks for a command (verified: a
@@ -230,8 +248,10 @@ alias can't be taken by another session until the renamed one is removed.
 
 **Status info.** Each session's status line runs `grovy statusline NAME`. It forwards model, effort, fast mode and
 context use to the daemon (shown under the session header and as "context N%" in the list), then prints your own
-configured status line, so the terminal looks the same. Sessions started before this existed report it after their next
-start.
+configured status line, so the terminal looks the same. Your status line is looked up in your user settings and the
+session's own project folder, never in the folder Claude happens to be in: a cloned repo's `.claude/settings.json`
+must not get its command run without Claude's trust dialog. Sessions started before this existed report it after
+their next start.
 
 **Widgets.** Claude's reply can contain ` ```widget ` blocks holding one JSON object: `chart` (bar, line, pie),
 `stats`, `progress`, `checklist`, `choices`, `form` or `diagram`. The page draws them itself with DOM and SVG;
@@ -255,12 +275,13 @@ them. Removing a session deletes its pages. A page is served from `/p/<id>` (tok
 
 `grovy.send(text)` in a page fills your message box, exactly like a widget; nothing is sent by itself.
 
-**Sharing a page on the network.** In the page viewer, **Share** (or `grovy page share NAME`) gives the page an
+**Sharing a page on the network.** In the page viewer, **Share** gives the page an
 extra link, `/s/<random 128-bit token>`, that works **without the grovy token** for anyone who can reach the daemon
 (so only when it listens beyond localhost, e.g. `--bind 0.0.0.0`). The link serves only that page, under the same
 sandbox, without the `grovy.send` bridge, and grants nothing else. Republishing keeps the link and updates what it
 shows. **Stop sharing** (`grovy page unshare NAME`) revokes it; sharing again issues a new link, and deleting the page
-revokes it too. Claude isn't told about sharing: whether a page leaves your phone is your call.
+revokes it too. Sharing exists **only on the phone**: there is no CLI or socket command for it, so a Claude
+session can publish pages but can't make one public.
 
 ## Failure modes
 
@@ -268,6 +289,7 @@ revokes it too. Claude isn't told about sharing: whether a page leaves your phon
 |---|---|
 | SSH disconnects | nothing happens; Claude lives in tmux |
 | phone sleeps / changes network | SSE reconnects automatically; on wake the page re-fetches. Drafts are kept in localStorage |
+| someone without the token holds idle connections | at the 64-connection cap the longest-idle not-yet-requested connection is closed, and an address may hold 8 such at once; real requests still get through |
 | daemon restarted | sessions untouched; state reloaded and reconciled against tmux; `needs_input` stays `needs_input` (Claude falls back to its terminal dialog); in-flight prompts → `unconfirmed`; a "type anyway" consent never survives a restart |
 | daemon crashes during a permission | hook sees EOF → no output → terminal dialog |
 | Claude exits / tmux killed by hand | `SessionEnd` or reconciliation → `exited`; pending permissions expire; queued prompts → `failed` |
@@ -307,6 +329,9 @@ revokes it too. Claude isn't told about sharing: whether a page leaves your phon
   that, so a page that wants to could carry what it shows to another site. Pages are made by your own Claude
   sessions, but a session that read hostile content could be steered into it. The viewer's title bar stays grovy's.
 * Pages are snapshots: they can't load data at view time, so Claude embeds the data and republishes to update.
+* The CDN allowlist limits where code comes from, not what it does: jsDelivr and unpkg serve any npm package or
+  GitHub file. What keeps a page's data in is `connect-src`/`img-src` plus the sandbox, and self-navigation
+  (above) gets around them.
 * A shared page's link is its only protection, over plain HTTP: anyone who sees the link, or the traffic on the
   network, can open it until you stop sharing.
 

@@ -235,11 +235,15 @@ def hook_settings(name, file_name=None):
     return path
 
 
-def user_statusline(cwd=None):
-    """The status line the user configured (local > project > user settings), unless it is ours."""
+def user_statusline(project=None):
+    """The status line the user configured (local > project > user settings), unless it is ours.
+
+    `project` must be the session's registered folder, never the cwd from Claude's status JSON: that follows
+    Claude's Bash `cd`, so a cloned repo's .claude/settings.json would get its command run without the trust
+    dialog (Claude Code itself only applies project settings from the trusted project root)."""
     paths = []
-    if cwd:
-        paths += [os.path.join(cwd, ".claude", "settings.local.json"), os.path.join(cwd, ".claude", "settings.json")]
+    if project:
+        paths += [os.path.join(project, ".claude", "settings.local.json"), os.path.join(project, ".claude", "settings.json")]
     paths.append(os.path.join(claude_home(), "settings.json"))
     for p in paths:
         sl = read_json(p, {}).get("statusLine") if isinstance(read_json(p, {}), dict) else None
@@ -258,16 +262,22 @@ def cmd_statusline(name):
     raw = sys.stdin.read()
     try:
         data = json.loads(raw)
-        if valid_name(name) and isinstance(data, dict):
-            msg = {"type": "statusline", "session": name, "data": {k: data.get(k) for k in STATUS_FIELDS}}
-            sock_request(msg, timeout=0.3, wait_reply=False)
-    except (ValueError, OSError):
-        data = {}
-    own = user_statusline((data or {}).get("cwd") if isinstance(data, dict) else None)
+    except ValueError:
+        data = None
+    if valid_name(name) and isinstance(data, dict):
+        try:
+            sock_request({"type": "statusline", "session": name, "data": {k: data.get(k) for k in STATUS_FIELDS}},
+                         timeout=0.3, wait_reply=False)
+        except OSError:
+            pass
+    reg = registry() if valid_name(name) else {}
+    project = (reg.get(canonical_name(reg, name)) or {}).get("cwd") if valid_name(name) else None
+    own = user_statusline(project)
     if own:
+        cwd = data.get("cwd") if isinstance(data, dict) and isinstance(data.get("cwd"), str) else None
         try:
             r = subprocess.run(["/bin/sh", "-c", own["command"]], input=raw, capture_output=True, text=True,
-                               timeout=5, cwd=(data or {}).get("cwd") or None)
+                               timeout=5, cwd=cwd if cwd and os.path.isdir(cwd) else None)
             sys.stdout.write(r.stdout)
         except (OSError, subprocess.SubprocessError):
             pass
@@ -297,7 +307,8 @@ def start_session(name, cwd, extra_args=()):
     # Multiple trailing args => tmux execs them directly, no shell, so paths/names are never interpolated.
     r = tmux("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", tmux_name(name), "-c", cwd,
              "-x", "200", "-y", "50", "-e", f"GROVY_SESSION={name}", "-e", f"GROVY_STATE_DIR={state_dir()}",
-             "-e", f"GROVY_PERMISSION_TIMEOUT={PERMISSION_TIMEOUT}", "--", *argv)
+             "-e", f"GROVY_PERMISSION_TIMEOUT={PERMISSION_TIMEOUT}",
+             *(["-e", f"GROVY_WIDGETS={env('WIDGETS')}"] if env("WIDGETS") is not None else []), "--", *argv)
     pane = r.stdout.strip()
     tmux("set-option", "-t", "=" + tmux_name(name) + ":", "@grovy_state", state_dir())
     tmux("set-option", "-t", "=" + tmux_name(name) + ":", "@grovy", name)
@@ -348,6 +359,17 @@ def _git_root(path):
         if parent == p:
             return None
         p = parent
+
+
+def folder_trusted(path):
+    """Would Claude start in `path` without stopping at the workspace-trust dialog? (rule: trusted_projects)"""
+    path = os.path.realpath(path)
+    explicit = {os.path.realpath(k) for k, v in _claude_projects().items()
+                if isinstance(v, dict) and v.get("hasTrustDialogAccepted")}
+    g = _git_root(path)
+    if g is not None:
+        return g in explicit
+    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in explicit)
 
 
 def trusted_projects():
@@ -572,15 +594,27 @@ def send_key(name, key):
     tmux("send-keys", "-t", _own_pane(name), key)
 
 
-def paste_prompt(name, text, command=False):
+class PasteAborted(RuntimeError):
+    """Typing stopped part-way because the session stopped being safe to type into."""
+
+
+def paste_prompt(name, text, command=False, abort=None):
     """Deliver text to the session's input, then Enter. No shell anywhere.
 
     command=True types an allowlisted slash command. It always ends in a space before Enter:
     the space closes Claude Code's fuzzy command menu, so Enter can't pick a neighbour.
 
-    The caller decides *whether* it is safe to type; this only does the typing. Raises if the
+    The caller decides *whether* it is safe to type. `abort()` (if given) is asked again between chunks
+    and right before Enter, and returns a reason to stop: Claude can start a turn on its own while we
+    type (a background task finishing), and if that turn opens a permission dialog, the final Enter
+    would answer it with its highlighted option. Raises PasteAborted then, and RuntimeError if the
     session is gone or its pane changed owner.
     """
+    def check():
+        why = abort() if abort else None
+        if why:
+            raise PasteAborted(why)
+
     pane = _own_pane(name)
     if command:
         text = text.strip() + " "
@@ -599,6 +633,7 @@ def paste_prompt(name, text, command=False):
                     if piece:
                         tmux("send-keys", "-t", pane, "-l", "--", piece)
                 time.sleep(TYPE_PAUSE)
+                check()
     else:
         buf = f"grovy-{name}-{os.getpid()}-{time.monotonic_ns()}"
         # Strip control characters (ESC especially): "\x1b[201~" would end the bracketed paste early
@@ -607,12 +642,14 @@ def paste_prompt(name, text, command=False):
         tmux("load-buffer", "-b", buf, "-", input=safe.encode())
         try:
             _own_pane(name)  # re-verify right before pasting
+            check()
         except RuntimeError:
             tmux("delete-buffer", "-b", buf, check=False)
             raise
         tmux("paste-buffer", "-p", "-d", "-r", "-b", buf, "-t", pane)
     time.sleep(0.4)  # let the TUI ingest the input before submitting
     _own_pane(name)
+    check()
     tmux("send-keys", "-t", pane, "Enter")
 
 
@@ -658,10 +695,9 @@ def permission_output(behavior, message=None, updated_input=None):
 
 
 WIDGET_GUIDE = """\
-You are running inside grovy: the user may be reading you on a phone, which renders the final message of each \
-turn as markdown. That message can include widgets: a fenced code block with language `widget` whose body is one \
-JSON object. grovy draws them itself (no HTML or scripts). Use one when it genuinely helps (numbers, progress, a \
-decision, structure), not by default. The terminal shows the raw JSON, so keep the key facts in plain text too.
+grovy: the user may read your final message of each turn on a phone, which renders markdown and ```widget \
+blocks (one JSON object each; grovy draws them, no HTML). The terminal shows the raw JSON, so state key facts in \
+text too. Use a widget only when it clearly beats text, usually at most one per reply.
 - chart: {"type":"chart","kind":"bar|line|pie","title":"..","labels":["a","b"],"series":[{"name":"..","values":[1,2]}],"unit":"ms"}
 - stats: {"type":"stats","title":"..","items":[{"label":"Tests","value":"88/88","note":"..","tone":"ok|warn|bad"}]}
 - progress: {"type":"progress","title":"..","items":[{"label":"..","value":3,"max":10}]}
@@ -669,17 +705,11 @@ decision, structure), not by default. The terminal shows the raw JSON, so keep t
 - choices: {"type":"choices","question":"..","multi":false,"options":[{"label":"..","description":"..","message":"text to send if picked"}]}
 - form: {"type":"form","title":"..","submit":"..","fields":[{"name":"k","label":"..","kind":"text|textarea|number|select|toggle","options":[".."],"default":".."}]}
 - diagram: {"type":"diagram","direction":"down|right","nodes":[{"id":"a","label":"..","tone":"ok|warn|bad"}],"edges":[{"from":"a","to":"b","label":".."}]}
-choices and form only fill the user's message box; the user reviews it and sends it as an ordinary prompt. \
-Prefer them to asking the user to type out a pick. Keep widgets small: about 12 bars, 8 pie slices, 30 diagram nodes.
-
-For anything bigger (a report, a dashboard, an interactive explorer, a visual mockup) make a page: write one \
-self-contained HTML file and run `GROVY page publish FILE --title "Title"`. The phone shows a card that opens it; \
-publishing the same file name again updates it in place (`GROVY page ls`, `GROVY page rm NAME`). Pages run \
-sandboxed: inline JS and CSS, libraries only from cdnjs.cloudflare.com, cdn.jsdelivr.net or unpkg.com (pin \
-versions), fonts from Google Fonts, images as data: URIs. No fetch/XHR/WebSocket and no localStorage/cookies, so \
-embed all data in the file and keep state in memory. \
-Design for a phone first (~390px wide, light and dark via prefers-color-scheme). `grovy.send(text)` in a page \
-puts text in the user's message box for them to review and send. Mention the page in your reply."""
+choices/form only prefill the user's message box; they review and send it. Limits: ~12 bars, 8 pie slices, 30 nodes.
+Only when the user asks for a page, or the result is too big for widgets, make one: a self-contained HTML file \
+(phone-first, light/dark; inline JS/CSS, pinned libraries from cdnjs/jsdelivr/unpkg, Google Fonts, data: images; \
+no fetch, storage or cookies, so embed the data; `grovy.send(text)` prefills the message box), then run \
+`GROVY page publish FILE --title T` (same file name updates it; `page ls`, `page rm NAME`). Mention it in your reply."""
 
 
 GROVY_BIN = os.path.join(os.path.dirname(os.path.realpath(__file__)), "grovy")
@@ -772,6 +802,9 @@ def cmd_new(a):
     except (ValueError, RuntimeError) as e:
         die(str(e))
     print(f"started {a.name} in tmux session {tmux_name(a.name)}  (grovy attach {a.name})")
+    if not folder_trusted(a.path):
+        print(f"note: Claude hasn't been trusted in this folder yet, so it is showing the workspace-trust dialog\n"
+              f"and grovy sees nothing until you accept it once: grovy attach {a.name}", file=sys.stderr)
     return 0
 
 
@@ -872,8 +905,12 @@ def cmd_url(_):
     except (OSError, ValueError):
         die("grovyd not running (grovy serve)")
     tok = load_token()
-    for base in lan_bases(url):
+    bases = lan_bases(url)
+    for base in bases:
         print(base + "/" + (f"?token={tok}" if tok else ""))
+    if all(re.match(r"http://(127\.|localhost|\[::1\])", b) for b in bases):
+        print("note: the daemon only listens on this computer, so these links won't open on a phone.\n"
+              "Restart it with --bind 0.0.0.0 (or your VPN address), or set GROVY_BIND.", file=sys.stderr)
     if not tok:
         print("(no token: anyone who can reach these addresses can use grovy)", file=sys.stderr)
     return 0
@@ -899,8 +936,11 @@ def cmd_doctor(_):
         st = sock_request({"type": "status"})
         check("daemon socket", True, f"{len(st.get('sessions', {}))} session(s) known")
         check("daemon http", True, st.get("url", ""))
+        if "claude" in st:   # the daemon's PATH can differ from this shell's (systemd)
+            check("daemon finds claude", st["claude"], st["claude"] or f"{claude_cmd()!r} not on the daemon's PATH "
+                  "(set PATH or GROVY_CLAUDE in its environment)")
     except (OSError, ValueError) as e:
-        check("daemon socket", False, f"{e} (run: grovy serve)")
+        print(f"[info] daemon not running ({e}): start it with `grovy serve`")
     live, reg = tmux_managed(), registry()
     for n in sorted(live):
         hs = os.path.join(sd, "hooks", f"{n}.json")
@@ -928,7 +968,7 @@ def cmd_page(a):
             return 1
         stem = os.path.splitext(os.path.basename(a.file))[0]
         msg.update(html=html, title=a.title, name=a.name or re.sub(r"[^A-Za-z0-9_.-]", "-", stem).lstrip("-._")[:64] or "page")
-    elif a.op in ("rm", "share", "unshare"):
+    elif a.op == "rm":
         msg["name"] = a.name
     try:
         reply = sock_request(msg, timeout=30) or {}
@@ -947,16 +987,6 @@ def cmd_page(a):
                   + ("shared  " if p.get("share") else "        ") + p["title"])
         if not res:
             print("no pages")
-    elif a.op == "share":
-        try:
-            url = (sock_request({"type": "status"}) or {}).get("url", "")
-        except (OSError, ValueError):
-            url = ""
-        print(f"{res['name']} is shared: anyone on the network with the link can view it")
-        for base in lan_bases(url):
-            print(f"  {base}/s/{res['share']}")
-    elif a.op == "unshare":
-        print(f"{res['name']} is no longer shared; its link stopped working")
     else:
         print(res)
     return 0
@@ -1001,13 +1031,9 @@ def main(argv=None):
     pp.add_argument("file"), pp.add_argument("--title"), pp.add_argument("--name", help="default: the file name")
     pr = ps.add_parser("rm", help="remove a page")
     pr.add_argument("name")
-    psh = ps.add_parser("share", help="give a page a link that works on the network without the grovy token")
-    psh.add_argument("name")
-    pun = ps.add_parser("unshare", help="revoke a page's shared link")
-    pun.add_argument("name")
     pl = ps.add_parser("ls", help="list pages")
     pl.add_argument("--all", action="store_true", help="pages of every session")
-    for x in (pp, pr, psh, pun, pl):
+    for x in (pp, pr, pl):
         x.add_argument("--session", help="default: $GROVY_SESSION")
         x.set_defaults(fn=cmd_page)
     sub.add_parser("doctor", help="check dependencies and connectivity").set_defaults(fn=cmd_doctor)

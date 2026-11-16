@@ -15,8 +15,15 @@ Environment=GROVY_PORT=7333
 # Optional notifications: any command; receives the message on stdin.
 #Environment=GROVY_NOTIFY_CMD=%h/dev/grovy/examples/notify-telegram.sh
 #Environment=GROVY_PUBLIC_URL=http://100.x.y.z:7333/
+# systemd's PATH usually lacks ~/.local/bin and nvm paths: give the daemon (and the Claude sessions it starts,
+# whose Bash tool inherits this) the PATH you use in a terminal, or set GROVY_CLAUDE to claude's full path.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+#Environment=GROVY_CLAUDE=%h/.local/bin/claude
 Restart=on-failure
 RestartSec=2
+# Essential: if this daemon is what starts the tmux server (first "New session" from the phone), tmux is in
+# this unit's cgroup, and the default KillMode would kill tmux and every Claude session on restart or crash.
+KillMode=process
 
 [Install]
 WantedBy=default.target

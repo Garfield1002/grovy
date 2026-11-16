@@ -45,8 +45,8 @@ header { flex-wrap:wrap; }
 .dot.idle { background:var(--ok); } .dot.error { background:var(--bad); }
 .dot.working, .dot.starting { background:var(--busy); animation:breathe 2s ease-in-out infinite; }
 .dot.needs_input { background:var(--warn); animation:breathe .9s ease-in-out infinite; }
-.dot.unknown { background:var(--warn); } .dot.exited { background:var(--faint); }
-.dot.stalled { background:var(--faint); animation:none; }
+.dot.unknown { background:none; box-shadow:inset 0 0 0 2px var(--faint); } .dot.exited { background:var(--faint); }
+.dot.stalled { background:var(--busy); opacity:.45; animation:none; }   /* still working, just quiet (long tool) */
 @keyframes breathe { 0%,100% { transform:scale(1); opacity:1 } 50% { transform:scale(.6); opacity:.45 } }
 
 /* session list */
@@ -850,20 +850,27 @@ function diffBlock(oldS, newS) {
   let s = 0; while (s < a.length && s < b.length && a[s] === b[s]) s++;             // trim common head/tail
   let e = 0; while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++;
   const ctx = l => h("div", {}, l || " ");
-  const rows = [...a.slice(Math.max(0, s - 2), s).map(ctx),
-    ...a.slice(s, a.length - e).map(l => h("div", {class: "del"}, l || " ")),
-    ...b.slice(s, b.length - e).map(l => h("div", {class: "add"}, l || " ")),
-    ...a.slice(a.length - e, a.length - e + 2).map(ctx)];
-  const box = h("div", {class: "diff"});
-  const fill = n => box.replaceChildren(...rows.slice(0, n),
-    ...(rows.length > n ? [h("button", {class: "more", onclick: () => fill(rows.length)}, `show all ${rows.length} lines`)] : []));
-  fill(CAP);
-  return box;
+  // Removed and added lines are capped separately: with one shared cap, a long edit showed only red
+  // lines before the Allow button and the new code was hidden.
+  const part = (lines, cls, what) => {
+    const box = h("div", {});
+    const fill = n => box.replaceChildren(...lines.slice(0, n).map(l => h("div", {class: cls}, l || " ")),
+      ...(lines.length > n ? [h("button", {class: "more", onclick: () => fill(lines.length)}, `show all ${lines.length} ${what} lines`)] : []));
+    fill(CAP / 2);
+    return box;
+  };
+  return h("div", {class: "diff"}, a.slice(Math.max(0, s - 2), s).map(ctx),
+    part(a.slice(s, a.length - e), "del", "removed"), part(b.slice(s, b.length - e), "add", "added"),
+    a.slice(a.length - e, a.length - e + 2).map(ctx));
 }
 // Invisible/bidi characters can make a card *display* something other than what runs
 // ("echo done" vs "rm -rf"), so they're shown as visible markers everywhere on approval cards.
 const INVIS = /[­؜᠎​-‏‪-‮⁠-⁩﻿]/g;
-const vis = s => s.replace(INVIS, c => "⟨U+" + c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0") + "⟩");
+// Runs of blank lines or of spaces could push the dangerous part of a command out of view ("ls", 60 blank
+// lines, "; curl … | sh"), so they are shown as visible markers too.
+const vis = s => s.replace(INVIS, c => "⟨U+" + c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0") + "⟩")
+  .replace(/\n(?:[ \t]*\n){3,}/g, m => `\n⟨${m.split("\n").length - 2} blank lines⟩\n`)
+  .replace(/(?<=\S)[ \t]{40,}/g, m => `⟨${m.length} spaces⟩`);
 const deepVis = v => typeof v === "string" ? vis(v) : Array.isArray(v) ? v.map(deepVis)
   : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [vis(k), deepVis(x)])) : v;
 // Every field is either rendered by a special case *as the type it expects* or listed under
@@ -1063,6 +1070,8 @@ async function renderDetail(name) {
     : s.can_force ? (s.state === "unknown" ? "Claude's state is unknown (e.g. a dialog was answered in the terminal)."
         : "No activity for a while (an Esc interrupt sends no event).") + " Sending will ask first."
     : s.state === "needs_input" ? "Claude is waiting on a terminal dialog (grovy attach " + s.name + "). Messages will queue."
+    : s.state === "starting" && Date.now() / 1000 - (s.last_event || 0) > 20 ? "Still starting: Claude is probably showing "
+        + "the workspace-trust dialog for this folder. Accept it once in the terminal: grovy attach " + s.name + "."
     : "Claude is busy. Messages will queue and send when it's done.";
   $("send").disabled = s.state === "exited";
   $("resume").classList.toggle("hidden", s.state !== "exited");
@@ -1095,10 +1104,7 @@ async function loadEarlier() {
     scrollTo(0, document.documentElement.scrollHeight - y);
   } catch (e) { if (btn) btn.textContent = "Load earlier (failed, retry)"; }
 }
-async function quickSend(text) {
-  try { await api(`/api/sessions/${encodeURIComponent(view)}/prompts`, {text}); first = true; } catch (e) { say(e.message); }
-  refresh();
-}
+function quickSend(text) { fillComposer(text); }   // a stray tap while scrolling must not send anything
 const ctxLevel = c => c > 75 ? "bad" : c > 25 ? "warn" : "";   // green ≤25%, amber ≤75%, red above
 function renderMeta(m) {   // the context line; the rest of the terminal's status info is one tap away
   const el = $("meta");
@@ -1124,7 +1130,7 @@ $("meta").onclick = () => {
 function tick() {
   if (turnStart && !$("typing").classList.contains("hidden")) {
     const idle = cur ? Date.now() / 1000 - cur.last_event : 0;
-    $("elapsed").textContent = idle > STALL ? "no activity for " + mmss(idle) : mmss(Date.now() / 1000 - turnStart);
+    $("elapsed").textContent = idle > STALL ? "quiet for " + mmss(idle) + " (a long command may still be running)" : mmss(Date.now() / 1000 - turnStart);
   }
 }
 setInterval(tick, 1000);
@@ -1220,7 +1226,7 @@ function sessionMenu() {
     Object.keys(pages).length ? h("button", {class: "item", onclick: () => pagesSheet(name)}, "Pages",
       h("div", {class: "sub"}, Object.keys(pages).length + " published by Claude")) : null,
     h("button", {class: "item", onclick: () => renameSheet(name)}, "Rename"),
-    s.state !== "exited" ? h("button", {class: "item", onclick: () => {
+    s.state === "idle" || s.state === "error" ? h("button", {class: "item", onclick: () => {
         ask(`Restart "${name}"? Claude exits and resumes the same conversation (only while it's idle).`, "Restart")
           .then(yes => yes && act("restart"));
       }}, "Restart session", h("div", {class: "sub"}, "Picks up new grovy settings; only while idle")) : null,
@@ -1321,7 +1327,9 @@ async function newSession(state = {}) {
           h("div", {class: "sub"}, `${c.messages} message${c.messages === 1 ? "" : "s"} · ${ago(c.mtime) || "now"}`,
             c.open_in ? " · open " + (c.open_in === "terminal" ? "in a terminal" : "in " + c.open_in.slice(4)) : "")))))] : []));
   };
-  const draw = () => list.replaceChildren(...folders.filter(f => f.toLowerCase().includes(filter.value.toLowerCase())).map(f =>
+  const draw = () => list.replaceChildren(...(!folders.length ? [h("div", {class: "sys", style: "padding:12px 4px;text-align:left"},
+      "No trusted folders yet. On the computer, run claude once in a project folder and accept its trust prompt; "
+      + "the folder then appears here.")] : []), ...folders.filter(f => f.toLowerCase().includes(filter.value.toLowerCase())).map(f =>
     h("button", {class: "item" + (f === picked ? " sel" : ""), onclick: () => {
       picked = f; if (!name.value || name.dataset.auto) { name.value = unique(base(f)); name.dataset.auto = "1"; }
       draw(); valid(); loadConvs(); }},

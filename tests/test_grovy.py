@@ -40,7 +40,7 @@ class StoreCase(unittest.TestCase):
         self.live = {"a": "%1", "b": "%2"}
         self.pasted = []
         self.store = grovyd.Store(self.dir, tmux_live=lambda: dict(self.live),
-                                paste=lambda n, t: self.pasted.append((n, t)))
+                                paste=lambda n, t, *a, **k: self.pasted.append((n, t)))
         self.reg = mock.patch.object(grovy, "registry", lambda: {"a": {"cwd": "/a"}, "b": {"cwd": "/b"}})
         self.reg.start()
         self.store.reconcile()
@@ -135,7 +135,7 @@ class TestHookAdapter(unittest.TestCase):
             rc, out = self.run_hook(json.dumps(ev("SessionStart", source=src)), exc=OSError("daemon down"))
             ctx = json.loads(out)["hookSpecificOutput"]
             self.assertEqual(ctx["hookEventName"], "SessionStart")
-            self.assertIn("`widget`", ctx["additionalContext"])
+            self.assertIn("```widget", ctx["additionalContext"])
             self.assertIn('"type":"chart"', ctx["additionalContext"])
         self.assertEqual(self.run_hook(json.dumps(ev("Stop")))[1], "")
         with mock.patch.dict(os.environ, {"GROVY_WIDGETS": "0"}):
@@ -247,7 +247,7 @@ class TestEventLog(unittest.TestCase):
         d = tempfile.mkdtemp(dir=TMP)
         pasted = []
         with mock.patch.object(grovy, "registry", lambda: {"a": {"cwd": "/"}}):
-            s = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda n, t: pasted.append(t))
+            s = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda n, t, *a, **k: pasted.append(t))
             s.ingest("a", ev("SessionStart"))
             s.ingest("a", ev("UserPromptSubmit", prompt="busy"))           # working, fresh
             s.enqueue("a", "later", force=True)                            # can't type now
@@ -255,7 +255,7 @@ class TestEventLog(unittest.TestCase):
             s.sessions["a"]["state"] = "unknown"
             s.try_deliver("a")
             s.open_permission("a", ev("PermissionRequest", tool_name="Bash"))
-            s2 = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda n, t: pasted.append(t))
+            s2 = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda n, t, *a, **k: pasted.append(t))
             s2.reconcile()
             time.sleep(0.1)
         self.assertEqual(pasted, [])
@@ -386,7 +386,7 @@ class TestCommands(StoreCase):
         self.store.ingest("a", ev("SessionStart"))
         self.store.sessions["a"]["cwd"] = self.proj
         grovyd._cmd_cache.clear()
-        self.store.paste = lambda n, t, command=False: self.pasted.append((n, t, command))
+        self.store.paste = lambda n, t, command=False, **k: self.pasted.append((n, t, command))
 
     def test_discovery(self):
         names = {c["name"]: c for c in grovyd.commands_for(self.proj)}
@@ -570,7 +570,7 @@ class TestReviewRegressions(StoreCase):
 class TestSecondPassRegressions(StoreCase):
     def test_slow_phone_compact_is_not_unconfirmed(self):
         """A /compact from the phone took 87s; its receipt (SessionStart) only comes when it finishes."""
-        self.store.paste = lambda n, t, command=False: self.pasted.append((n, t))
+        self.store.paste = lambda n, t, command=False, **k: self.pasted.append((n, t))
         self.store.ingest("a", ev("SessionStart"))
         self.assertEqual(self.store.enqueue("a", "/compact")[0], 200)
         self.wait_pasted(1)
@@ -706,6 +706,67 @@ class TestForget(StoreCase):
             self.assertNotIn("b", regs)
             self.assertNotIn("b", self.store.sessions)
             self.assertEqual(self.store.forget("zz")[0], 404)
+
+
+class TestSecurityReview(StoreCase):
+    def test_permission_mid_typing_stops_before_enter(self):
+        """A turn Claude starts by itself (e.g. a background task finished) opens a permission dialog while
+        we type: the final Enter would answer it. Typing must stop and the request stay pending."""
+        self.store.ingest("a", ev("SessionStart"))
+        seen = []
+        def paste(n, t, command=False, abort=None):
+            self.assertIsNone(abort())
+            self.store.ingest("a", ev("UserPromptSubmit", prompt="<task-notification>done</task-notification>"))
+            self.store.open_permission("a", ev("PermissionRequest", tool_name="Bash", tool_input={"command": "rm x"}))
+            seen.append(abort())
+            raise grovy.PasteAborted(seen[-1])
+        self.store.paste = paste
+        self.store.enqueue("a", "hello")
+        for _ in range(100):
+            if self.store.prompts[0]["status"] != "injected":
+                break
+            time.sleep(0.01)
+        self.assertIn("permission request", seen[0])
+        p = self.store.prompts[0]
+        self.assertEqual(p["status"], "failed")
+        self.assertIn("Enter was not pressed", p["error"])
+        self.assertEqual(self.store.sessions["a"]["state"], "needs_input")   # not overwritten with "unknown"
+        self.assertEqual(len(self.store._pending("a")), 1)
+
+    def test_other_turn_mid_typing_stops(self):
+        self.store.ingest("a", ev("SessionStart"))
+        reasons = []
+        def paste(n, t, command=False, abort=None):
+            self.store.ingest("a", ev("UserPromptSubmit", prompt="<agent-message from=x>hi</agent-message>"))
+            reasons.append(abort())
+        self.store.paste = paste
+        self.store.enqueue("a", "hello")
+        for _ in range(100):
+            if reasons:
+                break
+            time.sleep(0.01)
+        self.assertIn("something else", reasons[0])
+
+    def test_statusline_ignores_settings_in_claude_cwd(self):
+        home = tempfile.mkdtemp(dir=TMP)
+        proj, evil = os.path.join(home, "proj"), os.path.join(home, "proj", "cloned")
+        marker = os.path.join(home, "PWNED")
+        for d, cmd in ((proj, "echo OWN"), (evil, f"touch {marker}; echo EVIL")):
+            os.makedirs(os.path.join(d, ".claude"))
+            with open(os.path.join(d, ".claude", "settings.json"), "w") as f:
+                json.dump({"statusLine": {"type": "command", "command": cmd}}, f)
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": os.path.join(home, "cfg")}), \
+                mock.patch.object(grovy, "registry", lambda: {"s1": {"cwd": proj}}), \
+                mock.patch.object(grovy, "sock_request", mock.Mock(side_effect=OSError("down"))), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps({"cwd": evil}))), redirect_stdout(out):
+            grovy.cmd_statusline("s1")
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(out.getvalue().strip(), "OWN")   # the session's own project settings still apply
+
+    def test_sharing_is_not_in_the_cli(self):
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+            grovy.main(["page", "share", "x"])
 
 
 class TestPages(StoreCase):
@@ -1067,6 +1128,31 @@ class TestHttp(unittest.TestCase):
         self.assertEqual(self.req(f"/api/pages/{p['id']}/share", {"shared": "yes"})[0], 400)
         self.assertEqual(self.req(f"/api/pages/{p['id']}/share", {"shared": False})[0], 200)
 
+    def test_idle_connections_cannot_lock_out_the_phone(self):
+        class Small(grovyd.HttpServer):
+            MAX_CONNECTIONS = 4
+        srv = Small(("127.0.0.1", 0), grovyd.Http)
+        srv.store, srv.token = self.store, ""
+        srv.index, srv.csp = grovyd.load_index()
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        port = srv.server_address[1]
+        try:
+            idle = [socket.create_connection(("127.0.0.1", port)) for _ in range(6)]   # no token, no request
+            time.sleep(0.8)
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/sessions", timeout=5) as r:
+                self.assertEqual(r.status, 200)
+            [x.close() for x in idle]
+        finally:
+            srv.stopping = True
+            srv.shutdown()
+
+    def test_unknown_host_gets_a_readable_page(self):
+        code, body, h = self.req("/", headers={"Host": "box.<b>tail</b>.ts.net:7333"})
+        self.assertEqual(code, 403)
+        self.assertIn("text/html", h["Content-Type"])
+        self.assertIn(b"GROVY_HOSTS=box.&lt;b&gt;tail&lt;/b&gt;.ts.net", body)
+        self.assertNotIn(b"<b>tail", body)
+
     def test_slowloris_deadline_and_connection_cap(self):
         class Small(grovyd.HttpServer):
             MAX_CONNECTIONS = 3
@@ -1246,6 +1332,27 @@ class TestTmuxIntegration(unittest.TestCase):
                 return out
             time.sleep(0.05)
         self.fail(f"{needle!r} not seen in:\n{grovy.capture(name)}")
+
+    def test_typing_stops_without_enter_when_aborted(self):
+        grovy.start_session("ab1", self.proj)
+        self.wait_for("ab1", "READY")
+        calls = []
+        def abort():
+            calls.append(1)
+            return "Claude opened a permission request" if len(calls) >= 2 else None
+        with self.assertRaises(grovy.PasteAborted):
+            grovy.paste_prompt("ab1", "x" * (grovy.TYPE_CHUNK * 4), abort=abort)
+        time.sleep(0.5)
+        self.assertNotIn("GOT[", grovy.capture("ab1"))   # Enter never pressed
+        self.assertEqual(len(calls), 2)                    # stopped right after the chunk where it changed
+        grovy.kill_session("ab1")
+
+    def test_widgets_opt_out_reaches_the_session(self):
+        with mock.patch.dict(os.environ, {"GROVY_WIDGETS": "0"}):
+            grovy.start_session("ow1", self.proj)
+        out = grovy.tmux("show-environment", "-t", "=grovy-ow1", "GROVY_WIDGETS", check=False).stdout
+        self.assertEqual(out.strip(), "GROVY_WIDGETS=0")
+        grovy.kill_session("ow1")
 
     def test_lifecycle_and_literal_delivery(self):
         grovy.start_session("it1", self.proj)

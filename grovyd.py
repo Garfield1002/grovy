@@ -18,6 +18,7 @@ import re
 import secrets
 import select
 import shlex
+import shutil
 import socketserver
 import subprocess
 import sys
@@ -25,6 +26,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from html import escape as html_escape
 from urllib.parse import urlsplit, parse_qs
 
 import grovy
@@ -816,19 +818,34 @@ class Store:
         self.publish(name)
         threading.Thread(target=self._paste, args=(p,), daemon=True).start()
 
+    def _still_safe(self, p):
+        """Asked by the typing loop between chunks and before Enter: a reason to stop, or None."""
+        with self.lock:
+            s = self.sessions.get(p["session"])
+            if p["status"] != "injected":
+                return "the prompt was cancelled"
+            if self._pending(p["session"]):
+                return "Claude opened a permission request while the prompt was being typed"
+            if not s or s["state"] != "working" or s["activity"] not in DELIVERY_ACTIVITY.values():
+                return "Claude started something else while the prompt was being typed"
+        return None
+
     def _paste(self, p):
+        aborted = False
         try:
-            if p.get("command"):
-                self.paste(p["session"], p["text"], True)
-            else:
-                self.paste(p["session"], p["text"])
+            self.paste(p["session"], p["text"], bool(p.get("command")), abort=lambda: self._still_safe(p))
             err = None
+        except grovy.PasteAborted as e:  # never pressed Enter; the partial text may be left in the input
+            err, aborted = str(e), True
         except Exception as e:  # tmux failure, session gone, pane reused...
             err = str(e)
         with self.lock:
             if err and p["status"] == "injected":
-                p["status"], p["error"], p["updated"] = "failed", err, now()
-                self._set(p["session"], "unknown", f"prompt delivery failed: {err}")
+                p["status"], p["updated"] = "failed", now()
+                p["error"] = (err + ". Enter was not pressed; part of it may be left in the terminal input "
+                              "(check it: grovy attach " + p["session"] + ")") if aborted else err
+                if not aborted:
+                    self._set(p["session"], "unknown", f"prompt delivery failed: {err}")
             self._save_prompts()
         self.publish(p["session"])
 
@@ -1117,7 +1134,8 @@ class SockHandler(socketserver.StreamRequestHandler):
             else:
                 store.ingest(name, payload)
         elif t == "status":
-            self._reply({"sessions": {s["name"]: s for s in store.list_sessions()}, "url": self.server.url})
+            self._reply({"sessions": {s["name"]: s for s in store.list_sessions()}, "url": self.server.url,
+                         "claude": shutil.which(grovy.claude_cmd())})
         elif t == "refresh":
             store.reconcile()
         elif t == "statusline":
@@ -1135,14 +1153,9 @@ class SockHandler(socketserver.StreamRequestHandler):
                     res["url"] = (self.server.url or "").rstrip("/") + "/p/" + res["id"]
             elif op == "ls":
                 code, res = 200, store.list_pages(session or None)
-            elif op in ("rm", "share", "unshare"):
+            elif op == "rm":   # sharing is deliberately not here: only the phone (a person) can share a page
                 pid = next((p["id"] for p in store.list_pages(session) if p["name"] == msg.get("name")), None)
-                if not pid:
-                    code, res = 404, "no such page in this session"
-                elif op == "rm":
-                    code, res = store.delete_page(pid, session)
-                else:
-                    code, res = store.share_page(pid, op == "share")
+                code, res = store.delete_page(pid, session) if pid else (404, "no such page in this session")
             else:
                 code, res = 400, "unknown page op"
             self._reply({"ok": res} if code == 200 else {"error": res})
@@ -1204,6 +1217,11 @@ PAGE_CSP = ("sandbox allow-scripts allow-forms allow-modals allow-downloads; def
 PAGE_BRIDGE = (b"<script>window.grovy={send:function(t){if(window.parent===window){alert('Open this page from grovy "
                b"to send it to Claude.');return}window.parent.postMessage({grovy:'send',text:String(t)},'*')}};</script>")
 REQ_ID_RE = re.compile(r"[A-Za-z0-9-]{16,64}")
+HOST_PAGE = (b"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+             b"<title>grovy</title><body style='font:16px system-ui;padding:24px;max-width:30em'>"
+             b"<h2>grovy doesn't know the name &ldquo;{host}&rdquo;</h2><p>To protect against DNS rebinding, grovy only "
+             b"answers to IP addresses and names it was told about. Either open it by IP address, or restart the "
+             b"daemon with <code>GROVY_HOSTS={host}</code> in its environment.</p>")
 LOGIN_PAGE = (b"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
               b"<title>grovy</title><body style='font:16px system-ui;padding:24px;max-width:30em'>"
               b"<h2>grovy: login needed</h2><p>Open the link printed by <code>grovy url</code> on the machine "
@@ -1262,14 +1280,17 @@ class Http(http.server.BaseHTTPRequestHandler):
         t = self._deadline = threading.Timer(self.HEADER_DEADLINE, self._abort)
         t.daemon = True
         t.start()
+        self.server.waiting_add(self)
         try:
             super().handle_one_request()
         finally:
             t.cancel()
+            self.server.waiting_remove(self)
 
     def parse_request(self):
         ok = super().parse_request()  # reads the headers; past this point the deadline no longer applies
         self._deadline.cancel()
+        self.server.waiting_remove(self)
         return ok
 
     def _abort(self):
@@ -1294,6 +1315,9 @@ class Http(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if not self._host_ok():
+            host = (self.headers.get("Host") or "").rsplit(":", 1)[0][:100]
+            if urlsplit(self.path).path == "/":
+                return self._send(403, HOST_PAGE.replace(b"{host}", html_escape(host).encode()), "text/html")
             return self._err(403, "unknown Host header (add the name to GROVY_HOSTS)")
         url = urlsplit(self.path)
         path = url.path
@@ -1518,15 +1542,43 @@ class HttpServer(http.server.ThreadingHTTPServer):
     allowed_hosts = {"localhost"}
     MAX_CONNECTIONS = 64
 
+    WAITING_PER_IP = 8   # connections from one address that haven't sent a request yet
+
     def server_activate(self):
         super().server_activate()
         self.done = {}  # X-Request-Id -> outcome of an action (idempotent retries)
         self._slots = threading.BoundedSemaphore(self.MAX_CONNECTIONS)
+        self._waiting = {}   # handler -> (since, client ip): connected, request not yet received
+        self._wlock = threading.Lock()
+
+    def waiting_add(self, handler):
+        with self._wlock:
+            ip = handler.client_address[0]
+            mine = sorted((t, h) for h, (t, i) in self._waiting.items() if i == ip)
+            self._waiting[handler] = (time.monotonic(), ip)
+        for _, h in mine[:max(0, len(mine) + 1 - self.WAITING_PER_IP)]:
+            h._abort()
+
+    def waiting_remove(self, handler):
+        with self._wlock:
+            self._waiting.pop(handler, None)
+
+    def _evict_idle(self):
+        """At the cap, close the connection that has waited longest without sending a request. A real
+        request arrives within milliseconds of connecting, so idle sockets held open by someone without
+        the token can't lock the phone out (they used to fill all slots for HEADER_DEADLINE each)."""
+        with self._wlock:
+            idle = [(t, h) for h, (t, _) in self._waiting.items() if time.monotonic() - t > 0.5]
+        if idle:
+            min(idle, key=lambda x: x[0])[1]._abort()
+            return True
+        return False
 
     def process_request(self, request, client_address):
         if not self._slots.acquire(blocking=False):  # connection cap: refuse instead of spawning threads
-            self.shutdown_request(request)
-            return
+            if not (self._evict_idle() and self._slots.acquire(timeout=1.0)):
+                self.shutdown_request(request)
+                return
         try:
             super().process_request(request, client_address)
         except Exception:
