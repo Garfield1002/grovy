@@ -263,6 +263,15 @@ session's own project folder, never in the folder Claude happens to be in: a clo
 must not get its command run without Claude's trust dialog. Sessions started before this existed report it after
 their next start.
 
+**Desktop.** At 1000px wide or more, a conversation gets a sidebar with all sessions (state dot, pending-request
+badge, last activity), refreshed on any session's event at most every 400ms and only fetched while it's shown. Keyboard:
+Ctrl/Cmd+Enter sends (Enter stays a new line, as on the phone); typing with nothing focused goes to the message box;
+Alt+↑/↓ switch to the previous/next session; Esc closes a sheet or the page viewer, else the `/` picker, else leaves
+the box. In the `/` picker the first command is highlighted; ↑/↓ move, Tab or Enter completes. Sheets take focus, keep Tab inside, and give it back
+when closed. With a mouse (`pointer: fine`), opening a session focuses the message box; never on a touch screen (it would
+pop the keyboard), and permission cards are never focused automatically, so a stray Enter can't answer one. Live
+re-renders keep keyboard focus on the same control (`paint()`, matching rebuilt rows by `data-fk`).
+
 **Widgets.** Claude's reply can contain ` ```widget ` blocks holding one JSON object: `chart` (bar, line, pie),
 `stats`, `progress`, `checklist`, `choices`, `form`, `diagram` or `image`. The page draws them itself with DOM and SVG;
 nothing from Claude is run or parsed as HTML. Invalid JSON or an unknown type shows "Widget not shown: <reason>"

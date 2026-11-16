@@ -278,7 +278,7 @@ textarea:focus { border-color:var(--mut); }
 #stop i { width:14px; height:14px; border-radius:3px; background:currentColor; }
 #picker { display:flex; flex-direction:column; gap:2px; margin:0 0 8px; max-height:40vh; overflow-y:auto; }
 #picker:empty { display:none; }
-.cmd { text-align:left; border:0; background:var(--card); border-radius:10px; padding:8px 12px; min-height:44px; }
+.cmd { flex:none; text-align:left; border:0; background:var(--card); border-radius:10px; padding:8px 12px; min-height:44px; }
 .cmd b { font:600 14px ui-monospace, SFMono-Regular, Menlo, monospace; } .cmd span { display:block; font-size:12.5px; color:var(--mut); }
 #send svg { width:20px; height:20px; }
 /* pages: Claude-made HTML, shown full-screen in a sandboxed frame */
@@ -361,6 +361,37 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
 .dg .el { font-size:11px; paint-order:stroke; stroke:var(--card); stroke-width:4px; stroke-linejoin:round; }
 @keyframes flash { from { box-shadow:0 0 0 3px var(--busy); } to { box-shadow:0 0 0 3px transparent; } }
 #input.flash { animation:flash 1.2s ease-out; }
+/* keyboard: a visible ring on whatever Tab reached (text boxes show focus with their border instead) */
+:focus-visible { outline:2px solid var(--busy); outline-offset:2px; }
+textarea:focus-visible, input:focus-visible { outline:none; }
+.sess:focus-visible, .item:focus-visible, .srow:focus-visible { outline-offset:-2px; border-radius:10px; }
+.cmd.on { background:color-mix(in srgb, var(--busy) 14%, var(--card)); box-shadow:inset 3px 0 0 var(--busy); }
+.cmd:focus-visible { outline-offset:-2px; }   /* the list scrolls: an outer ring would be clipped */
+
+/* sidebar: the other sessions, beside a conversation on a wide screen */
+#side { display:none; }
+@media (min-width: 1000px) {
+  body:not(.home) { padding-left:280px; }
+  body:not(.home) #side { display:flex; flex-direction:column; position:fixed; left:0; top:0; bottom:0; width:280px; z-index:6;
+    background:var(--bg); border-right:1px solid var(--line); padding-top:env(safe-area-inset-top); }
+  body:not(.home) #back { display:none; }
+  body:not(.home) #err { left:292px; }
+}
+#side .sh { display:flex; align-items:center; gap:8px; padding:3px 6px 3px 14px; min-height:46px; border-bottom:1px solid var(--line); }
+#side .sh a { flex:1; font-weight:650; font-size:17px; color:inherit; text-decoration:none; }
+#slist { flex:1; overflow-y:auto; padding:6px; }
+.srow { display:flex; gap:10px; align-items:flex-start; width:100%; text-align:left; border:0; background:none;
+  padding:8px 8px; border-radius:10px; }
+.srow:hover { background:var(--code); }
+.srow.cur { background:color-mix(in srgb, var(--busy) 13%, var(--bg)); }
+.srow .dot { margin-top:6px; }
+.srow .body { flex:1; min-width:0; }
+.srow .top { display:flex; gap:6px; align-items:baseline; }
+.srow .name { font-weight:650; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.srow .when { font-size:12px; color:var(--mut); flex:none; }
+.srow .sub { font-size:12.5px; color:var(--mut); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.srow .badge { font-size:11px; font-weight:700; color:#fff; background:var(--warn); border-radius:99px; padding:0 7px; }
+#side .keys { font-size:12px; color:var(--faint); padding:8px 14px 12px; border-top:1px solid var(--line); }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation:none !important; transition:none !important; } }
 </style>
 </head>
@@ -375,6 +406,9 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
   <button id="menu" class="hbtn hidden" aria-label="Menu">⋯</button>
   <button id="meta" class="hidden" aria-label="Context used: tap for details"><i><b></b></i></button>
 </header>
+<nav id="side" aria-label="Sessions"><div class="sh"><a href="#/">Sessions</a>
+  <button id="sadd" class="hbtn" aria-label="New session">＋</button></div><div id="slist"></div>
+  <div class="keys">Ctrl+Enter send · Alt+↑↓ switch · Esc close</div></nav>
 <div id="backdrop" aria-hidden="true"></div>
 <main id="main"></main>
 <div id="typing" class="hidden">
@@ -443,6 +477,18 @@ const LABEL = {needs_input: "needs you", idle: "idle", working: "working", start
                exited: "exited", unknown: "unknown", error: "error"};
 const unwrap = t => String(t || "").replace(/<\/?pasted_content[^>]*>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 const STALL = 60;
+const dotClass = s => "dot " + s.state + (s.state === "working" && serverNow() - s.last_event > STALL ? " stalled" : "")
+  + (s.background && s.state === "idle" ? " bg" : "");
+// replaceChildren, but keyboard focus stays on the same control (or on its rebuilt twin, matched by data-fk):
+// live updates re-render often, and losing focus each time would make Tab navigation useless
+function paint(box, ...kids) {
+  const a = document.activeElement, had = a && a !== document.body && box.contains(a) ? a : null;
+  const key = had && had.getAttribute("data-fk");
+  box.replaceChildren(...kids);
+  if (!had) return;
+  const t = had.isConnected ? had : key ? [...box.querySelectorAll("[data-fk]")].find(x => x.getAttribute("data-fk") === key) : null;
+  if (t) t.focus({preventScroll: true});
+}
 const ATTACHED = /^Attached: (\/\S.*)$/;   // how a message names a file sent from the phone (see the composer)
 const attName = p => p.split("/").pop().replace(/^\d{8}-\d{6}-[0-9a-f]{4}-/, "");
 const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
@@ -923,10 +969,9 @@ async function renderList() {
     all.length > shown.length ? h("button", {class: "earlier", onclick: () => { showAllPages = true; refresh(); }},
       `Show all ${all.length} pages`) : null] : [];
   document.title = "grovy" + (sessions.some(s => s.pending_permissions || s.state === "needs_input") ? " (!)" : "");
-  main.replaceChildren(...(sessions.length ? sessions.map(s => {
-    const stalled = s.state === "working" && serverNow() - s.last_event > STALL;
-    return h("button", {class: "sess", onclick: () => go("#/s/" + s.name)},
-      h("span", {class: "dot " + s.state + (stalled ? " stalled" : "") + (s.background && s.state === "idle" ? " bg" : "")}),
+  paint(main, ...(sessions.length ? sessions.map(s => {
+    return h("button", {class: "sess", "data-fk": "s:" + s.name, onclick: () => go("#/s/" + s.name)},
+      h("span", {class: dotClass(s)}),
       h("div", {class: "body"},
         h("div", {class: "top"}, h("span", {class: "name"}, s.name),
           s.pending_permissions ? h("span", {class: "badge"}, s.pending_permissions + " waiting") : null,
@@ -935,7 +980,7 @@ async function renderList() {
           s.queued_prompts ? ` · ${s.queued_prompts} queued` : "", s.background && s.state !== "exited" ? ` · ${s.background} running` : "",
           s.meta && s.meta.context != null && s.state !== "exited" ? ` · context ${s.meta.context}%` : ""),
         s.activity ? h("div", {class: "prev"}, s.activity) : null),
-      s.state === "exited" ? h("span", {class: "rm", role: "button", "aria-label": "Remove " + s.name,
+      s.state === "exited" ? h("span", {class: "rm", role: "button", tabindex: "0", "data-fk": "rm:" + s.name, "aria-label": "Remove " + s.name,
         onclick: ev => { ev.stopPropagation(); removeSessions([s.name]); }}, "Remove") : null);
   }) : [h("div", {class: "empty"}, "No sessions yet. Tap ＋ to start one.")]),
     ...(() => { const dead = sessions.filter(s => s.state === "exited").map(s => s.name);
@@ -1267,7 +1312,7 @@ async function renderDetail(name) {
   for (const p of outgoing.filter(p => !live(p))) items.push([p.created, cached("p" + p.id + p.status, () => promptNode(p))]);
   items.sort((a, b) => a[0] - b[0]);
   const earlier = d.events.length >= 100 && !noMore ? cached("earlier", () => h("button", {class: "earlier", onclick: loadEarlier}, "Load earlier")) : null;
-  main.replaceChildren(...(earlier ? [earlier] : []), ...(items.length ? items.map(x => x[1]) : [h("div", {class: "empty"}, "No activity yet.")]),
+  paint(main, ...(earlier ? [earlier] : []), ...(items.length ? items.map(x => x[1]) : [h("div", {class: "empty"}, "No activity yet.")]),
     ...outgoing.filter(live).map(p => cached("p" + p.id + p.status + (p.typed ? "t" : ""), () => promptNode(p))),
     ...d.permissions.map(p => cached("perm" + p.id + p.status, () => permNode(p))));
 
@@ -1524,7 +1569,7 @@ function picker() {
   const q = v.slice(1).toLowerCase();
   const hits = commands.filter(c => c.name.toLowerCase().startsWith(q))
     .concat(commands.filter(c => !c.name.toLowerCase().startsWith(q) && c.name.toLowerCase().includes(q))).slice(0, 8);
-  pk.replaceChildren(...(hits.length ? hits.map(c => h("button", {class: "cmd", onclick: () => {
+  pk.replaceChildren(...(hits.length ? hits.map((c, i) => h("button", {class: "cmd" + (i ? "" : " on"), onclick: () => {
       input.value = "/" + c.name + " "; pk.replaceChildren(); input.focus(); autosize();
       try { localStorage.setItem(draftKey(), input.value); } catch (e) {}
     }}, h("b", {}, "/" + c.name), c.description ? h("span", {}, c.description) : null))
@@ -1537,9 +1582,13 @@ input.addEventListener("input", () => { if (input.value.trim()) $("quick").repla
 // In-page dialogs: Chrome's native confirm()/alert() freeze the page, which then lags catching up afterwards.
 let sheetDone = null;   // resolves the open ask() with false when the sheet is dismissed any other way
 function openSheet(...kids) { if (sheetDone) { const d = sheetDone; sheetDone = null; d(false); }
-  $("sheetbody").replaceChildren(...kids.flat().filter(k => k != null && k !== false)); $("sheet").classList.remove("hidden"); }
-function closeSheet() { $("sheet").classList.add("hidden"); $("sheetbody").replaceChildren();
-  if (sheetDone) { const d = sheetDone; sheetDone = null; d(false); } }
+  if (!sheetOpen()) sheetReturn = document.activeElement;
+  $("sheetbody").replaceChildren(...kids.flat().filter(k => k != null && k !== false)); $("sheet").classList.remove("hidden");
+  focusSheet(); }
+function closeSheet() { const was = sheetOpen(); $("sheet").classList.add("hidden"); $("sheetbody").replaceChildren();
+  if (sheetDone) { const d = sheetDone; sheetDone = null; d(false); }
+  if (was && sheetReturn && sheetReturn.isConnected && sheetReturn !== document.body) sheetReturn.focus({preventScroll: true});
+  sheetReturn = null; }
 function ask(msg, ok, {danger = false, cancel = "Cancel"} = {}) {
   return new Promise(res => {
     openSheet(h("p", {style: "margin:4px 0 16px;white-space:pre-line"}, msg),
@@ -1760,6 +1809,109 @@ async function newSession(state = {}) {
 }
 $("add").onclick = newSession;
 
+// ---------------------------------------------------------------- sidebar (wide screens)
+// Beside a conversation, the other sessions stay in view. Only fetched while it's shown.
+const wide = matchMedia("(min-width: 1000px)"), finePointer = matchMedia("(pointer: fine)");
+let sideTimer = null, sideList = [];
+function refreshSide(now = false) {
+  if (!view || !wide.matches || (sideTimer && !now)) return;
+  clearTimeout(sideTimer);
+  sideTimer = setTimeout(() => { sideTimer = null; renderSide().catch(() => {}); }, now ? 0 : 400);
+}
+async function renderSide() {
+  const {sessions, now: srv} = await api("/api/sessions");
+  if (typeof srv === "number") skew = srv - Date.now() / 1000;
+  sideList = sessions;
+  if (!view) return;
+  paint($("slist"), ...sessions.map(s => h("button", {class: "srow" + (s.name === view ? " cur" : ""), "data-fk": "s:" + s.name,
+      "data-name": s.name, ...(s.name === view ? {"aria-current": "page"} : {}), onclick: () => go("#/s/" + s.name)},
+    h("span", {class: dotClass(s)}),
+    h("div", {class: "body"},
+      h("div", {class: "top"}, h("span", {class: "name"}, s.name),
+        s.pending_permissions ? h("span", {class: "badge"}, String(s.pending_permissions)) : null,
+        h("span", {class: "when"}, ago(s.last_event))),
+      h("div", {class: "sub"}, s.state === "idle" || s.state === "working" ? s.activity || LABEL[s.state] : LABEL[s.state] || s.state)))));
+}
+function markSide() {   // highlight the open session at once, before the next fetch
+  for (const r of $("slist").children) {
+    const on = r.getAttribute("data-name") === view;
+    r.classList.toggle("cur", on);
+    if (on) { r.setAttribute("aria-current", "page"); r.scrollIntoView({block: "nearest"}); } else r.removeAttribute("aria-current");
+  }
+}
+wide.addEventListener("change", () => refreshSide(true));
+$("sadd").onclick = newSession;
+async function stepSession(d) {   // Alt+↑/↓: the previous/next session, in the list's order
+  let list = sideList;
+  if (!wide.matches || !list.length) { try { list = sideList = (await api("/api/sessions")).sessions; } catch (e) { return; } }
+  if (!list.length) return;
+  const i = list.findIndex(s => s.name === view);
+  const j = i < 0 ? (d > 0 ? 0 : list.length - 1) : (i + d + list.length) % list.length;
+  if (list[j].name !== view) go("#/s/" + list[j].name);
+}
+
+// ---------------------------------------------------------------- keyboard
+const sheetOpen = () => !$("sheet").classList.contains("hidden");
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([type=hidden]), textarea, select, [tabindex]:not([tabindex="-1"])';
+const visibleIn = box => [...box.querySelectorAll(FOCUSABLE)].filter(e => e.offsetParent !== null || e === document.activeElement);
+input.addEventListener("keydown", e => {
+  if (e.isComposing) return;
+  const hits = [...$("picker").querySelectorAll(".cmd")];
+  if (hits.length && ["ArrowDown", "ArrowUp", "Tab", "Enter"].includes(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    let i = hits.findIndex(b => b.classList.contains("on"));
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      i = i < 0 ? (e.key === "ArrowDown" ? 0 : hits.length - 1) : (i + (e.key === "ArrowDown" ? 1 : -1) + hits.length) % hits.length;
+      hits.forEach((b, k) => b.classList.toggle("on", k === i));
+      hits[i].scrollIntoView({block: "nearest"});
+      return;
+    }
+    if (e.shiftKey) return;
+    e.preventDefault(); (hits[i < 0 ? 0 : i]).click();   // Tab or Enter completes the highlighted command (the first by default)
+    return;
+  }
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (!$("send").disabled) $("send").click(); return; }
+  if (e.key === "Escape" && !sheetOpen() && !viewing) {
+    if ($("picker").childElementCount) $("picker").replaceChildren(); else input.blur();
+  }
+});
+document.addEventListener("keydown", e => {
+  if (e.defaultPrevented || e.isComposing) return;
+  const a = document.activeElement;
+  if (e.key === "Escape") {
+    if (sheetOpen()) { e.preventDefault(); return closeSheet(); }
+    if (viewing) { e.preventDefault(); return $("vclose").click(); }
+    return;
+  }
+  if (sheetOpen() && e.key === "Tab") {   // keep Tab inside the open sheet
+    const f = visibleIn($("sheet"));
+    if (!f.length) return;
+    const i = f.indexOf(a);
+    if (i < 0 || (e.shiftKey && i === 0) || (!e.shiftKey && i === f.length - 1)) {
+      e.preventDefault(); f[e.shiftKey ? f.length - 1 : 0].focus();
+    }
+    return;
+  }
+  if ((e.key === "Enter" || e.key === " ") && a && a.getAttribute("role") === "button" && a.tagName !== "BUTTON") {
+    e.preventDefault(); a.click(); return;
+  }
+  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && !sheetOpen() && !viewing) {
+    e.preventDefault(); stepSession(e.key === "ArrowDown" ? 1 : -1); return;
+  }
+  // typing with nothing focused goes to the message box
+  if (view && !sheetOpen() && !viewing && (!a || a === document.body) && e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.metaKey && !e.altKey
+      && !$("composer").classList.contains("hidden") && !document.querySelector("#composer .cr").classList.contains("hidden")) {
+    input.focus();   // the key itself then lands in the box
+  }
+});
+let sheetReturn = null;   // what had focus before a sheet opened; it gets it back when the sheet closes
+function focusSheet() {
+  if (!$("sheet").contains(document.activeElement)) {
+    const f = visibleIn($("sheetbody"));
+    if (f.length) f[0].focus({preventScroll: true});
+  }
+}
+
 // ---------------------------------------------------------------- routing + live updates
 function go(hash) { location.hash = hash; }
 function route() {
@@ -1776,6 +1928,11 @@ function route() {
   main.replaceChildren();
   $("picker").replaceChildren(); commands = [];
   if (view) { try { input.value = localStorage.getItem(draftKey()) || ""; } catch (e) { input.value = ""; } autosize(); loadAtts(); loadCommands(); }
+  document.body.classList.toggle("home", !view);
+  if (view) { $("title").setAttribute("tabindex", "0"); $("title").setAttribute("role", "button"); }
+  else { $("title").removeAttribute("tabindex"); $("title").removeAttribute("role"); }
+  if (view) { markSide(); refreshSide(true); }
+  if (view && finePointer.matches) input.focus({preventScroll: true});   // a desktop: ready to type (a phone would pop its keyboard)
   refresh();
 }
 function refresh() {
@@ -1804,11 +1961,11 @@ addEventListener("hashchange", route);
 // ---------------------------------------------------------------- pages
 function pageCard(id, title, sub, deletable = false) {
   const gone = !pages[id];
-  return h("button", {class: "pagecard" + (gone ? " gone" : ""), onclick: () => gone ? null : openPage(id)},
+  return h("button", {class: "pagecard" + (gone ? " gone" : ""), "data-fk": "pg:" + id, onclick: () => gone ? null : openPage(id)},
     lockIcon(!gone && !!pages[id].share), h("div", {}, h("b", {}, title || "page"),
       h("span", {}, gone ? "deleted" : sub + (pages[id].share ? " · public" : " · private"))),
     gone ? null : deletable
-      ? h("span", {class: "rm", role: "button", "aria-label": "Delete " + (title || "page"),
+      ? h("span", {class: "rm", role: "button", tabindex: "0", "data-fk": "pgrm:" + id, "aria-label": "Delete " + (title || "page"),
           onclick: ev => { ev.stopPropagation(); deletePage(id, title); }}, "Delete")
       : h("span", {class: "go"}, "Open"));
 }
@@ -1880,7 +2037,7 @@ function connect() {
   if (es) es.close();
   es = new EventSource("/api/events");
   es.onopen = () => { $("live").classList.add("on"); refresh(); };
-  es.onmessage = ev => { try { const m = JSON.parse(ev.data); if (!m.session || !view || m.session === view) refresh(); } catch (e) {} };
+  es.onmessage = ev => { try { const m = JSON.parse(ev.data); if (!m.session || !view || m.session === view) refresh(); refreshSide(); } catch (e) {} };
   es.onerror = () => $("live").classList.remove("on");
 }
 function wake() { if (!es || es.readyState === 2) connect(); refresh(); }   // phone woke up / tab restored
@@ -1888,7 +2045,7 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 addEventListener("pageshow", wake);
 addEventListener("focus", wake);
 addEventListener("online", connect);
-setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 30000);
+setInterval(() => { if (document.visibilityState === "visible") { refresh(); refreshSide(); } }, 30000);
 // Backup for mobile browsers that silently drop the event stream: poll while Claude is busy.
 setInterval(() => {
   if (document.visibilityState === "visible" && view && cur && /working|starting|needs_input/.test(cur.state)) refresh();
