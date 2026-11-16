@@ -242,6 +242,26 @@ you send it like any message. Claude learns the format from grovy's `SessionStar
 so a changed guide applies without a restart. `GROVY_WIDGETS=0` turns the guide off. The terminal shows the raw JSON,
 so Claude is told to keep the key facts in plain text too.
 
+**Pages.** For anything bigger than a widget (a report, a dashboard, an interactive explorer), Claude writes an HTML
+file and runs `grovy page publish FILE --title "..."` (`grovy page ls`, `grovy page rm NAME`). The session comes from
+`$GROVY_SESSION`; pass `--session` elsewhere. grovy stores a **copy** (`$STATE/pages/<id>.html`, max 5 MB) and never
+serves files from disk directly. Publishing the same name again creates a new version, and an open viewer reloads.
+The chat shows a card; Open shows the page full-screen (the back button closes it), and ⋯ → Pages lists and deletes
+them. Removing a session deletes its pages. A page is served from `/p/<id>` (token required) with a CSP sandbox:
+* opaque origin, so no cookies, no `localStorage`, no grovy API, no access to the app or to other pages;
+* scripts and styles only inline or from cdnjs, jsdelivr and unpkg, plus Google Fonts;
+* `connect-src 'none'` and images only from `data:`/`blob:`, so no fetch, XHR, WebSocket or image beacons;
+* no form submission, popups or top-level navigation.
+
+`grovy.send(text)` in a page fills your message box, exactly like a widget; nothing is sent by itself.
+
+**Sharing a page on the network.** In the page viewer, **Share** (or `grovy page share NAME`) gives the page an
+extra link, `/s/<random 128-bit token>`, that works **without the grovy token** for anyone who can reach the daemon
+(so only when it listens beyond localhost, e.g. `--bind 0.0.0.0`). The link serves only that page, under the same
+sandbox, without the `grovy.send` bridge, and grants nothing else. Republishing keeps the link and updates what it
+shows. **Stop sharing** (`grovy page unshare NAME`) revokes it; sharing again issues a new link, and deleting the page
+revokes it too. Claude isn't told about sharing: whether a page leaves your phone is your call.
+
 ## Failure modes
 
 | scenario | behaviour |
@@ -283,6 +303,12 @@ so Claude is told to keep the key facts in plain text too.
   terminal's own encoding for multi-select hasn't been compared.
 * Typing a long prompt takes about 1s per 3,000 characters. Anything typed in the terminal at the same moment
   interleaves with it.
+* **A page can still navigate its own frame** (e.g. `location = "https://…?data"`): browsers offer no way to block
+  that, so a page that wants to could carry what it shows to another site. Pages are made by your own Claude
+  sessions, but a session that read hostile content could be steered into it. The viewer's title bar stays grovy's.
+* Pages are snapshots: they can't load data at view time, so Claude embeds the data and republishes to update.
+* A shared page's link is its only protection, over plain HTTP: anyone who sees the link, or the traffic on the
+  network, can open it until you stop sharing.
 
 ## Tests
 

@@ -14,6 +14,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -669,7 +670,20 @@ decision, structure), not by default. The terminal shows the raw JSON, so keep t
 - form: {"type":"form","title":"..","submit":"..","fields":[{"name":"k","label":"..","kind":"text|textarea|number|select|toggle","options":[".."],"default":".."}]}
 - diagram: {"type":"diagram","direction":"down|right","nodes":[{"id":"a","label":"..","tone":"ok|warn|bad"}],"edges":[{"from":"a","to":"b","label":".."}]}
 choices and form only fill the user's message box; the user reviews it and sends it as an ordinary prompt. \
-Prefer them to asking the user to type out a pick. Keep widgets small: about 12 bars, 8 pie slices, 30 diagram nodes."""
+Prefer them to asking the user to type out a pick. Keep widgets small: about 12 bars, 8 pie slices, 30 diagram nodes.
+
+For anything bigger (a report, a dashboard, an interactive explorer, a visual mockup) make a page: write one \
+self-contained HTML file and run `GROVY page publish FILE --title "Title"`. The phone shows a card that opens it; \
+publishing the same file name again updates it in place (`GROVY page ls`, `GROVY page rm NAME`). Pages run \
+sandboxed: inline JS and CSS, libraries only from cdnjs.cloudflare.com, cdn.jsdelivr.net or unpkg.com (pin \
+versions), fonts from Google Fonts, images as data: URIs. No fetch/XHR/WebSocket and no localStorage/cookies, so \
+embed all data in the file and keep state in memory. \
+Design for a phone first (~390px wide, light and dark via prefers-color-scheme). `grovy.send(text)` in a page \
+puts text in the user's message box for them to review and send. Mention the page in your reply."""
+
+
+GROVY_BIN = os.path.join(os.path.dirname(os.path.realpath(__file__)), "grovy")
+WIDGET_GUIDE = WIDGET_GUIDE.replace("GROVY page", shlex.quote(GROVY_BIN) + " page")
 
 
 def cmd_hook(name):
@@ -840,6 +854,17 @@ def cmd_serve(a):
     return grovyd.serve(a.bind, a.port)
 
 
+def lan_bases(url):
+    """http://HOST:PORT for each address the daemon is reachable on (all IPv4 addresses when bound to 0.0.0.0)."""
+    m = re.match(r"http://(.+):(\d+)/?", url or "")
+    host, port = (m.group(1), m.group(2)) if m else ("127.0.0.1", "7333")
+    hosts = [host]
+    if host in ("0.0.0.0", "::"):
+        out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5).stdout.split()
+        hosts = [h for h in out if ":" not in h] or ["127.0.0.1"]
+    return [f"http://{h}:{port}" for h in hosts]
+
+
 def cmd_url(_):
     """Print the phone login link(s): open one once per device; it sets a cookie."""
     try:
@@ -847,14 +872,8 @@ def cmd_url(_):
     except (OSError, ValueError):
         die("grovyd not running (grovy serve)")
     tok = load_token()
-    m = re.match(r"http://(.+):(\d+)/", url)
-    host, port = (m.group(1), m.group(2)) if m else ("127.0.0.1", "7333")
-    hosts = [host]
-    if host in ("0.0.0.0", "::"):
-        out = subprocess.run(["hostname", "-I"], capture_output=True, text=True).stdout.split()
-        hosts = [h for h in out if ":" not in h] or ["127.0.0.1"]
-    for h in hosts:
-        print(f"http://{h}:{port}/" + (f"?token={tok}" if tok else ""))
+    for base in lan_bases(url):
+        print(base + "/" + (f"?token={tok}" if tok else ""))
     if not tok:
         print("(no token: anyone who can reach these addresses can use grovy)", file=sys.stderr)
     return 0
@@ -891,6 +910,58 @@ def cmd_doctor(_):
     return 0 if ok else 1
 
 
+def cmd_page(a):
+    """Publish an HTML page to the phone (a sandboxed local "artifact"), or list/remove this session's pages."""
+    session = a.session or env("SESSION")
+    if a.op == "ls" and a.all:
+        session = None
+    elif not session:
+        print("grovy page: no session: run this inside a grovy session or pass --session NAME", file=sys.stderr)
+        return 2
+    msg = {"type": "page", "op": a.op, "session": session}
+    if a.op == "publish":
+        try:
+            with open(a.file, "rb") as f:
+                html = f.read().decode("utf-8", "surrogateescape")
+        except OSError as e:
+            print(f"grovy page: {e}", file=sys.stderr)
+            return 1
+        stem = os.path.splitext(os.path.basename(a.file))[0]
+        msg.update(html=html, title=a.title, name=a.name or re.sub(r"[^A-Za-z0-9_.-]", "-", stem).lstrip("-._")[:64] or "page")
+    elif a.op in ("rm", "share", "unshare"):
+        msg["name"] = a.name
+    try:
+        reply = sock_request(msg, timeout=30) or {}
+    except (OSError, ValueError) as e:
+        print(f"grovy page: daemon unreachable ({e})", file=sys.stderr)
+        return 1
+    if "error" in reply:
+        print(f"grovy page: {reply['error']}", file=sys.stderr)
+        return 1
+    res = reply.get("ok")
+    if a.op == "publish":
+        print(f"published {res['name']} (version {res['version']}): it's in the chat on the phone. {res.get('url', '')}")
+    elif a.op == "ls":
+        for p in res:
+            print((f"{p['session']:<16} " if a.all else "") + f"{p['name']:<24} v{p['version']:<4} "
+                  + ("shared  " if p.get("share") else "        ") + p["title"])
+        if not res:
+            print("no pages")
+    elif a.op == "share":
+        try:
+            url = (sock_request({"type": "status"}) or {}).get("url", "")
+        except (OSError, ValueError):
+            url = ""
+        print(f"{res['name']} is shared: anyone on the network with the link can view it")
+        for base in lan_bases(url):
+            print(f"  {base}/s/{res['share']}")
+    elif a.op == "unshare":
+        print(f"{res['name']} is no longer shared; its link stopped working")
+    else:
+        print(res)
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="grovy", description="Minimal Claude Code session manager")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -924,6 +995,21 @@ def main(argv=None):
     s = sub.add_parser("hook", help="(called by Claude Code) process one hook event from stdin")
     s.add_argument("name")
     s.set_defaults(fn=lambda a: cmd_hook(a.name))
+    s = sub.add_parser("page", help="publish an HTML page to the phone (sandboxed), or list/remove pages")
+    ps = s.add_subparsers(dest="op", required=True)
+    pp = ps.add_parser("publish", help="publish FILE; publishing the same name again updates it")
+    pp.add_argument("file"), pp.add_argument("--title"), pp.add_argument("--name", help="default: the file name")
+    pr = ps.add_parser("rm", help="remove a page")
+    pr.add_argument("name")
+    psh = ps.add_parser("share", help="give a page a link that works on the network without the grovy token")
+    psh.add_argument("name")
+    pun = ps.add_parser("unshare", help="revoke a page's shared link")
+    pun.add_argument("name")
+    pl = ps.add_parser("ls", help="list pages")
+    pl.add_argument("--all", action="store_true", help="pages of every session")
+    for x in (pp, pr, psh, pun, pl):
+        x.add_argument("--session", help="default: $GROVY_SESSION")
+        x.set_defaults(fn=cmd_page)
     sub.add_parser("doctor", help="check dependencies and connectivity").set_defaults(fn=cmd_doctor)
     sub.add_parser("url", help="print the web UI link(s), including the login token").set_defaults(fn=cmd_url)
     a = p.parse_args(argv)

@@ -15,6 +15,7 @@ import socket
 import json
 import os
 import re
+import secrets
 import select
 import shlex
 import socketserver
@@ -107,11 +108,17 @@ class Store:
         self.log_path = os.path.join(sdir, "events.jsonl")
         self.state_path = os.path.join(sdir, "state.json")
         self.prompts_path = os.path.join(sdir, "prompts.json")
+        self.pages_dir = os.path.join(sdir, "pages")
+        self.pages_path = os.path.join(sdir, "pages.json")
+        self.pages = {}         # id -> {id, session, name, title, version, updated, size}
         self._load()
 
     # ------------------------------------------------------------ persistence
     def _load(self):
         self.aliases = self._read_aliases()
+        pages = grovy.read_json(self.pages_path, {})
+        self.pages = {k: v for k, v in pages.items() if ID_RE.match(k) and isinstance(v, dict)} \
+            if isinstance(pages, dict) else {}
         st = grovy.read_json(self.state_path, {})
         for name, s in (st.get("sessions") or {}).items():
             if grovy.valid_name(name) and isinstance(s, dict):
@@ -164,6 +171,9 @@ class Store:
 
     def _save_state(self):
         grovy.atomic_write_json(self.state_path, {"sessions": self.sessions})
+
+    def _save_pages(self):
+        grovy.atomic_write_json(self.pages_path, self.pages)
 
     def _save_prompts(self):
         keep, count = [], {}
@@ -533,9 +543,10 @@ class Store:
                     for r in q:
                         r["session"] = new
                     self.events[new] = q
-                for p in self.prompts + list(self.perms.values()):
+                for p in self.prompts + list(self.perms.values()) + list(self.pages.values()):
                     if p["session"] == old:
                         p["session"] = new
+                self._save_pages()
                 self.aliases = {a: (new if n == old else n) for a, n in self.aliases.items()}
                 self.aliases[old] = new
                 self.aliases.pop(new, None)
@@ -605,6 +616,8 @@ class Store:
         with self.lock:
             self.sessions.pop(name, None)
             self._save_state()
+            for pid in [k for k, p in self.pages.items() if p["session"] == name]:
+                self._drop_page(pid)
         self.publish(name)
         return 200, "removed"
 
@@ -615,6 +628,93 @@ class Store:
             return 409, str(e)
         self.reconcile()
         return 200, "stopped"
+
+    # ------------------------------------------------------------ pages (local "artifacts")
+    def publish_page(self, session, name, title, html):
+        """Store a copy of an HTML page Claude made (`grovy page publish`). Same session + name = new version."""
+        if not isinstance(name, str) or not PAGE_NAME_RE.fullmatch(name):
+            return 400, "page name: letters, digits, '.', '-', '_' (max 64)"
+        if not isinstance(html, str):
+            return 400, "no HTML"
+        data = html.encode("utf-8", "surrogateescape")
+        if len(data) > PAGE_MAX:
+            return 413, f"page too large ({len(data) // 1024} KB, max {PAGE_MAX // 1024} KB)"
+        title = (title if isinstance(title, str) and title.strip() else name).strip()[:200]
+        with self.lock:
+            session = self._canon(session)
+            if session not in self.sessions:
+                return 404, f"unknown session {session!r}"
+            pid = next((k for k, p in self.pages.items() if p["session"] == session and p["name"] == name), None)
+            pid = pid or uuid.uuid4().hex
+            os.makedirs(self.pages_dir, mode=0o700, exist_ok=True)
+            path = os.path.join(self.pages_dir, pid + ".html")
+            tmp = path + ".tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+            p = self.pages.setdefault(pid, {"id": pid, "session": session, "name": name, "version": 0})
+            p.update(title=title, version=p["version"] + 1, updated=now(), size=len(data))
+            self._save_pages()
+            self._record(session, "Page", {"page": pid, "name": name, "title": title, "version": p["version"]})
+            out = dict(p)
+        self.publish(session)
+        return 200, out
+
+    def share_page(self, pid, shared):
+        """A shared page gets an unguessable link (/s/<token>) that works without the grovy token. Unsharing
+        revokes it; sharing again issues a new one. Republishing keeps the link."""
+        with self.lock:
+            p = self.pages.get(pid)
+            if not p:
+                return 404, "unknown page"
+            if bool(shared) != bool(p.get("share")):
+                p["share"] = secrets.token_hex(16) if shared else None
+                self._save_pages()
+            out = dict(p)
+        self.publish(out["session"])
+        return 200, out
+
+    def shared_page_html(self, token):
+        with self.lock:
+            pid = next((k for k, p in self.pages.items()
+                        if p.get("share") and hmac.compare_digest(p["share"], token)), None)
+        return self.page_html(pid) if pid else None
+
+    def _drop_page(self, pid):
+        p = self.pages.pop(pid, None)
+        try:
+            os.unlink(os.path.join(self.pages_dir, pid + ".html"))
+        except FileNotFoundError:
+            pass
+        self._save_pages()
+        return p
+
+    def delete_page(self, pid, session=None):
+        with self.lock:
+            p = self.pages.get(pid)
+            if not p or (session is not None and p["session"] != self._canon(session)):
+                return 404, "unknown page"
+            self._drop_page(pid)
+        self.publish(p["session"])
+        return 200, "deleted"
+
+    def list_pages(self, session=None):
+        with self.lock:
+            session = session and self._canon(session)
+            return sorted((dict(p) for p in self.pages.values() if session is None or p["session"] == session),
+                          key=lambda p: -p["updated"])
+
+    def page_html(self, pid):
+        with self.lock:
+            p = self.pages.get(pid)
+            if not p:
+                return None
+            try:
+                with open(os.path.join(self.pages_dir, pid + ".html"), "rb") as f:
+                    return dict(p), f.read()
+            except OSError:
+                return None
 
     # ------------------------------------------------------------ history / search (from the log on disk)
     def history(self, name, before=None, q=None, limit=100):
@@ -816,7 +916,9 @@ class Store:
                     "events": list(self.events.get(name, ()))[-limit:],
                     "permissions": [_public(p) for p in self.perms.values()
                                     if p["session"] == name and p["status"] in ("pending", "deciding")],
-                    "prompts": [p for p in self.prompts if p["session"] == name][-30:]}
+                    "prompts": [p for p in self.prompts if p["session"] == name][-30:],
+                    "pages": {k: {"version": p["version"], "title": p["title"], "share": p.get("share")}
+                              for k, p in self.pages.items() if p["session"] == name}}
 
     def permissions(self):
         with self.lock:
@@ -1001,7 +1103,7 @@ class SockHandler(socketserver.StreamRequestHandler):
     def handle(self):
         store = self.server.store
         try:
-            line = self.rfile.readline(4 * 1024 * 1024)
+            line = self.rfile.readline(8 * PAGE_MAX)   # a page's HTML, JSON-escaped
             msg = json.loads(line)
         except (ValueError, OSError):
             return
@@ -1024,6 +1126,25 @@ class SockHandler(socketserver.StreamRequestHandler):
                 store.status(name, msg["data"])
         elif t == "rename":
             code, res = store.rename(str(msg.get("old", "")), msg.get("new"))
+            self._reply({"ok": res} if code == 200 else {"error": res})
+        elif t == "page":
+            op, session = msg.get("op"), str(msg.get("session") or "")
+            if op == "publish":
+                code, res = store.publish_page(session, msg.get("name"), msg.get("title"), msg.get("html"))
+                if code == 200:
+                    res["url"] = (self.server.url or "").rstrip("/") + "/p/" + res["id"]
+            elif op == "ls":
+                code, res = 200, store.list_pages(session or None)
+            elif op in ("rm", "share", "unshare"):
+                pid = next((p["id"] for p in store.list_pages(session) if p["name"] == msg.get("name")), None)
+                if not pid:
+                    code, res = 404, "no such page in this session"
+                elif op == "rm":
+                    code, res = store.delete_page(pid, session)
+                else:
+                    code, res = store.share_page(pid, op == "share")
+            else:
+                code, res = 400, "unknown page op"
             self._reply({"ok": res} if code == 200 else {"error": res})
 
     def _reply(self, obj):
@@ -1055,11 +1176,33 @@ def load_index():
     scripts = re.findall(rb"<script>(.*?)</script>", html, re.S)
     hashes = " ".join("'sha256-%s'" % base64.b64encode(hashlib.sha256(s).digest()).decode() for s in scripts)
     csp = (f"default-src 'none'; script-src {hashes}; style-src 'unsafe-inline'; connect-src 'self'; "
-           "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+           "img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
     return html, csp
 
 
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def with_bridge(html):
+    """Insert PAGE_BRIDGE after the doctype (anything before it would put the page in quirks mode)."""
+    m = re.match(rb"(\xef\xbb\xbf)?\s*<!doctype[^>]*>", html, re.I)
+    return html[:m.end()] + PAGE_BRIDGE + html[m.end():] if m else PAGE_BRIDGE + html
+
+PAGE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+PAGE_MAX = 5 * 1024 * 1024
+PAGE_CDNS = "https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com"
+# Pages are Claude-written HTML: sandboxed (opaque origin: no cookies, no grovy API, no other pages), libraries
+# only from the CDN allowlist, and no fetch/XHR/WebSocket/images from the network, so a page can't send data out.
+# Browsers can't stop a page from navigating its own frame elsewhere; README "Known limitations" says so.
+PAGE_CSP = ("sandbox allow-scripts allow-forms allow-modals allow-downloads; default-src 'none'; "
+            f"script-src 'unsafe-inline' 'unsafe-eval' {PAGE_CDNS}; "
+            f"style-src 'unsafe-inline' {PAGE_CDNS} https://fonts.googleapis.com; "
+            f"font-src data: {PAGE_CDNS} https://fonts.gstatic.com; img-src data: blob:; media-src data: blob:; "
+            "connect-src 'none'; frame-src 'none'; worker-src blob:; form-action 'none'; base-uri 'none'; "
+            "frame-ancestors 'self'")
+# Injected first into every page: grovy.send(text) proposes a message (the phone puts it in the message box).
+PAGE_BRIDGE = (b"<script>window.grovy={send:function(t){if(window.parent===window){alert('Open this page from grovy "
+               b"to send it to Claude.');return}window.parent.postMessage({grovy:'send',text:String(t)},'*')}};</script>")
 REQ_ID_RE = re.compile(r"[A-Za-z0-9-]{16,64}")
 LOGIN_PAGE = (b"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
               b"<title>grovy</title><body style='font:16px system-ui;padding:24px;max-width:30em'>"
@@ -1075,7 +1218,7 @@ class Http(http.server.BaseHTTPRequestHandler):
         if grovy.env("DEBUG"):
             super().log_message(fmt, *args)
 
-    def _send(self, code, body, ctype="application/json", extra=()):
+    def _send(self, code, body, ctype="application/json", extra=(), frame="DENY"):
         if not isinstance(body, bytes):
             body = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(code)
@@ -1083,7 +1226,7 @@ class Http(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Frame-Options", frame)
         self.send_header("Referrer-Policy", "no-referrer")
         for k, v in extra:
             self.send_header(k, v)
@@ -1160,6 +1303,12 @@ class Http(http.server.BaseHTTPRequestHandler):
                 return self._send(303, b"", "text/plain", [
                     ("Location", "/"),
                     ("Set-Cookie", f"grovy_token={q}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")])
+        m = re.fullmatch(r"/s/([0-9a-f]{32})", path)
+        if m:   # a shared page: its link is the credential, and it grants nothing but this page
+            got = self.server.store.shared_page_html(m.group(1))
+            if not got:
+                return self._send(404, b"Not found (this page is no longer shared).", "text/plain")
+            return self._send(200, got[1], "text/html", [("Content-Security-Policy", PAGE_CSP)])
         if not self._authed():
             if path == "/":
                 return self._send(401, LOGIN_PAGE, "text/html")
@@ -1191,6 +1340,19 @@ class Http(http.server.BaseHTTPRequestHandler):
             if not q and before is None:
                 return self._err(400, "need 'before' or 'q'")
             return self._send(200, {"events": store.history(m.group(1), before=before, q=q or None)})
+        m = re.fullmatch(r"/p/([0-9a-f]{32})", path)
+        if m:
+            got = store.page_html(m.group(1))
+            if not got:
+                return self._send(404, b"This page was deleted.", "text/plain")
+            p, html = got
+            return self._send(200, with_bridge(html), "text/html",
+                              [("Content-Security-Policy", PAGE_CSP)], frame="SAMEORIGIN")
+        if path == "/api/pages":
+            return self._send(200, {"pages": store.list_pages()})
+        m = re.fullmatch(r"/api/sessions/([^/]+)/pages", path)
+        if m and grovy.valid_name(m.group(1)):
+            return self._send(200, {"pages": store.list_pages(m.group(1))})
         m = re.fullmatch(r"/api/sessions/([^/]+)/commands", path)
         if m and grovy.valid_name(m.group(1)):
             s = store.sessions.get(m.group(1))
@@ -1275,6 +1437,15 @@ class Http(http.server.BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/sessions/([^/]+)/(resume|kill|forget|interrupt|restart)", path)
         if m and grovy.valid_name(m.group(1)):
             return wrap(*getattr(store, m.group(2))(m.group(1)))
+        m = re.fullmatch(r"/api/pages/([^/]+)/share", path)
+        if m and ID_RE.match(m.group(1)):
+            if not isinstance(body.get("shared"), bool):
+                return 400, {"error": "shared: true or false"}
+            code, res = store.share_page(m.group(1), body["shared"])
+            return code, ({"page": res} if code == 200 else {"error": res})
+        m = re.fullmatch(r"/api/pages/([^/]+)/delete", path)
+        if m and ID_RE.match(m.group(1)):
+            return wrap(*store.delete_page(m.group(1)))
         m = re.fullmatch(r"/api/prompts/([^/]+)/cancel", path)
         if m and ID_RE.match(m.group(1)):
             return wrap(*store.cancel_prompt(m.group(1)))

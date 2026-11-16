@@ -28,6 +28,7 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 | `grovy.py` | CLI, tmux helpers (`tmux()`, `paste_prompt`, `send_key`), registry, hook adapter (`cmd_hook`), trusted projects |
 | `grovyd.py` | daemon: `Store` (state machine, permissions/questions, prompt queue, lifecycle, history), `Http`, `SockHandler` |
 | `index.html` | the whole UI: vanilla JS, one inline `<script>` (its CSP hash is computed at load) |
+| pages | `grovy page` (`cmd_page`) → socket `page` → `Store.publish_page`; served by `/p/<id>` with `PAGE_CSP` + `PAGE_BRIDGE`. Never loosen `PAGE_CSP` (no `allow-same-origin`, no `connect-src`) without the user agreeing |
 | widgets | `WIDGET_GUIDE` in `grovy.py` (what Claude is told, via the SessionStart hook) and `WIDGETS` in `index.html` (renderers). Change both together; every renderer validates its input and throws a readable `Error` |
 | `tests/test_grovy.py` | unit tests that drive `grovyd.Store` with fake tmux/paste callables, plus real-tmux integration tests on a private server |
 

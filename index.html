@@ -140,7 +140,7 @@ main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px
 #err { position:fixed; left:12px; right:12px; top:calc(64px + env(safe-area-inset-top)); z-index:30; background:var(--bad);
   color:#fff; border-radius:10px; padding:10px 12px; font-size:14px; }
 /* bottom sheet (switcher, menu, new session, search) */
-#sheet { position:fixed; inset:0; z-index:20; display:flex; align-items:flex-end; background:rgba(0,0,0,.35);
+#sheet { position:fixed; inset:0; z-index:40; display:flex; align-items:flex-end; background:rgba(0,0,0,.35);
   animation:fadebg .2s ease-out; }
 #sheet .panel { width:100%; max-width:760px; margin:0 auto; max-height:85vh; overflow-y:auto; background:var(--bg);
   border-radius:18px 18px 0 0; padding:8px 16px calc(16px + env(safe-area-inset-bottom)); animation:slideup .25s ease-out; }
@@ -215,6 +215,27 @@ textarea:focus { border-color:var(--mut); }
 .cmd { text-align:left; border:0; background:var(--card); border-radius:10px; padding:8px 12px; min-height:44px; }
 .cmd b { font:600 14px ui-monospace, SFMono-Regular, Menlo, monospace; } .cmd span { display:block; font-size:12.5px; color:var(--mut); }
 #send svg { width:20px; height:20px; }
+/* pages: Claude-made HTML, shown full-screen in a sandboxed frame */
+#viewer { position:fixed; inset:0; z-index:30; display:flex; flex-direction:column; background:var(--bg); }
+#viewer .vh { display:flex; align-items:center; gap:10px; padding:8px 12px; padding-top:calc(8px + env(safe-area-inset-top));
+  border-bottom:1px solid var(--line); min-height:52px; }
+#viewer .vh b { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#vclose { border:0; background:none; font-size:20px; min-width:44px; min-height:44px; margin-left:-8px; }
+#vver { font-size:13px; color:var(--mut); } #vtab { font-size:14px; color:var(--acc); white-space:nowrap; }
+#vshare { border:0; background:none; font-size:14px; color:var(--acc); padding:8px 2px; white-space:nowrap; }
+#vshare.on { color:var(--ok); font-weight:650; }
+.link { font:13px/1.4 ui-monospace, monospace; background:var(--code); border-radius:8px; padding:10px; overflow-wrap:anywhere; margin:0 0 10px; }
+#vframe { flex:1; width:100%; border:0; background:#fff; }
+.pagecard { display:flex; align-items:center; gap:12px; margin:6px 0 12px; padding:12px; border:1px solid var(--line);
+  border-radius:12px; background:var(--card); text-align:left; width:100%; }
+.pagecard .pi { width:36px; height:36px; border-radius:8px; background:var(--code); display:grid; place-items:center; flex:none; color:var(--mut); }
+.pagecard b { display:block; } .pagecard span { font-size:13px; color:var(--mut); }
+.pagecard .go { margin-left:auto; color:var(--acc); font-weight:650; white-space:nowrap; }
+.pagecard.gone { opacity:.6; }
+.pagecard .rm { margin-left:auto; flex:none; font-size:13px; font-weight:600; color:var(--bad); border:1px solid var(--line);
+  border-radius:99px; padding:6px 12px; }
+.sech { display:flex; align-items:baseline; justify-content:space-between; margin:22px 2px 2px; font-size:13px; font-weight:650;
+  color:var(--mut); text-transform:uppercase; letter-spacing:.04em; }
 /* widgets (```widget blocks, drawn by grovy) */
 :root { --c1:#3a6fd8; --c2:#c96442; --c3:#2f8a4c; --c4:#8a5cc7; --c5:#c27c0e; --c6:#2a9aa8; }
 @media (prefers-color-scheme: dark) { :root { --c1:#7aa2ff; --c2:#e08a67; --c3:#5cc47e; --c4:#b48cf0; --c5:#f0a63a; --c6:#5cc8d4; } }
@@ -295,12 +316,16 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
   </div>
 </div></div>
 <div id="err" class="hidden" role="alert"></div>
+<div id="viewer" class="hidden"><div class="vh"><button id="vclose" aria-label="Close">✕</button><b id="vtitle"></b>
+  <span id="vver"></span><button id="vshare">Share</button><a id="vtab" target="_blank" rel="noopener">New tab</a></div><iframe id="vframe" title="page"
+  sandbox="allow-scripts allow-forms allow-modals allow-downloads" referrerpolicy="no-referrer"></iframe></div>
 <div id="sheet" class="hidden"><div class="panel"><div class="grab"></div><div id="sheetbody"></div></div></div>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
 const main = $("main");
 let view = null, timer = null, cur = null, lastEventId = 0, first = true, turnStart = null, lastTool = "";
+let pages = {}, viewing = null;   // this session's published pages; the one open in the viewer: {id, version}
 const cache = new Map();   // rendered nodes by key: keeps "show more" state and avoids re-render churn
 
 function h(tag, attrs, ...kids) {           // never uses innerHTML: all text is inserted as text
@@ -707,9 +732,19 @@ function md(src) {
 }
 
 // ---------------------------------------------------------------- session list
+let showAllPages = false;
 async function renderList() {
-  const {sessions} = await api("/api/sessions");
+  const [{sessions}, {pages: all}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
   if (view !== null) return;
+  pages = Object.fromEntries(all.map(p => [p.id, p]));
+  if (viewing && !pages[viewing.id]) closeViewer();
+  else if (viewing && (pages[viewing.id].version !== viewing.version || pages[viewing.id].share !== viewing.share))
+    openPage(viewing.id);
+  const shown = showAllPages ? all : all.slice(0, 5);
+  const pageSection = all.length ? [h("div", {class: "sech"}, "Pages"),
+    shown.map(p => pageCard(p.id, p.title, `${p.session} · v${p.version} · ${ago(p.updated)}`, true)),
+    all.length > shown.length ? h("button", {class: "earlier", onclick: () => { showAllPages = true; refresh(); }},
+      `Show all ${all.length} pages`) : null] : [];
   document.title = "grovy" + (sessions.some(s => s.pending_permissions || s.state === "needs_input") ? " (!)" : "");
   main.replaceChildren(...(sessions.length ? sessions.map(s => {
     const stalled = s.state === "working" && Date.now() / 1000 - s.last_event > STALL;
@@ -727,7 +762,8 @@ async function renderList() {
         onclick: ev => { ev.stopPropagation(); removeSessions([s.name]); }}, "Remove") : null);
   }) : [h("div", {class: "empty"}, "No sessions yet. Tap ＋ to start one.")]),
     ...(() => { const dead = sessions.filter(s => s.state === "exited").map(s => s.name);
-      return dead.length > 1 ? [h("button", {class: "earlier", onclick: () => removeSessions(dead)}, `Remove all ${dead.length} ended sessions`)] : []; })());
+      return dead.length > 1 ? [h("button", {class: "earlier", onclick: () => removeSessions(dead)}, `Remove all ${dead.length} ended sessions`)] : []; })(),
+    ...pageSection.flat().filter(Boolean));
 }
 
 async function removeSessions(names) {
@@ -785,6 +821,7 @@ function eventNode(e, isLatestReply) {
     case "Exited": return sysLine("terminal closed");
     case "Interrupted": return sysLine("■ interrupted from the phone");
     case "Renamed": return sysLine("renamed from " + (d.from || "?") + " to " + (d.to || "?"));
+    case "Page": return pageCard(d.page, d.title || d.name, "page · version " + d.version);
     case "PermissionResult": {
       if (d.kind === "question") return sysLine(d.status === "delivered"
         ? (d.decision === "answer" ? "✓ answered from phone: " + Object.values(d.answers || {}).join(" · ") : "skipped from phone")
@@ -977,6 +1014,10 @@ async function renderDetail(name) {
   renderMeta(s.meta);
   $("ptext").textContent = LABEL[s.state] || s.state;
 
+  pages = d.pages || {};
+  if (viewing && !pages[viewing.id]) closeViewer();                       // deleted while open
+  else if (viewing && (pages[viewing.id].version !== viewing.version || pages[viewing.id].share !== viewing.share))
+    openPage(viewing.id);   // republished (reloads) or share changed
   firstId = d.events.length ? d.events[0].id : 0;
   const recentIds = new Set(d.events.map(e => e.id));
   d.events = older.filter(e => !recentIds.has(e.id)).concat(d.events);
@@ -989,7 +1030,7 @@ async function renderDetail(name) {
       prevUserTs = e.ts;
     }
     const latest = lastStop && e.id === lastStop.id;
-    const n = cached("e" + e.id + (latest ? "L" : ""), () => eventNode(e, latest));
+    const n = cached("e" + e.id + (latest ? "L" : "") + (e.type === "Page" ? (!pages[e.data.page] ? "x" : pages[e.data.page].share ? "s" : "") : ""), () => eventNode(e, latest));
     if (n) items.push([e.ts, n]);
   }
   const outgoing = d.prompts.filter(p => p.status !== "submitted" &&
@@ -1176,6 +1217,8 @@ function sessionMenu() {
   };
   openSheet(h("h2", {}, name),
     h("button", {class: "item", onclick: searchSheet}, "Search this conversation"),
+    Object.keys(pages).length ? h("button", {class: "item", onclick: () => pagesSheet(name)}, "Pages",
+      h("div", {class: "sub"}, Object.keys(pages).length + " published by Claude")) : null,
     h("button", {class: "item", onclick: () => renameSheet(name)}, "Rename"),
     s.state !== "exited" ? h("button", {class: "item", onclick: () => {
         ask(`Restart "${name}"? Claude exits and resumes the same conversation (only while it's idle).`, "Restart")
@@ -1370,6 +1413,73 @@ $("err").onclick = () => { $("err").classList.add("hidden"); refresh(); };
 addEventListener("unhandledrejection", ev => showError(ev.reason));
 $("back").onclick = () => go("#/");
 addEventListener("hashchange", route);
+
+// ---------------------------------------------------------------- pages
+function pageCard(id, title, sub, deletable = false) {
+  const gone = !pages[id];
+  return h("button", {class: "pagecard" + (gone ? " gone" : ""), onclick: () => gone ? null : openPage(id)},
+    h("span", {class: "pi"}, "▤"), h("div", {}, h("b", {}, title || "page"),
+      h("span", {}, gone ? "deleted" : sub + (pages[id].share ? " · shared" : ""))),
+    gone ? null : deletable
+      ? h("span", {class: "rm", role: "button", "aria-label": "Delete " + (title || "page"),
+          onclick: ev => { ev.stopPropagation(); deletePage(id, title); }}, "Delete")
+      : h("span", {class: "go"}, "Open"));
+}
+async function deletePage(id, title) {
+  if (!await ask(`Delete the page "${title || "page"}"? Its link stops working.`, "Delete", {danger: true})) return;
+  try { await api(`/api/pages/${id}/delete`, {}); } catch (e) { return say(e.message); }
+  refresh();
+}
+function openPage(id) {
+  const p = pages[id]; if (!p) return;
+  closeSheet();
+  const src = "/p/" + id + "?v=" + p.version;
+  if (!viewing) history.pushState({viewer: 1}, "");   // the phone's back button closes the viewer
+  viewing = {id, version: p.version, share: p.share};
+  $("vtitle").textContent = p.title; $("vver").textContent = "v" + p.version;
+  $("vshare").textContent = p.share ? "Shared" : "Share"; $("vshare").classList.toggle("on", !!p.share);
+  $("vtab").href = src;
+  if ($("vframe").getAttribute("src") !== src) $("vframe").src = src;
+  $("viewer").classList.remove("hidden");
+}
+const shareUrl = token => location.origin + "/s/" + token;
+async function shareSheet(id) {
+  const p = pages[id]; if (!p) return;
+  const set = async on => {
+    try { const r = await api(`/api/pages/${id}/share`, {shared: on}); pages[id] = {...pages[id], share: r.page.share}; }
+    catch (e) { return say(e.message); }
+    viewing && openPage(viewing.id); shareSheet(id);
+  };
+  if (!p.share) return openSheet(h("h2", {}, "Share on your network"),
+    h("p", {style: "margin:0 0 14px"}, "Anyone who can reach this computer and has the link can view this page, without the grovy token. They see only this page, still sandboxed. You can stop sharing at any time."),
+    h("div", {style: "display:flex;gap:10px"}, h("button", {class: "btn", onclick: closeSheet}, "Cancel"),
+      h("button", {class: "btn allow", onclick: () => set(true)}, "Share")));
+  const url = shareUrl(p.share), copy = h("button", {class: "btn"}, "Copy link");
+  copy.onclick = () => copyText(url, copy);
+  openSheet(h("h2", {}, "Shared on your network"), h("div", {class: "link"}, url),
+    h("p", {class: "wn", style: "margin:0 0 14px"}, "Updates to the page show at the same link. Stopping sharing breaks this link; sharing again makes a new one."),
+    h("div", {style: "display:flex;gap:10px"}, copy, h("button", {class: "btn deny", onclick: () => set(false)}, "Stop sharing")));
+}
+$("vshare").onclick = () => viewing && shareSheet(viewing.id);
+function closeViewer() {
+  viewing = null; $("viewer").classList.add("hidden"); $("vframe").removeAttribute("src");
+}
+$("vclose").onclick = () => history.state && history.state.viewer ? history.back() : closeViewer();
+addEventListener("popstate", () => { if (viewing) closeViewer(); });
+addEventListener("message", e => {   // only the open page's frame may propose a message, and only as a draft
+  if (!viewing || e.source !== $("vframe").contentWindow) return;
+  const m = e.data;
+  if (!m || m.grovy !== "send" || typeof m.text !== "string" || !m.text.trim()) return;
+  const text = m.text.slice(0, 20000);
+  $("vclose").click();
+  setTimeout(() => fillComposer(text), 50);
+});
+async function pagesSheet(session) {
+  let list = [];
+  try { list = (await api(`/api/sessions/${encodeURIComponent(session)}/pages`)).pages; } catch (e) { return say(e.message); }
+  openSheet(h("h2", {}, "Pages"), list.map(p => pageCard(p.id, p.title, `v${p.version} · ${ago(p.updated)}`, true)),
+    list.length ? null : h("div", {class: "sys"}, "No pages."));
+}
 
 let es = null;
 function connect() {

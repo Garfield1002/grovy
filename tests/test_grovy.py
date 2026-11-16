@@ -708,6 +708,51 @@ class TestForget(StoreCase):
             self.assertEqual(self.store.forget("zz")[0], 404)
 
 
+class TestPages(StoreCase):
+    def test_publish_versions_list_delete(self):
+        code, p = self.store.publish_page("a", "report", "Bench", "<h1>v1</h1>")
+        self.assertEqual((code, p["version"]), (200, 1))
+        code, p2 = self.store.publish_page("a", "report", None, "<h1>v2</h1>")
+        self.assertEqual((p2["id"], p2["version"], p2["title"]), (p["id"], 2, "report"))   # same page, new version
+        self.assertEqual(self.store.page_html(p["id"])[1], b"<h1>v2</h1>")
+        self.assertEqual(oct(os.stat(os.path.join(self.store.pages_dir, p["id"] + ".html")).st_mode & 0o777), "0o600")
+        self.assertEqual([e["type"] for e in self.store.events["a"]][-2:], ["Page", "Page"])
+        self.assertEqual(self.store.detail("a")["pages"], {p["id"]: {"version": 2, "title": "report", "share": None}})
+        self.assertEqual(self.store.publish_page("b", "report", "", "x")[1]["version"], 1)   # per session
+        self.assertEqual(len(self.store.list_pages("a")), 1)
+        self.assertEqual(self.store.delete_page(p["id"], "b")[0], 404)                       # not b's page
+        self.assertEqual(self.store.delete_page(p["id"])[0], 200)
+        self.assertIsNone(self.store.page_html(p["id"]))
+        self.assertEqual(grovyd.Store(self.dir, tmux_live=lambda: {}, paste=None).list_pages("a"), [])   # persisted
+
+    def test_publish_validation(self):
+        self.assertEqual(self.store.publish_page("zz", "r", "", "x")[0], 404)
+        for bad in ("../x", "", ".hidden", "a/b", "x" * 65, None):
+            self.assertEqual(self.store.publish_page("a", bad, "", "x")[0], 400, bad)
+        with mock.patch.object(grovyd, "PAGE_MAX", 10):
+            self.assertEqual(self.store.publish_page("a", "big", "", "x" * 11)[0], 413)
+
+    def test_pages_follow_rename_and_go_with_forget(self):
+        _, p = self.store.publish_page("a", "r", "", "x")
+        with mock.patch.object(self.store.lifecycle, "rename", lambda o, n: None):
+            self.assertEqual(self.store.rename("a", "c")[0], 200)
+        self.assertEqual(self.store.list_pages("c")[0]["id"], p["id"])
+        self.assertEqual(self.store.publish_page("a", "r", "", "y")[1]["id"], p["id"])   # old name routes to c
+        import contextlib
+        @contextlib.contextmanager
+        def locked():
+            yield {"c": {}}
+        del self.live["a"]
+        with mock.patch.object(grovy, "registry_locked", locked), mock.patch.object(self.store, "tmux_live", lambda: {}):
+            self.assertEqual(self.store.forget("c")[0], 200)
+        self.assertIsNone(self.store.page_html(p["id"]))
+
+    def test_bridge_goes_after_doctype(self):
+        out = grovyd.with_bridge(b"\n<!DOCTYPE html><html>x")
+        self.assertTrue(out.startswith(b"\n<!DOCTYPE html>" + grovyd.PAGE_BRIDGE))
+        self.assertTrue(grovyd.with_bridge(b"<p>hi").startswith(grovyd.PAGE_BRIDGE))
+
+
 class TestRename(StoreCase):
     def test_rename_moves_state_and_routes_old_name(self):
         regs = {"a": {"cwd": "/a"}, "b": {"cwd": "/b"}}
@@ -980,6 +1025,47 @@ class TestHttp(unittest.TestCase):
         self.assertIn("sha256-", h["Content-Security-Policy"])
         self.assertEqual(h["X-Frame-Options"], "DENY")
         self.assertNotIn("Access-Control-Allow-Origin", h)
+
+    def test_page_is_sandboxed(self):
+        _, p = self.store.publish_page("a", "r", "T", "<!doctype html><script>1</script>")
+        code, body, h = self.req("/p/" + p["id"])
+        self.assertEqual(code, 200)
+        csp = h["Content-Security-Policy"]
+        self.assertTrue(csp.startswith("sandbox allow-scripts"))
+        self.assertNotIn("allow-same-origin", csp)
+        self.assertIn("connect-src 'none'", csp)
+        self.assertIn("img-src data: blob:;", csp)
+        self.assertEqual(h["X-Frame-Options"], "SAMEORIGIN")
+        self.assertTrue(body.startswith(b"<!doctype html>" + grovyd.PAGE_BRIDGE))
+        self.assertIn("frame-src 'self'", self.req("/")[2]["Content-Security-Policy"])
+        self.assertEqual([x["id"] for x in json.loads(self.req("/api/pages")[1])["pages"]], [p["id"]])
+        self.assertEqual(self.req("/p/" + "0" * 32)[0], 404)
+        self.assertEqual(self.req("/p/../state.json")[0], 404)
+        self.assertEqual(self.req(f"/api/pages/{p['id']}/delete", {})[0], 200)
+        self.assertEqual(self.req("/p/" + p["id"])[0], 404)
+
+    def test_shared_page_link(self):
+        _, p = self.store.publish_page("a", "shr", "T", "<!doctype html><p>hi")
+        code, res = self.store.share_page(p["id"], True)
+        tok = res["share"]
+        self.assertRegex(tok, r"^[0-9a-f]{32}$")
+        self.assertNotEqual(tok, p["id"])
+        with mock.patch.object(self.httpd, "token", "secret"):
+            self.assertEqual(self.req("/p/" + p["id"])[0], 401)             # the normal route still needs the token
+            code, body, h = self.req("/s/" + tok)                           # the share link doesn't
+            self.assertEqual(code, 200)
+            self.assertEqual(body, b"<!doctype html><p>hi")                 # no grovy bridge on public copies
+            self.assertTrue(h["Content-Security-Policy"].startswith("sandbox allow-scripts"))
+            self.assertEqual(h["Referrer-Policy"], "no-referrer")
+            self.assertEqual(self.req("/s/" + "0" * 32)[0], 404)
+            self.assertEqual(self.req("/api/pages")[0], 401)                # grants nothing else
+            self.store.publish_page("a", "shr", "T", "v2")                  # republish keeps the link
+            self.assertEqual(self.req("/s/" + tok)[1], b"v2")
+            self.store.share_page(p["id"], False)
+            self.assertEqual(self.req("/s/" + tok)[0], 404)                 # revoked
+            self.assertNotEqual(self.store.share_page(p["id"], True)[1]["share"], tok)   # new link
+        self.assertEqual(self.req(f"/api/pages/{p['id']}/share", {"shared": "yes"})[0], 400)
+        self.assertEqual(self.req(f"/api/pages/{p['id']}/share", {"shared": False})[0], 200)
 
     def test_slowloris_deadline_and_connection_cap(self):
         class Small(grovyd.HttpServer):
