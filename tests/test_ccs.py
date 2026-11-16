@@ -831,6 +831,21 @@ class TestHttp(unittest.TestCase):
         self.assertIn("boom", err.getvalue())
         self.assertNotIn("again", err.getvalue())                 # rate-limited
 
+    def test_responses_close_the_connection(self):
+        code, _, h = self.req("/api/sessions")
+        self.assertEqual(h["Connection"], "close")
+
+    def test_old_event_streams_from_same_client_are_closed(self):
+        streams = [urllib.request.urlopen(self.base + "/api/events", timeout=5) for _ in range(ccsd.SSE_PER_CLIENT + 2)]
+        for r in streams:
+            r.readline()
+        time.sleep(0.3)
+        mine = [s for s in self.store.subscribers if s.client == "127.0.0.1"]
+        self.assertEqual(len(mine), ccsd.SSE_PER_CLIENT)
+        self.assertEqual(streams[0].read(), b'data: {"hello":1}\n\n')   # read() returns: the server ended it
+        for r in streams:
+            r.close()
+
     def test_dns_rebinding_host_rejected(self):
         self.assertEqual(self.req("/api/sessions", headers={"Host": "evil.example:80"})[0], 403)
         self.assertEqual(self.req("/api/sessions/a/prompts", {"text": "x"},

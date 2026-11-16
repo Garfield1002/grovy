@@ -32,7 +32,8 @@ HISTORY = 300            # events kept in memory per session
 MAX_FIELD = 20000        # chars kept of any one text field in the event log
 MAX_PROMPT = 100_000     # chars accepted for a browser prompt
 MAX_BODY = 256 * 1024
-MAX_REVIEW = 512 * 1024  # bytes of tool input shown for approval; beyond that, approve in the terminal
+MAX_REVIEW = 512 * 1024
+SSE_PER_CLIENT = 4  # live-update streams kept per client IP (older ones are closed)  # bytes of tool input shown for approval; beyond that, approve in the terminal
 CONFIRM_TIMEOUT = 30     # seconds for UserPromptSubmit to confirm an injected prompt
 RECONCILE_EVERY = 10
 INPUT_STATES = ("idle", "error")  # states in which we will type into the session
@@ -948,6 +949,11 @@ class Http(http.server.BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         for k, v in extra:
             self.send_header(k, v)
+        # One request per connection: an idle keep-alive socket closed by our deadline at the moment the
+        # browser reuses it makes that request fail ("page sometimes fails to load"). On a LAN a fresh
+        # connection costs nothing.
+        self.send_header("Connection", "close")
+        self.close_connection = True
         self.end_headers()
         self.wfile.write(body)
 
@@ -1118,14 +1124,28 @@ class Http(http.server.BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         q = Subscriber(maxlen=100)
+        q.client = self.client_address[0]
         store = self.server.store
+        try:  # a phone that sleeps or changes network never sends FIN: abort once data goes unacknowledged 30s
+            self.connection.setsockopt(socket.IPPROTO_TCP, getattr(socket, "TCP_USER_TIMEOUT", 18), 30000)
+        except OSError:
+            pass
+        # Each wake-up opens a new stream while the old one may linger: keep only the newest few per client,
+        # so stale streams can't pile up to the connection cap and block page loads.
+        same = sorted((s for s in list(store.subscribers) if getattr(s, "client", None) == q.client),
+                      key=lambda s: s.opened)
+        for old in same[:max(0, len(same) - (SSE_PER_CLIENT - 1))]:
+            old.kill = True
+            old.wake.set()
         store.subscribers.add(q)
         try:
             self.wfile.write(b"retry: 3000\ndata: {\"hello\":1}\n\n")
             self.wfile.flush()
-            while not self.server.stopping:
+            while not self.server.stopping and not q.kill:
                 q.wake.wait(15)
                 q.wake.clear()
+                if q.kill:
+                    break
                 out = b""
                 while q:
                     out += b"data: " + q.popleft().encode() + b"\n\n"
@@ -1144,6 +1164,9 @@ class Subscriber(deque):
     def __init__(self, maxlen):
         super().__init__(maxlen=maxlen)
         self.wake = threading.Event()
+        self.kill = False
+        self.opened = time.monotonic()
+        self.client = None
 
     __hash__ = object.__hash__  # identity semantics so subscribers can live in a set
 
