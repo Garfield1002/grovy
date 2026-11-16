@@ -177,7 +177,7 @@ Longer prompts take the literal bracketed-paste path, with control characters st
   wait on its own background shell, and the same id later fires `SubagentStart` again (verified). Only the list or
   the report ends it. Malformed list entries still count (never hide running work); at most `MAX_TASKS`=50 are
   detailed. The list is cleared by `SessionStart` startup/resume and `SessionEnd`, and not shown once exited. The UI
-  shows "idle · N running" (pill and session list, with a ring on the dot) and a collapsed strip above the message
+  shows "idle · ● N running" (pill, session list and sidebar: a separate blue mark, the state dot stays green) and a collapsed strip above the message
   box; tapping it lists each task with how long it has run, its command or agent type, and the subagent's last tool.
   `Stop` events also log `background_names`. Limitation: a background shell started by a *paused* subagent can't be
   attributed to it (the list has no owner field).

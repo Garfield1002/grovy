@@ -252,7 +252,11 @@ mark { background:color-mix(in srgb, var(--warn) 35%, transparent); color:inheri
 #bg li .t { display:flex; gap:8px; align-items:baseline; } #bg li .t b { color:var(--fg); font-weight:650; flex:1; min-width:0;
   overflow-wrap:anywhere; } #bg .el { font-variant-numeric:tabular-nums; flex:none; }
 #bg li .d { font:12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap:anywhere; margin-top:2px; }
-.dot.idle.bg { box-shadow:0 0 0 2.5px color-mix(in srgb, var(--busy) 55%, transparent); }
+/* background work: its own small blue mark beside the state, never mixed into the state dot */
+.run { color:var(--busy); font-weight:600; white-space:nowrap; }
+.run i { display:inline-block; width:7px; height:7px; margin-right:4px; vertical-align:.1em; border-radius:50%; background:var(--busy);
+  animation:breathe 2s ease-in-out infinite; }
+.srow .run { font-size:12px; }
 #hint:empty { display:none; }
 .cr { display:flex; gap:8px; align-items:flex-end; }
 textarea { flex:1; font:inherit; font-size:16px; padding:11px 14px; border-radius:22px; border:1px solid var(--line);
@@ -477,8 +481,8 @@ const LABEL = {needs_input: "needs you", idle: "idle", working: "working", start
                exited: "exited", unknown: "unknown", error: "error"};
 const unwrap = t => String(t || "").replace(/<\/?pasted_content[^>]*>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 const STALL = 60;
-const dotClass = s => "dot " + s.state + (s.state === "working" && serverNow() - s.last_event > STALL ? " stalled" : "")
-  + (s.background && s.state === "idle" ? " bg" : "");
+const dotClass = s => "dot " + s.state + (s.state === "working" && serverNow() - s.last_event > STALL ? " stalled" : "");
+const runMark = (n, short) => h("span", {class: "run", title: `${n} running in background`}, h("i"), short ? String(n) : `${n} running`);
 // replaceChildren, but keyboard focus stays on the same control (or on its rebuilt twin, matched by data-fk):
 // live updates re-render often, and losing focus each time would make Tab navigation useless
 function paint(box, ...kids) {
@@ -977,7 +981,7 @@ async function renderList() {
           s.pending_permissions ? h("span", {class: "badge"}, s.pending_permissions + " waiting") : null,
           h("span", {class: "when"}, ago(s.last_event))),
         h("div", {class: "sub"}, base(s.cwd), " · ", LABEL[s.state] || s.state,
-          s.queued_prompts ? ` · ${s.queued_prompts} queued` : "", s.background && s.state !== "exited" ? ` · ${s.background} running` : "",
+          s.queued_prompts ? ` · ${s.queued_prompts} queued` : "", ...(s.background && s.state !== "exited" ? [" · ", runMark(s.background)] : []),
           s.meta && s.meta.context != null && s.state !== "exited" ? ` · context ${s.meta.context}%` : ""),
         s.activity ? h("div", {class: "prev"}, s.activity) : null),
       s.state === "exited" ? h("span", {class: "rm", role: "button", tabindex: "0", "data-fk": "rm:" + s.name, "aria-label": "Remove " + s.name,
@@ -1282,9 +1286,9 @@ async function renderDetail(name) {
   const nearBottom = innerHeight + scrollY >= document.documentElement.scrollHeight - 160;
   const stalled = s.state === "working" && serverNow() - s.last_event > STALL;
   const bgn = s.state !== "exited" ? s.background || 0 : 0;
-  $("pdot").className = "dot " + s.state + (stalled ? " stalled" : "") + (bgn && s.state === "idle" ? " bg" : "");
+  $("pdot").className = "dot " + s.state + (stalled ? " stalled" : "");
   renderMeta(s.meta);
-  $("ptext").textContent = (LABEL[s.state] || s.state) + (bgn ? ` · ${bgn} running` : "");
+  $("ptext").replaceChildren(LABEL[s.state] || s.state, ...(bgn ? [" · ", runMark(bgn)] : []));
   renderTasks(s, bgn);
 
   pages = d.pages || {};
@@ -1828,6 +1832,7 @@ async function renderSide() {
     h("span", {class: dotClass(s)}),
     h("div", {class: "body"},
       h("div", {class: "top"}, h("span", {class: "name"}, s.name),
+        s.background && s.state !== "exited" ? runMark(s.background, true) : null,
         s.pending_permissions ? h("span", {class: "badge"}, String(s.pending_permissions)) : null,
         h("span", {class: "when"}, ago(s.last_event))),
       h("div", {class: "sub"}, s.state === "idle" || s.state === "working" ? s.activity || LABEL[s.state] : LABEL[s.state] || s.state)))));
