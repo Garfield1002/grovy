@@ -21,10 +21,13 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-TMP = tempfile.mkdtemp(prefix="ccs-test-", dir="/tmp")  # short path: AF_UNIX limit
-os.environ["CCS_STATE_DIR"] = os.path.join(TMP, "state")
-import ccs  # noqa: E402
-import ccsd  # noqa: E402
+TMP = tempfile.mkdtemp(prefix="grovy-test-", dir="/tmp")  # short path: AF_UNIX limit
+os.environ["GROVY_STATE_DIR"] = os.path.join(TMP, "state")
+# Never let a test reach the real ~/.local/state (default_state_dir() migrates ~/.local/state/ccs on first use).
+os.environ["XDG_STATE_HOME"] = os.path.join(TMP, "xdg")
+os.environ.pop("CCS_STATE_DIR", None)
+import grovy  # noqa: E402
+import grovyd  # noqa: E402
 
 
 def ev(name, **kw):
@@ -36,9 +39,9 @@ class StoreCase(unittest.TestCase):
         self.dir = tempfile.mkdtemp(dir=TMP)
         self.live = {"a": "%1", "b": "%2"}
         self.pasted = []
-        self.store = ccsd.Store(self.dir, tmux_live=lambda: dict(self.live),
+        self.store = grovyd.Store(self.dir, tmux_live=lambda: dict(self.live),
                                 paste=lambda n, t: self.pasted.append((n, t)))
-        self.reg = mock.patch.object(ccs, "registry", lambda: {"a": {"cwd": "/a"}, "b": {"cwd": "/b"}})
+        self.reg = mock.patch.object(grovy, "registry", lambda: {"a": {"cwd": "/a"}, "b": {"cwd": "/b"}})
         self.reg.start()
         self.store.reconcile()
 
@@ -55,32 +58,56 @@ class StoreCase(unittest.TestCase):
 class TestValidation(unittest.TestCase):
     def test_names(self):
         for good in ("a", "api", "my-proj_2", "A" * 32):
-            self.assertTrue(ccs.valid_name(good), good)
+            self.assertTrue(grovy.valid_name(good), good)
         for bad in ("", "-x", "a.b", "a:b", "a b", "../x", "A" * 33, "é", None, 3, "a\n"):
-            self.assertFalse(ccs.valid_name(bad), bad)
+            self.assertFalse(grovy.valid_name(bad), bad)
 
     def test_permission_output(self):
-        self.assertEqual(ccs.permission_output("allow"),
+        self.assertEqual(grovy.permission_output("allow"),
                          {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
                                                  "decision": {"behavior": "allow"}}})
-        d = ccs.permission_output("deny")["hookSpecificOutput"]["decision"]
+        d = grovy.permission_output("deny")["hookSpecificOutput"]["decision"]
         self.assertEqual(d["behavior"], "deny")
         self.assertTrue(d["message"])
 
     def test_typed_mode(self):
-        self.assertTrue(ccs.typed_mode("hello\nworld"))
-        self.assertFalse(ccs.typed_mode("/compact"))
-        self.assertFalse(ccs.typed_mode("  !rm -rf"))
-        self.assertFalse(ccs.typed_mode("x" * (ccs.TYPE_MAX + 1)))
+        self.assertTrue(grovy.typed_mode("hello\nworld"))
+        self.assertFalse(grovy.typed_mode("/compact"))
+        self.assertFalse(grovy.typed_mode("  !rm -rf"))
+        self.assertFalse(grovy.typed_mode("x" * (grovy.TYPE_MAX + 1)))
 
     def test_norm(self):
-        self.assertEqual(ccsd.norm("a\r\nb  \n"), "a\nb")
+        self.assertEqual(grovyd.norm("a\r\nb  \n"), "a\nb")
 
     def test_hook_settings_file(self):
-        hooks = json.load(open(ccs.hook_settings("x")))["hooks"]
-        self.assertEqual(set(hooks), set(ccs.HOOK_EVENTS))
-        self.assertGreater(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], ccs.PERMISSION_TIMEOUT)
+        hooks = json.load(open(grovy.hook_settings("x")))["hooks"]
+        self.assertEqual(set(hooks), set(grovy.HOOK_EVENTS))
+        self.assertGreater(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], grovy.PERMISSION_TIMEOUT)
         self.assertTrue(hooks["Stop"][0]["hooks"][0]["command"].endswith("'hook' 'x'"))
+
+
+class TestRenameMigration(unittest.TestCase):
+    def test_state_dir_moves_once_and_old_path_keeps_working(self):
+        base = tempfile.mkdtemp(dir=TMP)
+        old = os.path.join(base, "ccs")
+        os.makedirs(old)
+        with open(os.path.join(old, "token"), "w") as f:
+            f.write("t0k\n")
+        env = {"XDG_STATE_HOME": base}
+        with mock.patch.dict(os.environ, env):
+            os.environ.pop("GROVY_STATE_DIR", None)
+            new = grovy.default_state_dir()
+            self.assertEqual(new, os.path.join(base, "grovy"))
+            self.assertTrue(os.path.islink(old))
+            self.assertEqual(open(os.path.join(old, "token")).read(), "t0k\n")   # old path still resolves
+            self.assertEqual(grovy.default_state_dir(), new)                     # idempotent
+
+    def test_env_falls_back_to_pre_rename_names(self):
+        with mock.patch.dict(os.environ, {"CCS_PORT": "1"}):
+            os.environ.pop("GROVY_PORT", None)
+            self.assertEqual(grovy.env("PORT"), "1")
+            with mock.patch.dict(os.environ, {"GROVY_PORT": "2"}):
+                self.assertEqual(grovy.env("PORT"), "2")
 
 
 class TestHookAdapter(unittest.TestCase):
@@ -92,9 +119,9 @@ class TestHookAdapter(unittest.TestCase):
             if exc:
                 raise exc
             return reply
-        with mock.patch.object(ccs, "sock_request", fake), mock.patch("sys.stdin", io.StringIO(stdin)), \
+        with mock.patch.object(grovy, "sock_request", fake), mock.patch("sys.stdin", io.StringIO(stdin)), \
                 redirect_stdout(out), mock.patch("sys.stderr", io.StringIO()):
-            rc = ccs.cmd_hook(name)
+            rc = grovy.cmd_hook(name)
         return rc, out.getvalue()
 
     def test_malformed_and_unknown(self):
@@ -175,11 +202,11 @@ class TestEventLog(unittest.TestCase):
         good = {"id": 5, "ts": 1, "ccs": "a", "claude_session_id": None, "type": "Stop", "data": {}}
         with open(os.path.join(d, "events.jsonl"), "w") as f:
             f.write(json.dumps(good) + "\nnot json\n" + '{"id": 6, "ts": 1, "ccs": "a", "ty')
-        with mock.patch.object(ccs, "registry", lambda: {}):
-            s = ccsd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
+        with mock.patch.object(grovy, "registry", lambda: {}):
+            s = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
             self.assertEqual(len(s.events["a"]), 1)
             s.ingest("a", ev("Stop", last_assistant_message="after"))
-            s2 = ccsd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
+            s2 = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
         self.assertEqual([r["id"] for r in s2.events["a"]], [5, 6])
 
     def test_restart_reconfirms_wrapped_prompts(self):
@@ -188,19 +215,19 @@ class TestEventLog(unittest.TestCase):
                "data": {"prompt": '<pasted_content id="x">\nhello\n\n\nworld\n</pasted_content id="x">'}}
         with open(os.path.join(d, "events.jsonl"), "w") as f:
             f.write(json.dumps(rec) + "\n")
-        ccs.atomic_write_json(os.path.join(d, "prompts.json"), [
+        grovy.atomic_write_json(os.path.join(d, "prompts.json"), [
             {"id": "q" * 32, "ccs": "a", "text": "hello\nworld", "status": "unconfirmed", "created": 1, "updated": 1, "error": None}])
-        s = ccsd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
+        s = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
         self.assertEqual(s.prompts[0]["status"], "submitted")
 
     def test_restart_mid_permission_and_injection(self):
         d = tempfile.mkdtemp(dir=TMP)
-        ccs.atomic_write_json(os.path.join(d, "state.json"), {"sessions": {"a": {
+        grovy.atomic_write_json(os.path.join(d, "state.json"), {"sessions": {"a": {
             "name": "a", "state": "needs_input", "cwd": "/", "claude_session_id": "S", "last_event": 1,
             "activity": "", "last_error": None, "background": 0}}})
-        ccs.atomic_write_json(os.path.join(d, "prompts.json"), [
+        grovy.atomic_write_json(os.path.join(d, "prompts.json"), [
             {"id": "p" * 32, "ccs": "a", "text": "hi", "status": "injected", "created": 1, "updated": 1, "error": None}])
-        s = ccsd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
+        s = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
         self.assertEqual(s.sessions["a"]["state"], "needs_input")  # Claude fell back to its terminal dialog
         self.assertEqual(s.prompts[0]["status"], "unconfirmed")  # never re-sent
 
@@ -208,8 +235,8 @@ class TestEventLog(unittest.TestCase):
         """Regression: a force-queued prompt was typed into a terminal permission dialog after restart."""
         d = tempfile.mkdtemp(dir=TMP)
         pasted = []
-        with mock.patch.object(ccs, "registry", lambda: {"a": {"cwd": "/"}}):
-            s = ccsd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda n, t: pasted.append(t))
+        with mock.patch.object(grovy, "registry", lambda: {"a": {"cwd": "/"}}):
+            s = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda n, t: pasted.append(t))
             s.ingest("a", ev("SessionStart"))
             s.ingest("a", ev("UserPromptSubmit", prompt="busy"))           # working, fresh
             s.enqueue("a", "later", force=True)                            # can't type now
@@ -217,7 +244,7 @@ class TestEventLog(unittest.TestCase):
             s.sessions["a"]["state"] = "unknown"
             s.try_deliver("a")
             s.open_permission("a", ev("PermissionRequest", tool_name="Bash"))
-            s2 = ccsd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda n, t: pasted.append(t))
+            s2 = grovyd.Store(d, tmux_live=lambda: {"a": "%1"}, paste=lambda n, t: pasted.append(t))
             s2.reconcile()
             time.sleep(0.1)
         self.assertEqual(pasted, [])
@@ -274,7 +301,7 @@ class TestPermissions(StoreCase):
         self.assertEqual(self.store.decide(p["id"], "allow")[0], 409)
 
     def test_timeout(self):
-        with mock.patch.object(ccsd, "PERM_TIMEOUT", 0.3):
+        with mock.patch.object(grovyd, "PERM_TIMEOUT", 0.3):
             p, t, res, peer = self.open_and_wait(ev("PermissionRequest", tool_name="Bash"))
             t.join(5)
         self.assertEqual(res["reply"], {"decision": None})
@@ -330,7 +357,7 @@ class TestQuestions(StoreCase):
         self.assertEqual(self.store.decide(p["id"], "answer", {"x": "y"})[0], 400)
 
     def test_hook_emits_updated_input(self):
-        out = ccs.permission_output("allow", None, {"questions": [], "answers": {"q": "a"}})
+        out = grovy.permission_output("allow", None, {"questions": [], "answers": {"q": "a"}})
         self.assertEqual(out["hookSpecificOutput"]["decision"]["updatedInput"]["answers"], {"q": "a"})
 
 
@@ -347,11 +374,11 @@ class TestCommands(StoreCase):
         self.store.sessions["a"]["cwd"] = self.proj
         self.store.ingest("a", ev("SessionStart"))
         self.store.sessions["a"]["cwd"] = self.proj
-        ccsd._cmd_cache.clear()
+        grovyd._cmd_cache.clear()
         self.store.paste = lambda n, t, command=False: self.pasted.append((n, t, command))
 
     def test_discovery(self):
-        names = {c["name"]: c for c in ccsd.commands_for(self.proj)}
+        names = {c["name"]: c for c in grovyd.commands_for(self.proj)}
         self.assertIn("clear", names)
         self.assertEqual(names["hello"]["description"], "says hi")
         self.assertEqual(names["git:pr"]["description"], "Open a pull request")
@@ -376,8 +403,8 @@ class TestCommands(StoreCase):
         os.makedirs(os.path.join(self.proj, ".claude", "skills", "Settings"))
         with open(os.path.join(self.proj, ".claude", "skills", "Settings", "SKILL.md"), "w") as f:
             f.write("---\nname: Settings\n---\n")
-        ccsd._cmd_cache.clear()
-        self.assertNotIn("Settings", [c["name"] for c in ccsd.commands_for(self.proj)])
+        grovyd._cmd_cache.clear()
+        self.assertNotIn("Settings", [c["name"] for c in grovyd.commands_for(self.proj)])
 
     def test_clear_confirms_on_session_start(self):
         self.store.enqueue("a", "/clear")
@@ -398,7 +425,7 @@ class TestLifecycle(StoreCase):
                                     os.path.join(dev, "okrepo"): {"hasTrustDialogAccepted": True},
                                     os.path.join(home, "other", "untrusted"): {"hasTrustDialogAccepted": False}}}, f)
         with mock.patch.dict(os.environ, {"HOME": home, "TMPDIR": "/nonexistent-tmp"}):
-            got = ccs.trusted_projects()
+            got = grovy.trusted_projects()
         rp = os.path.realpath
         self.assertIn(rp(dev), got)
         self.assertIn(rp(os.path.join(dev, "known")), got)       # plain folder: inherits ~/dev's trust
@@ -435,7 +462,7 @@ class TestLifecycle(StoreCase):
         self.assertEqual([r["id"] for r in older], ids[2:5])
         hits = self.store.history("a", q="TABLES")
         self.assertEqual([r["data"]["prompt"] for r in hits][:2], ["prompt 4 about Tables", "prompt 3 about Tables"])
-        self.assertTrue(all(r["ccs"] == "a" for r in hits))
+        self.assertTrue(all(grovyd._owner(r) == "a" for r in hits))
 
 
 class TestReviewRegressions(StoreCase):
@@ -445,7 +472,7 @@ class TestReviewRegressions(StoreCase):
         self.store.ingest("a", ev("SessionStart"))
         self.store.ingest("a", ev("UserPromptSubmit", prompt="continue"))
         self.store.ingest("a", ev("Stop", last_assistant_message="step 1 done"))
-        with mock.patch.object(ccsd, "now", lambda: time.time() + 5):     # the user types it again later
+        with mock.patch.object(grovyd, "now", lambda: time.time() + 5):     # the user types it again later
             self.store.ingest("a", ev("UserPromptSubmit", prompt="continue"))
         self.assertEqual(self.store.sessions["a"]["state"], "working")
         self.store.enqueue("a", "phone prompt")
@@ -457,7 +484,7 @@ class TestReviewRegressions(StoreCase):
         self.store.ingest("a", ev("UserPromptSubmit", prompt="busy"))
         self.store.enqueue("a", "rm the build dir")
         del self.live["a"]
-        with mock.patch.object(ccs, "registry", lambda: {"b": {"cwd": "/b"}}):   # `ccs forget a`
+        with mock.patch.object(grovy, "registry", lambda: {"b": {"cwd": "/b"}}):   # `grovy forget a`
             self.store.reconcile()
         self.assertEqual(self.store.prompts[-1]["status"], "failed")
         self.live["a"] = "%9"
@@ -468,7 +495,7 @@ class TestReviewRegressions(StoreCase):
 
     def test_newest_injected_prompt_gets_the_confirmation(self):
         self.store.ingest("a", ev("SessionStart"))
-        self.store.prompts.append({"id": "o" * 32, "ccs": "a", "text": "run the tests", "status": "unconfirmed",
+        self.store.prompts.append({"id": "o" * 32, "session": "a", "text": "run the tests", "status": "unconfirmed",
                                    "created": 1, "updated": 1, "error": None})
         self.store.enqueue("a", "run the tests")
         self.wait_pasted(1)
@@ -513,26 +540,26 @@ class TestReviewRegressions(StoreCase):
         os.makedirs(os.path.join(proj, ".claude", "skills", "evil"))
         with open(os.path.join(proj, ".claude", "skills", "evil", "SKILL.md"), "w") as f:
             f.write("---\nname: model\n---\n")
-        ccsd._cmd_cache.clear()
-        names = [c["name"] for c in ccsd.commands_for(proj)]
+        grovyd._cmd_cache.clear()
+        names = [c["name"] for c in grovyd.commands_for(proj)]
         self.assertNotIn("model", names)
 
     def test_live_request_shows_full_input(self):
         big = {"command": "echo " + "x" * 6000, "edits": list(range(60))}
         p = self.store.open_permission("a", ev("PermissionRequest", tool_name="Bash", tool_input=big))
-        pub = ccsd._public(p)
+        pub = grovyd._public(p)
         self.assertEqual(pub["tool_input"], big)
         self.assertFalse(pub["truncated"])
         self.assertIn("more items not shown", str(p["tool_input"]["edits"][-1]))   # log copy says so
         huge = self.store.open_permission("a", ev("PermissionRequest", tool_name="Write",
-                                                  tool_input={"content": "y" * (ccsd.MAX_REVIEW + 10)}))
-        self.assertTrue(ccsd._public(huge)["truncated"])
+                                                  tool_input={"content": "y" * (grovyd.MAX_REVIEW + 10)}))
+        self.assertTrue(grovyd._public(huge)["truncated"])
 
 
 class TestSecondPassRegressions(StoreCase):
     def test_stale_phone_compact_does_not_end_a_turn(self):
         self.store.ingest("a", ev("SessionStart"))
-        self.store.prompts.append({"id": "c" * 32, "ccs": "a", "text": "/compact", "command": "compact",
+        self.store.prompts.append({"id": "c" * 32, "session": "a", "text": "/compact", "command": "compact",
                                    "status": "unconfirmed", "created": 1, "updated": 1, "error": None})
         self.store.ingest("a", ev("UserPromptSubmit", prompt="big task"))
         self.store.enqueue("a", "rm -rf build")
@@ -546,7 +573,7 @@ class TestSecondPassRegressions(StoreCase):
         self.store.ingest("a", ev("UserPromptSubmit", prompt="busy"))
         self.store.enqueue("a", "delete the old migrations")
         self.store.ingest("a", ev("SessionEnd", reason="prompt_input_exit"))
-        self.store.reconcile()                                            # `ccs new a ~/other` refresh
+        self.store.reconcile()                                            # `grovy new a ~/other` refresh
         self.store.ingest("a", ev("SessionStart", sid="NEW"))
         time.sleep(0.05)
         self.assertEqual(self.pasted, [])
@@ -563,7 +590,7 @@ class TestSecondPassRegressions(StoreCase):
     def test_tmux_wrapper_times_out(self):
         with mock.patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("tmux", 5)):
             with self.assertRaises(RuntimeError):
-                ccs.tmux("list-panes")
+                grovy.tmux("list-panes")
 
 
 class TestEventLogRotation(unittest.TestCase):
@@ -572,8 +599,8 @@ class TestEventLogRotation(unittest.TestCase):
         with open(os.path.join(d, "events.jsonl"), "w") as f:
             f.write(json.dumps({"id": 41, "ts": 1, "ccs": "a", "claude_session_id": None, "type": "Stop", "data": {}}) + "\n")
         with mock.patch.object(os.path, "getsize", lambda p: 60 * 1024 * 1024), \
-                mock.patch.object(ccs, "registry", lambda: {}):
-            s = ccsd.Store(d, tmux_live=lambda: {}, paste=lambda *a: None)
+                mock.patch.object(grovy, "registry", lambda: {}):
+            s = grovyd.Store(d, tmux_live=lambda: {}, paste=lambda *a: None)
         self.assertEqual(s.seq, 41)
         self.assertTrue(os.path.exists(os.path.join(d, "events.jsonl.1")))
         self.assertEqual(len(s.events["a"]), 1)
@@ -601,10 +628,15 @@ class TestConversations(StoreCase):
         self.write(home, folder, self.ID2, [u("<only wrappers>")])                    # no real messages
         self.write(home, folder, "not-a-uuid", [u("x")])
         self.write(home, "/elsewhere-xyz", self.ID2, [u("other folder")])
+        # copied from another machine: recorded cwd doesn't exist here -> still this folder's conversation
+        id3, id4 = "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"
+        self.write(home, folder, id3, [{"type": "user", "cwd": "/home/jack-nonexistent/dev/x", "message": {"content": "from another box"}}])
+        # same directory name but the recorded cwd is a different folder that exists here -> not ours
+        self.write(home, folder, id4, [{"type": "user", "cwd": TMP, "message": {"content": "collision"}}])
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
-            got = ccs.conversations(folder)
-        self.assertEqual(len(got), 1)
-        c = got[0]
+            got = grovy.conversations(folder)
+        self.assertEqual(sorted(c["first"] for c in got), ["Fix the build please", "from another box"])
+        c = next(c for c in got if c["id"] == self.ID1)
         self.assertEqual((c["id"], c["title"], c["first"], c["last"], c["messages"]),
                          (self.ID1, "My build", "Fix the build please", "Done.", 1))
 
@@ -623,13 +655,80 @@ class TestConversations(StoreCase):
         self.assertEqual(self.store.create("x", "/ok", False, resume=self.ID2)[0], 409)          # open in a terminal
         self.assertEqual(self.store.create("x", "/ok", True, resume=self.ID2, fork=True)[0], 200)
         self.assertEqual(started[-1], ["--permission-mode", "default", "--resume", self.ID2, "--fork-session"])
-        self.store.sessions["a"]["claude_session_id"] = self.ID1                                  # open in ccs "a"
+        self.store.sessions["a"]["claude_session_id"] = self.ID1                                  # open in grovy session "a"
         code, msg = self.store.create("y", "/ok", False, resume=self.ID1)
         self.assertEqual(code, 409)
         self.assertIn("session a", msg)
         self.store.sessions["a"]["claude_session_id"] = None
         self.assertEqual(self.store.create("y", "/ok", False, resume=self.ID1)[0], 200)
         self.assertEqual(started[-1], ["--resume", self.ID1])
+
+
+class TestForget(StoreCase):
+    def test_forget_only_ended_sessions(self):
+        regs = {"a": {"cwd": "/a"}, "b": {"cwd": "/b"}}
+        import contextlib
+        @contextlib.contextmanager
+        def locked():
+            yield regs
+        with mock.patch.object(grovy, "registry_locked", locked):
+            self.assertEqual(self.store.forget("a")[0], 409)          # still running
+            del self.live["b"]
+            self.store.reconcile()
+            self.assertEqual(self.store.forget("b"), (200, "removed"))
+            self.assertNotIn("b", regs)
+            self.assertNotIn("b", self.store.sessions)
+            self.assertEqual(self.store.forget("zz")[0], 404)
+
+
+class TestRename(StoreCase):
+    def test_rename_moves_state_and_routes_old_name(self):
+        regs = {"a": {"cwd": "/a"}, "b": {"cwd": "/b"}}
+        renamed = []
+
+        class Fake:
+            trusted_projects = staticmethod(lambda: ["/x"])
+            start = staticmethod(lambda *a: None)
+
+            @staticmethod
+            def rename(old, new):
+                renamed.append((old, new))
+                regs[new] = dict(regs.pop(old), aliases=[old])
+        self.store.lifecycle = Fake()
+        self.store.ingest("a", ev("SessionStart"))
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="busy"))
+        self.store.enqueue("a", "queued for a")
+        self.assertEqual(self.store.rename("a", "b")[0], 409)            # taken
+        self.assertEqual(self.store.rename("a", "bad name")[0], 400)
+        self.assertEqual(self.store.rename("a", "jean")[0], 200)
+        self.assertEqual(renamed, [("a", "jean")])
+        self.assertNotIn("a", self.store.sessions)
+        self.assertEqual(self.store.sessions["jean"]["state"], "working")
+        self.assertEqual(self.store.prompts[-1]["session"], "jean")
+        self.assertTrue(any(e["type"] == "UserPromptSubmit" for e in self.store.events["jean"]))
+        # the running Claude still reports "a": it must land on "jean"
+        self.store.ingest("a", ev("Stop", last_assistant_message="done"))
+        self.assertNotIn("a", self.store.sessions)
+        # ...which made "jean" idle, so the prompt queued before the rename is typed into "jean"
+        self.wait_pasted(1)
+        self.assertEqual(self.pasted, [("jean", "queued for a")])
+        # history from disk follows the rename too
+        self.assertTrue(self.store.history("jean", q="busy"))
+        # the old name can't be reused while it is an alias
+        with mock.patch.object(grovy, "registry", lambda: regs):
+            self.assertEqual(self.store.create("a", "/x", False)[0], 409)
+
+    def test_hook_adapter_updates_the_renamed_entry(self):
+        regs = {"jean": {"cwd": "/a", "aliases": ["a"], "claude_session_id": "OLD"}}
+        import contextlib
+        @contextlib.contextmanager
+        def locked():
+            yield regs
+        out = io.StringIO()
+        with mock.patch.object(grovy, "registry_locked", locked), mock.patch.object(grovy, "sock_request", lambda *a, **k: None), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(ev("SessionStart", sid="NEW")))), redirect_stdout(out):
+            grovy.cmd_hook("a")
+        self.assertEqual(regs["jean"]["claude_session_id"], "NEW")
 
 
 class TestInterrupt(StoreCase):
@@ -650,7 +749,7 @@ class TestInterrupt(StoreCase):
 
 class TestPromptQueue(StoreCase):
     def statuses(self, name="a"):
-        return [p["status"] for p in self.store.prompts if p["ccs"] == name]
+        return [p["status"] for p in self.store.prompts if p["session"] == name]
 
     def test_queue_while_busy_then_deliver_and_confirm(self):
         self.store.ingest("a", ev("SessionStart"))
@@ -691,7 +790,7 @@ class TestPromptQueue(StoreCase):
         # confirmation never arrives -> unconfirmed, not retried
         for p in self.store.prompts:
             if p["status"] == "injected":
-                p["updated"] -= ccsd.CONFIRM_TIMEOUT + 1
+                p["updated"] -= grovyd.CONFIRM_TIMEOUT + 1
         self.store.reconcile()
         self.assertEqual(self.statuses()[0], "unconfirmed")
         self.assertEqual([t for _, t in self.pasted].count("p0"), 1)
@@ -729,7 +828,7 @@ class TestPromptQueue(StoreCase):
         time.sleep(0.05)
         self.assertEqual(len(self.pasted), 1)  # working and recently active: never
         self.store.cancel_prompt(p2["id"])
-        self.store.sessions["a"]["last_event"] -= ccsd.FORCE_STALE + 1
+        self.store.sessions["a"]["last_event"] -= grovyd.FORCE_STALE + 1
         self.store.enqueue("a", "forced3", force=True)  # silent "working" + explicit force, now
         self.wait_pasted(2)
         self.assertEqual(self.pasted[-1], ("a", "forced3"))
@@ -747,7 +846,7 @@ class TestPromptQueue(StoreCase):
         self.assertEqual(self.store.enqueue("a", "  ")[0], 400)
         self.assertEqual(self.store.enqueue("a", 5)[0], 400)
         self.assertEqual(self.store.enqueue("nope", "x")[0], 404)
-        self.assertEqual(self.store.enqueue("a", "x" * (ccsd.MAX_PROMPT + 1))[0], 413)
+        self.assertEqual(self.store.enqueue("a", "x" * (grovyd.MAX_PROMPT + 1))[0], 413)
         _, p = self.store.enqueue("a", "x")  # session "starting": queued
         self.assertEqual(self.store.cancel_prompt(p["id"]), (200, "cancelled"))
         self.assertEqual(self.store.cancel_prompt(p["id"])[0], 409)
@@ -756,13 +855,13 @@ class TestPromptQueue(StoreCase):
 class TestHttp(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.reg = mock.patch.object(ccs, "registry", lambda: {})
+        cls.reg = mock.patch.object(grovy, "registry", lambda: {})
         cls.reg.start()
-        cls.store = ccsd.Store(tempfile.mkdtemp(dir=TMP), tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
+        cls.store = grovyd.Store(tempfile.mkdtemp(dir=TMP), tmux_live=lambda: {"a": "%1"}, paste=lambda *a: None)
         cls.store.reconcile()
-        cls.httpd = ccsd.HttpServer(("127.0.0.1", 0), ccsd.Http)
+        cls.httpd = grovyd.HttpServer(("127.0.0.1", 0), grovyd.Http)
         cls.httpd.store, cls.httpd.token = cls.store, ""
-        cls.httpd.index, cls.httpd.csp = ccsd.load_index()
+        cls.httpd.index, cls.httpd.csp = grovyd.load_index()
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
@@ -791,12 +890,12 @@ class TestHttp(unittest.TestCase):
         self.assertNotIn("Access-Control-Allow-Origin", h)
 
     def test_slowloris_deadline_and_connection_cap(self):
-        class Small(ccsd.HttpServer):
+        class Small(grovyd.HttpServer):
             MAX_CONNECTIONS = 3
-        with mock.patch.object(ccsd.Http, "HEADER_DEADLINE", 0.5):
-            srv = Small(("127.0.0.1", 0), ccsd.Http)
+        with mock.patch.object(grovyd.Http, "HEADER_DEADLINE", 0.5):
+            srv = Small(("127.0.0.1", 0), grovyd.Http)
             srv.store, srv.token = self.store, ""
-            srv.index, srv.csp = ccsd.load_index()
+            srv.index, srv.csp = grovyd.load_index()
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             port = srv.server_address[1]
             try:
@@ -836,15 +935,44 @@ class TestHttp(unittest.TestCase):
         self.assertEqual(h["Connection"], "close")
 
     def test_old_event_streams_from_same_client_are_closed(self):
-        streams = [urllib.request.urlopen(self.base + "/api/events", timeout=5) for _ in range(ccsd.SSE_PER_CLIENT + 2)]
+        streams = [urllib.request.urlopen(self.base + "/api/events", timeout=5) for _ in range(grovyd.SSE_PER_CLIENT + 2)]
         for r in streams:
             r.readline()
         time.sleep(0.3)
         mine = [s for s in self.store.subscribers if s.client == "127.0.0.1"]
-        self.assertEqual(len(mine), ccsd.SSE_PER_CLIENT)
+        self.assertEqual(len(mine), grovyd.SSE_PER_CLIENT)
         self.assertEqual(streams[0].read(), b'data: {"hello":1}\n\n')   # read() returns: the server ended it
         for r in streams:
             r.close()
+
+    def test_retried_action_runs_once(self):
+        before = len(self.store.prompts)
+        hdr = {"X-Request-Id": "a1b2c3d4e5f6a7b8c9d0"}
+        r1 = self.req("/api/sessions/a/prompts", {"text": "once"}, hdr)
+        r2 = self.req("/api/sessions/a/prompts", {"text": "once"}, hdr)       # network retry
+        self.assertEqual((r1[0], r2[0]), (200, 200))
+        self.assertEqual(json.loads(r1[1])["id"], json.loads(r2[1])["id"])   # same outcome returned
+        self.assertEqual(len(self.store.prompts), before + 1)                 # acted once
+        self.assertEqual(self.req("/api/sessions/a/prompts", {"text": "x"}, {"X-Request-Id": "bad id!"})[0], 200)
+
+    def test_concurrent_duplicate_waits_for_the_first(self):
+        gate, calls = threading.Event(), []
+        real = self.store.enqueue
+        def slow(*a):
+            calls.append(1)
+            gate.wait(2)
+            return real(*a)
+        with mock.patch.object(self.store, "enqueue", slow):
+            hdr = {"X-Request-Id": "f" * 20}
+            out = []
+            ts = [threading.Thread(target=lambda: out.append(self.req("/api/sessions/a/prompts", {"text": "dup"}, hdr)))
+                  for _ in range(2)]
+            [t.start() for t in ts]
+            time.sleep(0.3)
+            gate.set()
+            [t.join(5) for t in ts]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([c for c, _, _ in out], [200, 200])
 
     def test_dns_rebinding_host_rejected(self):
         self.assertEqual(self.req("/api/sessions", headers={"Host": "evil.example:80"})[0], 403)
@@ -867,7 +995,7 @@ class TestHttp(unittest.TestCase):
         self.assertEqual(self.req(p, {"text": "x"}, {"Content-Type": "text/plain"})[0], 415)
         self.assertEqual(self.req(p, {"text": "x"}, {"Origin": "http://evil.example"})[0], 403)
         self.assertEqual(self.req("/api/permissions/notanid/decision", {"decision": "allow"})[0], 404)
-        self.assertEqual(self.req(p, raw=b"x" * (ccsd.MAX_BODY + 1))[0], 413)
+        self.assertEqual(self.req(p, raw=b"x" * (grovyd.MAX_BODY + 1))[0], 413)
         self.assertEqual(self.req(p, {"text": "ok"})[0], 200)
 
     def test_login_page_and_enrollment(self):
@@ -875,14 +1003,14 @@ class TestHttp(unittest.TestCase):
         try:
             code, body, _ = self.req("/")
             self.assertEqual(code, 401)
-            self.assertIn(b"ccs url", body)
+            self.assertIn(b"grovy url", body)
             self.httpd.enforce = False          # CCS_AUTH=off: open, but ?token= still sets the cookie
             self.assertEqual(self.req("/api/sessions")[0], 200)
             conn = __import__("http.client").client.HTTPConnection("127.0.0.1", self.httpd.server_address[1])
             conn.request("GET", "/?token=s3cret")
             r = conn.getresponse()
             self.assertEqual(r.status, 303)
-            self.assertIn("ccs_token=s3cret", r.getheader("Set-Cookie"))
+            self.assertIn("grovy_token=s3cret", r.getheader("Set-Cookie"))
             self.assertIn("HttpOnly", r.getheader("Set-Cookie"))
             conn.close()
         finally:
@@ -893,8 +1021,10 @@ class TestHttp(unittest.TestCase):
         try:
             self.assertEqual(self.req("/api/sessions")[0], 401)
             self.assertEqual(self.req("/api/sessions", headers={"Authorization": "Bearer s3cret"})[0], 200)
+            self.assertEqual(self.req("/api/sessions", headers={"Cookie": "grovy_token=s3cret"})[0], 200)
+            self.assertEqual(self.req("/api/sessions", headers={"Cookie": "grovy_token=wrong"})[0], 401)
+            # phones logged in before the rename still carry the old cookie name
             self.assertEqual(self.req("/api/sessions", headers={"Cookie": "ccs_token=s3cret"})[0], 200)
-            self.assertEqual(self.req("/api/sessions", headers={"Cookie": "ccs_token=wrong"})[0], 401)
         finally:
             self.httpd.token = ""
 
@@ -917,10 +1047,10 @@ class TestTmuxIntegration(unittest.TestCase):
         with open(cls.fake, "w") as f:
             f.write("#!/bin/bash\necho READY\nwhile IFS= read -r l; do printf 'GOT[%s]\\n' \"$l\"; done\n")
         os.chmod(cls.fake, 0o755)
-        cls.sock = "ccs-test-%d" % os.getpid()
-        real = ccs.tmux
-        cls.patches = [mock.patch.object(ccs, "tmux", lambda *a, **k: real("-L", cls.sock, *a, **k)),
-                       mock.patch.dict(os.environ, {"CCS_CLAUDE": cls.fake})]
+        cls.sock = "grovy-test-%d" % os.getpid()
+        real = grovy.tmux
+        cls.patches = [mock.patch.object(grovy, "tmux", lambda *a, **k: real("-L", cls.sock, *a, **k)),
+                       mock.patch.dict(os.environ, {"GROVY_CLAUDE": cls.fake})]
         [p.start() for p in cls.patches]
         cls.proj = os.path.join(TMP, "dir with spaces")
         os.makedirs(cls.proj, exist_ok=True)
@@ -933,72 +1063,89 @@ class TestTmuxIntegration(unittest.TestCase):
     def wait_for(self, name, needle, t=5):
         end = time.time() + t
         while time.time() < end:
-            out = ccs.capture(name)
+            out = grovy.capture(name)
             if needle in out:
                 return out
             time.sleep(0.05)
-        self.fail(f"{needle!r} not seen in:\n{ccs.capture(name)}")
+        self.fail(f"{needle!r} not seen in:\n{grovy.capture(name)}")
 
     def test_lifecycle_and_literal_delivery(self):
-        ccs.start_session("it1", self.proj)
-        ccs.start_session("it2", self.proj)
+        grovy.start_session("it1", self.proj)
+        grovy.start_session("it2", self.proj)
         with self.assertRaises(ValueError):
-            ccs.start_session("it1", self.proj)
+            grovy.start_session("it1", self.proj)
         with self.assertRaises(ValueError):
-            ccs.start_session("bad name", self.proj)
-        self.assertTrue({"it1", "it2"} <= set(ccs.tmux_managed()))
+            grovy.start_session("bad name", self.proj)
+        self.assertTrue({"it1", "it2"} <= set(grovy.tmux_managed()))
         # an unrelated session that merely looks like ours is never considered managed
-        ccs.tmux("new-session", "-d", "-s", "ccs-impostor", "sleep 60")
-        self.assertNotIn("impostor", ccs.tmux_managed())
+        grovy.tmux("new-session", "-d", "-s", "grovy-impostor", "sleep 60")
+        self.assertNotIn("impostor", grovy.tmux_managed())
         with self.assertRaises(ValueError):
-            ccs.kill_session("impostor")
+            grovy.kill_session("impostor")
         self.wait_for("it1", "READY")
         nasty = "a 'b' \"c\" $(echo pwned) `id` ; \\ ünï 🚀 %s"
-        ccs.paste_prompt("it1", nasty)
+        grovy.paste_prompt("it1", nasty)
         self.wait_for("it1", f"GOT[{nasty}]")
-        ccs.paste_prompt("it1", "l1\nl2")
+        grovy.paste_prompt("it1", "l1\nl2")
         self.wait_for("it1", "GOT[l2]")
         # typed-path edge cases: tmux ';' separators, option-looking text, chunk boundaries, tabs
         semi = "x" * 63 + ";"            # a chunk that ends exactly in ';'
-        ccs.paste_prompt("it1", semi + " ; \\; -t foo")
+        grovy.paste_prompt("it1", semi + " ; \\; -t foo")
         self.wait_for("it1", "GOT[" + semi + " ; \\; -t foo]")
-        ccs.paste_prompt("it1", "-n --help")
+        grovy.paste_prompt("it1", "-n --help")
         self.wait_for("it1", "GOT[-n --help]")
         long = "".join(chr(0x41 + i % 26) for i in range(300))
-        ccs.paste_prompt("it1", long + "\tend")
+        grovy.paste_prompt("it1", long + "\tend")
         self.wait_for("it1", "GOT[" + long + "    end]")
-        ccs.paste_prompt("it1", "/literal slash stays literal")  # paste path
+        grovy.paste_prompt("it1", "/literal slash stays literal")  # paste path
         self.wait_for("it1", "GOT[/literal slash stays literal]")
-        ccs.paste_prompt("it1", "!echo a\x1b[201~INJECTED\x1b[200~")      # can't break out of the paste
+        grovy.paste_prompt("it1", "!echo a\x1b[201~INJECTED\x1b[200~")      # can't break out of the paste
         self.wait_for("it1", "GOT[!echo a[201~INJECTED[200~]")
-        self.assertNotIn("GOT", ccs.capture("it2"))  # isolation
-        reg = ccs.registry()
+        self.assertNotIn("GOT", grovy.capture("it2"))  # isolation
+        reg = grovy.registry()
         self.assertEqual(reg["it1"]["cwd"], os.path.realpath(self.proj))
-        ccs.kill_session("it1")
-        self.assertNotIn("it1", ccs.tmux_managed())
-        self.assertIn("it2", ccs.tmux_managed())
+        grovy.kill_session("it1")
+        self.assertNotIn("it1", grovy.tmux_managed())
+        self.assertIn("it2", grovy.tmux_managed())
         with self.assertRaises(RuntimeError):
-            ccs.paste_prompt("it1", "into the void")
-        ccs.kill_session("it2")
-        self.assertEqual(ccs.tmux("has-session", "-t", "=ccs-impostor", check=False).returncode, 0)
+            grovy.paste_prompt("it1", "into the void")
+        grovy.kill_session("it2")
+        self.assertEqual(grovy.tmux("has-session", "-t", "=grovy-impostor", check=False).returncode, 0)
 
     def test_other_state_dirs_sessions_are_invisible(self):
         """Regression: a test daemon's session ("shadow t3") showed up in the live daemon's list."""
-        ccs.start_session("mine", self.proj)
+        grovy.start_session("mine", self.proj)
         other = os.path.join(TMP, "other-state")
-        with mock.patch.dict(os.environ, {"CCS_STATE_DIR": other}):
-            ccs.start_session("theirs", self.proj)
-            self.assertEqual(set(ccs.tmux_managed()), {"theirs"})
-            ccs.kill_session("theirs")
-        self.assertNotIn("theirs", ccs.tmux_managed())
-        self.assertIn("mine", ccs.tmux_managed())
-        ccs.kill_session("mine")
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": other}):
+            grovy.start_session("theirs", self.proj)
+            self.assertEqual(set(grovy.tmux_managed()), {"theirs"})
+            grovy.kill_session("theirs")
+        self.assertNotIn("theirs", grovy.tmux_managed())
+        self.assertIn("mine", grovy.tmux_managed())
+        grovy.kill_session("mine")
+
+    def test_live_rename(self):
+        grovy.start_session("rn1", self.proj)
+        self.wait_for("rn1", "READY")
+        self.assertTrue(grovy.rename_session("rn1", "rn2"))
+        self.assertEqual(set(grovy.tmux_managed()) & {"rn1", "rn2"}, {"rn2"})
+        reg = grovy.registry()
+        self.assertEqual(reg["rn2"]["aliases"], ["rn1"])
+        self.assertNotIn("rn1", reg)
+        for f in ("rn1.json", "rn2.json"):   # the running Claude's file and the one for its next start
+            cmd = json.load(open(os.path.join(grovy.state_dir(), "hooks", f)))["hooks"]["Stop"][0]["hooks"][0]["command"]
+            self.assertTrue(cmd.endswith("'hook' 'rn2'"), cmd)
+        grovy.paste_prompt("rn2", "still typeable")              # pane ownership check passes after rename
+        self.wait_for("rn2", "GOT[still typeable]")
+        with self.assertRaises(ValueError):
+            grovy.start_session("rn1", self.proj)                # old name is reserved as an alias
+        grovy.kill_session("rn2")
 
     def test_hook_env_reaches_session(self):
-        ccs.start_session("it3", self.proj)
-        out = ccs.tmux("show-environment", "-t", "=ccs-it3", "CCS_SESSION").stdout
-        self.assertEqual(out.strip(), "CCS_SESSION=it3")
-        ccs.kill_session("it3")
+        grovy.start_session("it3", self.proj)
+        out = grovy.tmux("show-environment", "-t", "=grovy-it3", "GROVY_SESSION").stdout
+        self.assertEqual(out.strip(), "GROVY_SESSION=it3")
+        grovy.kill_session("it3")
 
 
 if __name__ == "__main__":

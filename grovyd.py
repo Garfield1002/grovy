@@ -1,4 +1,4 @@
-"""ccsd - the ccs daemon: session state from hooks, web UI, permission decisions, prompt queue.
+"""grovyd - the grovy daemon: session state from hooks, web UI, permission decisions, prompt queue.
 
 Two listeners:
   * a Unix socket (state dir, mode 0600) for hook events and the CLI; never on the network
@@ -26,7 +26,7 @@ import uuid
 from collections import deque
 from urllib.parse import urlsplit, parse_qs
 
-import ccs
+import grovy
 
 HISTORY = 300            # events kept in memory per session
 MAX_FIELD = 20000        # chars kept of any one text field in the event log
@@ -39,7 +39,7 @@ RECONCILE_EVERY = 10
 INPUT_STATES = ("idle", "error")  # states in which we will type into the session
 DUP_WINDOW = 1.0  # seconds
 FORCE_STALE = 60  # a "working" session silent this long may be force-typed into, if the user confirms
-PERM_TIMEOUT = ccs.PERMISSION_TIMEOUT
+PERM_TIMEOUT = grovy.PERMISSION_TIMEOUT
 
 STATE_RANK = {"needs_input": 0, "error": 1, "unknown": 2, "working": 3, "starting": 4, "idle": 5, "exited": 6}
 
@@ -85,8 +85,8 @@ KEEP = {
 
 
 class Store:
-    def __init__(self, sdir, tmux_live=ccs.tmux_managed, paste=ccs.paste_prompt, notifier=None,
-                 key=ccs.send_key, lifecycle=None):
+    def __init__(self, sdir, tmux_live=grovy.tmux_managed, paste=grovy.paste_prompt, notifier=None,
+                 key=grovy.send_key, lifecycle=None):
         self.dir = sdir
         self.lock = threading.RLock()
         self.tmux_live = tmux_live
@@ -108,15 +108,19 @@ class Store:
 
     # ------------------------------------------------------------ persistence
     def _load(self):
-        st = ccs.read_json(self.state_path, {})
+        self.aliases = self._read_aliases()
+        st = grovy.read_json(self.state_path, {})
         for name, s in (st.get("sessions") or {}).items():
-            if ccs.valid_name(name) and isinstance(s, dict):
+            if grovy.valid_name(name) and isinstance(s, dict):
                 self.sessions[name] = s
                 if s.get("state") == "needs_input":
                     # The waiting hook saw EOF and exited without output, so Claude is now showing its
                     # terminal dialog: still needs_input (and therefore never typed into).
                     s["activity"] = "waiting in terminal (daemon restarted during a dialog)"
-        self.prompts = [p for p in ccs.read_json(self.prompts_path, []) if isinstance(p, dict) and "id" in p]
+        self.prompts = [p for p in grovy.read_json(self.prompts_path, []) if isinstance(p, dict) and "id" in p]
+        for p in self.prompts:
+            if "session" not in p and "ccs" in p:  # pre-rename record
+                p["session"] = p.pop("ccs")
         for p in self.prompts:
             p["force"] = False  # a confirmation never outlives the moment it was given
             if p.get("status") == "injected":  # crashed between typing and confirmation: never re-send
@@ -126,7 +130,10 @@ class Store:
                 for line in f:
                     try:
                         rec = json.loads(line)
-                        self.events.setdefault(rec["ccs"], deque(maxlen=HISTORY)).append(rec)
+                        if "session" not in rec and "ccs" in rec:  # pre-rename record
+                            rec["session"] = rec.pop("ccs")
+                        rec["session"] = self._canon(rec["session"])  # recorded under a name since renamed
+                        self.events.setdefault(rec["session"], deque(maxlen=HISTORY)).append(rec)
                         self.seq = max(self.seq, int(rec["id"]))
                     except (ValueError, KeyError, TypeError):
                         continue  # truncated / corrupt record: skip it
@@ -153,18 +160,26 @@ class Store:
         os.chmod(self.log_path, 0o600)
 
     def _save_state(self):
-        ccs.atomic_write_json(self.state_path, {"sessions": self.sessions})
+        grovy.atomic_write_json(self.state_path, {"sessions": self.sessions})
 
     def _save_prompts(self):
         keep, count = [], {}
         for p in reversed(self.prompts):  # keep all pending + the last 50 per session
-            count[p["ccs"]] = count.get(p["ccs"], 0) + 1
-            if p["status"] in ("queued", "injected") or count[p["ccs"]] <= 50:
+            count[p["session"]] = count.get(p["session"], 0) + 1
+            if p["status"] in ("queued", "injected") or count[p["session"]] <= 50:
                 keep.append(p)
         self.prompts = keep[::-1]
-        ccs.atomic_write_json(self.prompts_path, self.prompts)
+        grovy.atomic_write_json(self.prompts_path, self.prompts)
 
     # ------------------------------------------------------------ helpers
+    @staticmethod
+    def _read_aliases():
+        return {a: n for n, v in grovy.registry().items() for a in (v.get("aliases") or [])}
+
+    def _canon(self, name):
+        """A renamed session's running Claude still reports its old name until it restarts."""
+        return self.aliases.get(name, name)
+
     def _session(self, name):
         s = self.sessions.get(name)
         if s is None:
@@ -175,7 +190,7 @@ class Store:
 
     def _record(self, name, etype, data, sid=None):
         self.seq += 1
-        rec = {"id": self.seq, "ts": now(), "ccs": name, "claude_session_id": sid, "type": etype, "data": data}
+        rec = {"id": self.seq, "ts": now(), "session": name, "claude_session_id": sid, "type": etype, "data": data}
         self._log.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self.events.setdefault(name, deque(maxlen=HISTORY)).append(rec)
         return rec
@@ -200,6 +215,7 @@ class Store:
     # ------------------------------------------------------------ hook ingestion
     def ingest(self, name, payload):
         """Apply one non-blocking hook event. Returns False if it was a duplicate."""
+        name = self._canon(name)
         ev = payload.get("hook_event_name")
         sid = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
         digest = hashlib.sha256(json.dumps([name, payload], sort_keys=True).encode()).hexdigest()
@@ -227,7 +243,7 @@ class Store:
                 src = payload.get("source")
                 ours = False
                 for p in self.prompts:  # /clear and /compact emit no UserPromptSubmit; this is their receipt
-                    if p["ccs"] == name and p["status"] == "injected" and p.get("command") == src \
+                    if p["session"] == name and p["status"] == "injected" and p.get("command") == src \
                             and now() - p["updated"] < 600:  # a stale one must not turn auto-compaction into "idle"
                         p["status"], p["updated"], ours = "submitted", now(), True
                         self._save_prompts()
@@ -282,13 +298,14 @@ class Store:
 
     # ------------------------------------------------------------ permissions
     def _pending(self, name):
-        return [p for p in self.perms.values() if p["ccs"] == name and p["status"] == "pending"]
+        return [p for p in self.perms.values() if p["session"] == name and p["status"] == "pending"]
 
     def open_permission(self, name, payload):
+        name = self._canon(name)
         pid = uuid.uuid4().hex
         with self.lock:
             raw = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
-            p = {"id": pid, "ccs": name, "claude_session_id": payload.get("session_id"),
+            p = {"id": pid, "session": name, "claude_session_id": payload.get("session_id"),
                  "tool_name": str(payload.get("tool_name", "?")), "tool_input": clip(raw),
                  "created": now(), "expires": now() + PERM_TIMEOUT, "status": "pending",
                  "decision": None, "answers": None, "_input": raw, "_ev": threading.Event()}
@@ -337,23 +354,23 @@ class Store:
                 return 400, "not a question"
             p["status"], p["decision"], p["_reply"] = "deciding", decision, reply
             p["_ev"].set()
-        self.publish(p["ccs"])
+        self.publish(p["session"])
         return 200, "sent to Claude"
 
     def _finish_perm(self, p, status, note):
         """Final state of a request; called with the lock held."""
         p["status"] = status
-        self._record(p["ccs"], "PermissionResult", {"id": p["id"], "status": status, "kind": p.get("kind"),
+        self._record(p["session"], "PermissionResult", {"id": p["id"], "status": status, "kind": p.get("kind"),
                                                     "decision": p["decision"], "answers": p.get("answers"),
                                                     "note": note})
-        s = self._session(p["ccs"])
-        if s["state"] == "needs_input" and not self._pending(p["ccs"]):
+        s = self._session(p["session"])
+        if s["state"] == "needs_input" and not self._pending(p["session"]):
             if status == "delivered":
-                self._set(p["ccs"], "working", f"{p['decision']}: {p['tool_name']}")
+                self._set(p["session"], "working", f"{p['decision']}: {p['tool_name']}")
             elif status == "timeout":
-                self._set(p["ccs"], "needs_input", f"permission for {p['tool_name']} now in terminal")
+                self._set(p["session"], "needs_input", f"permission for {p['tool_name']} now in terminal")
             else:
-                self._set(p["ccs"], "unknown", note)
+                self._set(p["session"], "unknown", note)
         self._save_state()
 
     def _expire_perms(self, name, note):
@@ -401,8 +418,8 @@ class Store:
             else:
                 note = p.get("_note", "expired")
                 self._finish_perm(p, "timeout" if "timed out" in note else "expired", note)
-        self.publish(p["ccs"])
-        self.try_deliver(p["ccs"])
+        self.publish(p["session"])
+        self.try_deliver(p["session"])
 
     # ------------------------------------------------------------ prompts
     def enqueue(self, name, text, force=False):
@@ -423,8 +440,8 @@ class Store:
                 if not command or command.lower() in RESERVED_COMMANDS - {"clear", "compact"} or \
                         command not in {c["name"] for c in commands_for(self.sessions[name].get("cwd"))}:
                     return 400, (f"{lead.split()[0]} can't be run from the phone (only skills, custom commands, "
-                                 f"/clear and /compact). Use the terminal: ccs attach {name}.")
-            p = {"id": uuid.uuid4().hex, "ccs": name, "text": text, "status": "queued", "force": force is True,
+                                 f"/clear and /compact). Use the terminal: grovy attach {name}.")
+            p = {"id": uuid.uuid4().hex, "session": name, "text": text, "status": "queued", "force": force is True,
                  "command": command, "created": now(), "updated": now(), "error": None}
             self.prompts.append(p)
             self._save_prompts()
@@ -446,7 +463,7 @@ class Store:
         live_ccs = self._live_ccs_conversations()
         live_any = self.lifecycle.live_conversations()
         for c in convs:
-            c["open_in"] = ("ccs:" + live_ccs[c["id"]]) if c["id"] in live_ccs else \
+            c["open_in"] = ("grovy:" + live_ccs[c["id"]]) if c["id"] in live_ccs else \
                 ("terminal" if c["id"] in live_any else None)
         return 200, convs
 
@@ -459,12 +476,12 @@ class Store:
     def create(self, name, path, ask, resume=None, fork=False):
         """New session from the phone: only in a folder Claude already trusts (no blocking trust dialog).
         With resume=<conversation id>, continue (or, with fork, copy) a past conversation from that folder."""
-        if not ccs.valid_name(name):
+        if not grovy.valid_name(name):
             return 400, "name: letters, digits, - and _ (max 32)"
         if not isinstance(path, str) or path not in self.lifecycle.trusted_projects():
             return 400, "pick one of the listed folders"
-        if name in ccs.registry():
-            return 409, f"a session named {name} already exists"
+        if grovy.name_in_use(grovy.registry(), name):
+            return 409, f"the name {name} is taken (by a session or a renamed session's old name)"
         extra = ["--permission-mode", "default"] if ask is True else []
         if resume is not None:
             if not isinstance(resume, str) or resume not in {c["id"] for c in self.lifecycle.conversations(path)}:
@@ -490,6 +507,55 @@ class Store:
         self.reconcile()
         return 200, msg
 
+    def rename(self, old, new):
+        """Rename a session (live or ended) and move everything the daemon holds for it."""
+        if not isinstance(new, str) or not grovy.valid_name(new):
+            return 400, "name: letters, digits, - and _ (max 32)"
+        with self.lock:  # held across the tmux rename so no reconcile sees a half-renamed session
+            old = self._canon(old)
+            if old not in self.sessions:
+                return 404, "unknown session"
+            if new in self.sessions and new != old:
+                return 409, f"the name {new} is already taken"
+            try:
+                self.lifecycle.rename(old, new)
+            except (ValueError, RuntimeError) as e:
+                return 409, str(e)
+            if new != old:
+                s = self.sessions.pop(old)
+                s["name"] = new
+                self.sessions[new] = s
+                if old in self.events:
+                    q = self.events.pop(old)
+                    for r in q:
+                        r["session"] = new
+                    self.events[new] = q
+                for p in self.prompts + list(self.perms.values()):
+                    if p["session"] == old:
+                        p["session"] = new
+                self.aliases = {a: (new if n == old else n) for a, n in self.aliases.items()}
+                self.aliases[old] = new
+                self.aliases.pop(new, None)
+                self._record(new, "Renamed", {"from": old, "to": new})
+                self._save_state()
+                self._save_prompts()
+        self.publish(old)
+        self.publish(new)
+        return 200, new
+
+    def forget(self, name):
+        """Remove an ended session from the list (its conversation stays resumable from ＋)."""
+        if name in self.tmux_live():
+            return 409, f"{name} is still running; stop it first"
+        with grovy.registry_locked() as reg:
+            if reg.pop(name, None) is None and name not in self.sessions:
+                return 404, "unknown session"
+        with self.lock:
+            self.sessions.pop(name, None)
+            self._save_state()
+        self.publish(name)
+        return 200, "removed"
+
     def kill(self, name):
         try:
             self.lifecycle.kill(name)
@@ -510,7 +576,7 @@ class Store:
                         r = json.loads(line)
                     except ValueError:
                         continue
-                    if not isinstance(r, dict) or r.get("ccs") != name:
+                    if not isinstance(r, dict) or self._canon(_owner(r)) != name:
                         continue
                     if q:
                         d = r.get("data") or {}
@@ -553,19 +619,19 @@ class Store:
                     break
             else:
                 return 404, "unknown prompt"
-        self.publish(p["ccs"])
+        self.publish(p["session"])
         return 200, "cancelled"
 
     def _fail_queued(self, name, why):
         """Queued prompts belong to the session instance that was running when they were queued."""
         for p in self.prompts:
-            if p["ccs"] == name and p["status"] == "queued":
+            if p["session"] == name and p["status"] == "queued":
                 p["status"], p["error"], p["updated"] = "failed", why, now()
         self._save_prompts()
 
     def _confirm_prompt(self, name, text):
         t = squash(text)
-        order = sorted((p for p in self.prompts if p["ccs"] == name), reverse=True,
+        order = sorted((p for p in self.prompts if p["session"] == name), reverse=True,
                        key=lambda p: (p["status"] == "injected", p["created"]))  # the one in flight first
         for p in order:
             if p["status"] in ("injected", "unconfirmed") and \
@@ -580,7 +646,7 @@ class Store:
             s = self.sessions.get(name)
             if not s or self._pending(name):
                 return
-            mine = [p for p in self.prompts if p["ccs"] == name]
+            mine = [p for p in self.prompts if p["session"] == name]
             if any(p["status"] == "injected" for p in mine):
                 return  # one in flight at a time
             queued = [p for p in mine if p["status"] == "queued"]
@@ -601,18 +667,18 @@ class Store:
     def _paste(self, p):
         try:
             if p.get("command"):
-                self.paste(p["ccs"], p["text"], True)
+                self.paste(p["session"], p["text"], True)
             else:
-                self.paste(p["ccs"], p["text"])
+                self.paste(p["session"], p["text"])
             err = None
         except Exception as e:  # tmux failure, session gone, pane reused...
             err = str(e)
         with self.lock:
             if err and p["status"] == "injected":
                 p["status"], p["error"], p["updated"] = "failed", err, now()
-                self._set(p["ccs"], "unknown", f"prompt delivery failed: {err}")
+                self._set(p["session"], "unknown", f"prompt delivery failed: {err}")
             self._save_prompts()
-        self.publish(p["ccs"])
+        self.publish(p["session"])
 
     # ------------------------------------------------------------ reconciliation
     def reconcile(self):
@@ -623,9 +689,10 @@ class Store:
             try:
                 live = self.tmux_live()
             except RuntimeError as e:  # tmux unresponsive: skip this round rather than guess "exited"
-                print(f"ccsd: reconcile skipped: {e}", file=sys.stderr)
+                print(f"grovyd: reconcile skipped: {e}", file=sys.stderr)
                 return
-            reg = ccs.registry()
+            reg = grovy.registry()
+            self.aliases = {a: n for n, v in reg.items() for a in (v.get("aliases") or [])}
             for name in set(reg) | set(live) | set(self.sessions):
                 s = self._session(name)
                 if name in reg:
@@ -650,14 +717,14 @@ class Store:
                 if p["status"] == "injected" and now() - p["updated"] > CONFIRM_TIMEOUT:
                     p["status"], p["updated"] = "unconfirmed", now()
                     p["error"] = "no UserPromptSubmit seen; check the terminal"
-                    changed.add(p["ccs"])
-                    s = self.sessions.get(p["ccs"])
+                    changed.add(p["session"])
+                    s = self.sessions.get(p["session"])
                     if s and s["state"] == "working" and s["activity"] == "sending prompt from web":
-                        self._set(p["ccs"], "unknown", "prompt not confirmed")
-                elif p["status"] == "queued" and p["ccs"] not in live:  # incl. forgotten sessions: never
+                        self._set(p["session"], "unknown", "prompt not confirmed")
+                elif p["status"] == "queued" and p["session"] not in live:  # incl. forgotten sessions: never
                     # deliver into a future session that merely reuses the name
                     p["status"], p["error"], p["updated"] = "failed", "session not running", now()
-                    changed.add(p["ccs"])
+                    changed.add(p["session"])
             if changed:
                 self._save_state()
                 self._save_prompts()
@@ -674,7 +741,7 @@ class Store:
     # ------------------------------------------------------------ views
     def summary(self, name):
         s = dict(self.sessions[name])
-        mine = [p for p in self.prompts if p["ccs"] == name]
+        mine = [p for p in self.prompts if p["session"] == name]
         s["pending_permissions"] = len(self._pending(name))
         s["queued_prompts"] = sum(p["status"] in ("queued", "injected") for p in mine)
         s["accepts_input"] = s["state"] in INPUT_STATES and not s["pending_permissions"]
@@ -695,8 +762,8 @@ class Store:
             return {"session": self.summary(name),
                     "events": list(self.events.get(name, ()))[-limit:],
                     "permissions": [_public(p) for p in self.perms.values()
-                                    if p["ccs"] == name and p["status"] in ("pending", "deciding")],
-                    "prompts": [p for p in self.prompts if p["ccs"] == name][-30:]}
+                                    if p["session"] == name and p["status"] in ("pending", "deciding")],
+                    "prompts": [p for p in self.prompts if p["session"] == name][-30:]}
 
     def permissions(self):
         with self.lock:
@@ -792,6 +859,11 @@ def _check_answers(inp, answers):
     return None
 
 
+def _owner(r):
+    """Session name of a stored record; records written before the rename used the key "ccs"."""
+    return r.get("session", r.get("ccs"))
+
+
 def _count(v):
     if isinstance(v, (list, dict)):
         return len(v)
@@ -818,32 +890,36 @@ class Lifecycle:
 
     @staticmethod
     def trusted_projects():
-        return ccs.trusted_projects()
+        return grovy.trusted_projects()
 
     @staticmethod
     def start(name, path, extra):
-        ccs.start_session(name, path, extra)
-        ccs.check_started(name, path, extra)
+        grovy.start_session(name, path, extra)
+        grovy.check_started(name, path, extra)
 
     @staticmethod
     def resume(name):
-        return ccs.resume_session(name)
+        return grovy.resume_session(name)
 
     @staticmethod
     def conversations(path):
-        return ccs.conversations(path)
+        return grovy.conversations(path)
 
     @staticmethod
     def live_conversations():
-        return ccs.live_conversations()
+        return grovy.live_conversations()
 
     @staticmethod
     def kill(name):
-        ccs.kill_session(name)
+        grovy.kill_session(name)
+
+    @staticmethod
+    def rename(old, new):
+        grovy.rename_session(old, new)
 
 
 class Notifier:
-    """Runs CCS_NOTIFY_CMD (argv, shlex-split) with the message on stdin. Never blocks callers."""
+    """Runs GROVY_NOTIFY_CMD (argv, shlex-split) with the message on stdin. Never blocks callers."""
 
     def __init__(self, cmd, url=None, min_gap=60):
         self.cmd, self.url, self.min_gap = shlex.split(cmd), url, min_gap
@@ -860,9 +936,10 @@ class Notifier:
     def _run(self, msg, kind, name):
         try:
             subprocess.run(self.cmd, input=msg, text=True, timeout=15, capture_output=True,
-                           env={**os.environ, "CCS_NOTIFY_KIND": kind, "CCS_NOTIFY_SESSION": name})
+                           env={**os.environ, "GROVY_NOTIFY_KIND": kind, "GROVY_NOTIFY_SESSION": name,
+                                "CCS_NOTIFY_KIND": kind, "CCS_NOTIFY_SESSION": name})
         except (OSError, subprocess.SubprocessError) as e:
-            print(f"ccsd: notify failed: {e}", file=sys.stderr)
+            print(f"grovyd: notify failed: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------- unix socket (hooks + CLI)
@@ -877,8 +954,8 @@ class SockHandler(socketserver.StreamRequestHandler):
             return
         t = msg.get("type") if isinstance(msg, dict) else None
         if t == "hook":
-            name, payload = msg.get("ccs"), msg.get("event")
-            if not ccs.valid_name(name) or not isinstance(payload, dict):
+            name, payload = msg.get("session") or msg.get("ccs"), msg.get("event")
+            if not grovy.valid_name(name) or not isinstance(payload, dict):
                 return
             if payload.get("hook_event_name") == "PermissionRequest":
                 self._permission(store, name, payload)
@@ -888,6 +965,9 @@ class SockHandler(socketserver.StreamRequestHandler):
             self._reply({"sessions": {s["name"]: s for s in store.list_sessions()}, "url": self.server.url})
         elif t == "refresh":
             store.reconcile()
+        elif t == "rename":
+            code, res = store.rename(str(msg.get("old", "")), msg.get("new"))
+            self._reply({"ok": res} if code == 200 else {"error": res})
 
     def _reply(self, obj):
         self.wfile.write(json.dumps(obj).encode() + b"\n")
@@ -909,7 +989,7 @@ class SockServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 
 # ---------------------------------------------------------------- HTTP
 
-INDEX_PATH = os.path.join(ccs.HERE, "index.html")
+INDEX_PATH = os.path.join(grovy.HERE, "index.html")
 
 
 def load_index():
@@ -923,18 +1003,19 @@ def load_index():
 
 
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
+REQ_ID_RE = re.compile(r"[A-Za-z0-9-]{16,64}")
 LOGIN_PAGE = (b"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-              b"<title>ccs</title><body style='font:16px system-ui;padding:24px;max-width:30em'>"
-              b"<h2>ccs: login needed</h2><p>Open the link printed by <code>ccs url</code> on the machine "
+              b"<title>grovy</title><body style='font:16px system-ui;padding:24px;max-width:30em'>"
+              b"<h2>grovy: login needed</h2><p>Open the link printed by <code>grovy url</code> on the machine "
               b"(it ends in <code>?token=...</code>). Your browser remembers it for a year.</p>")
 
 
 class Http(http.server.BaseHTTPRequestHandler):
-    server_version = "ccsd"
+    server_version = "grovyd"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
-        if os.environ.get("CCS_DEBUG"):
+        if grovy.env("DEBUG"):
             super().log_message(fmt, *args)
 
     def _send(self, code, body, ctype="application/json", extra=()):
@@ -970,7 +1051,7 @@ class Http(http.server.BaseHTTPRequestHandler):
             got = auth[7:]
         for part in self.headers.get("Cookie", "").split(";"):
             k, _, v = part.strip().partition("=")
-            if k == "ccs_token":
+            if k in ("grovy_token", "ccs_token"):  # ccs_token: cookie set before the rename
                 got = got or v
         return hmac.compare_digest(got.encode(), token.encode())
 
@@ -992,6 +1073,9 @@ class Http(http.server.BaseHTTPRequestHandler):
         return ok
 
     def _abort(self):
+        if grovy.env("DEBUG"):
+            print(f"grovyd: closed idle connection from {self.client_address[0]} "
+                  f"(no request within {self.HEADER_DEADLINE}s)", file=sys.stderr, flush=True)
         try:
             self.connection.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -999,7 +1083,7 @@ class Http(http.server.BaseHTTPRequestHandler):
 
     def _host_ok(self):
         """DNS-rebinding guard: a browser reaching us through an attacker's name sends that name as
-        Host. Accept only IP literals, localhost, this machine's names, and CCS_HOSTS."""
+        Host. Accept only IP literals, localhost, this machine's names, and GROVY_HOSTS."""
         host = (self.headers.get("Host") or "").strip().lower()
         name = host[1:host.find("]")] if host.startswith("[") else host.rsplit(":", 1)[0] if host.count(":") == 1 else host
         try:
@@ -1010,7 +1094,7 @@ class Http(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if not self._host_ok():
-            return self._err(403, "unknown Host header (add the name to CCS_HOSTS)")
+            return self._err(403, "unknown Host header (add the name to GROVY_HOSTS)")
         url = urlsplit(self.path)
         path = url.path
         if path == "/" and self.server.token:
@@ -1018,7 +1102,7 @@ class Http(http.server.BaseHTTPRequestHandler):
             if q and hmac.compare_digest(q.encode(), self.server.token.encode()):
                 return self._send(303, b"", "text/plain", [
                     ("Location", "/"),
-                    ("Set-Cookie", f"ccs_token={q}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")])
+                    ("Set-Cookie", f"grovy_token={q}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")])
         if not self._authed():
             if path == "/":
                 return self._send(401, LOGIN_PAGE, "text/html")
@@ -1040,7 +1124,7 @@ class Http(http.server.BaseHTTPRequestHandler):
             code, res = store.conversations(parse_qs(url.query).get("path", [""])[0])
             return self._send(code, {"conversations": res} if code == 200 else {"error": res})
         m = re.fullmatch(r"/api/sessions/([^/]+)/history", path)
-        if m and ccs.valid_name(m.group(1)):
+        if m and grovy.valid_name(m.group(1)):
             qs = parse_qs(url.query)
             q = (qs.get("q", [""])[0] or "").strip()[:200]
             try:
@@ -1051,18 +1135,18 @@ class Http(http.server.BaseHTTPRequestHandler):
                 return self._err(400, "need 'before' or 'q'")
             return self._send(200, {"events": store.history(m.group(1), before=before, q=q or None)})
         m = re.fullmatch(r"/api/sessions/([^/]+)/commands", path)
-        if m and ccs.valid_name(m.group(1)):
+        if m and grovy.valid_name(m.group(1)):
             s = store.sessions.get(m.group(1))
             return self._send(200, {"commands": commands_for(s.get("cwd"))}) if s else self._err(404, "unknown session")
         m = re.fullmatch(r"/api/sessions/([^/]+)", path)
-        if m and ccs.valid_name(m.group(1)):
+        if m and grovy.valid_name(m.group(1)):
             d = store.detail(m.group(1))
             return self._send(200, d) if d else self._err(404, "unknown session")
         self._err(404, "not found")
 
     def do_POST(self):
         if not self._host_ok():
-            return self._err(403, "unknown Host header (add the name to CCS_HOSTS)")
+            return self._err(403, "unknown Host header (add the name to GROVY_HOSTS)")
         if not self._authed():
             return self._err(401, "unauthorized")
         # CSRF: JSON content type forces a CORS preflight we never answer; Origin, when sent, must be us.
@@ -1083,38 +1167,61 @@ class Http(http.server.BaseHTTPRequestHandler):
                 raise ValueError
         except ValueError:
             return self._err(400, "invalid JSON object")
-        store, path = self.server.store, urlsplit(self.path).path
+        path = urlsplit(self.path).path
+        # Idempotency: the page retries an action once if the network drops it, with the same request id.
+        # A repeat returns the first outcome (waiting if that one is still running) instead of acting twice.
+        rid = self.headers.get("X-Request-Id", "")
+        if not REQ_ID_RE.fullmatch(rid):
+            return self._send(*self._route_post(path, body))
+        with self.server.done_lock:
+            entry = self.server.done.get(rid)
+            first = entry is None
+            if first:
+                entry = self.server.done[rid] = {"ev": threading.Event(), "res": None, "t": now()}
+                for k in [k for k, v in self.server.done.items() if now() - v["t"] > 600]:
+                    del self.server.done[k]
+        if first:
+            try:
+                entry["res"] = self._route_post(path, body)
+            except Exception:
+                entry["res"] = (500, {"error": "internal error"})
+                raise
+            finally:
+                entry["ev"].set()
+        elif not entry["ev"].wait(60):
+            return self._err(503, "the original request is still running")
+        return self._send(*entry["res"])
+
+    def _route_post(self, path, body):
+        """Run one POST action; returns (status, JSON body). Never sends anything itself."""
+        store = self.server.store
+        wrap = lambda code, res: (code, {"status": res} if code == 200 else {"error": res})  # noqa: E731
         m = re.fullmatch(r"/api/sessions/([^/]+)/prompts", path)
-        if m and ccs.valid_name(m.group(1)):
+        if m and grovy.valid_name(m.group(1)):
             code, res = store.enqueue(m.group(1), body.get("text"), body.get("force") is True)
-            return self._send(code, res if code == 200 else {"error": res})
+            return code, (res if code == 200 else {"error": res})
         m = re.fullmatch(r"/api/permissions/([^/]+)/decision", path)
         if m and ID_RE.match(m.group(1)):
-            code, res = store.decide(m.group(1), body.get("decision"), body.get("answers"))
-            return self._send(code, {"status": res} if code == 200 else {"error": res})
+            return wrap(*store.decide(m.group(1), body.get("decision"), body.get("answers")))
         if path == "/api/client-error":  # the phone reports render errors it would otherwise swallow
             if now() - self.server.last_client_error > 5:
                 self.server.last_client_error = now()
                 msg = " | ".join(str(body.get(k, ""))[:2000].replace("\n", " ⏎ ") for k in ("view", "message", "stack"))
-                print(f"ccsd: CLIENT ERROR from {self.client_address[0]}: {msg}", file=sys.stderr, flush=True)
-            return self._send(200, {"status": "logged"})
+                print(f"grovyd: CLIENT ERROR from {self.client_address[0]}: {msg}", file=sys.stderr, flush=True)
+            return 200, {"status": "logged"}
         if path == "/api/sessions":
-            code, res = store.create(body.get("name"), body.get("path"), body.get("ask"),
-                                     body.get("resume"), body.get("fork"))
-            return self._send(code, {"status": res} if code == 200 else {"error": res})
-        m = re.fullmatch(r"/api/sessions/([^/]+)/(resume|kill)", path)
-        if m and ccs.valid_name(m.group(1)):
-            code, res = getattr(store, m.group(2))(m.group(1))
-            return self._send(code, {"status": res} if code == 200 else {"error": res})
-        m = re.fullmatch(r"/api/sessions/([^/]+)/interrupt", path)
-        if m and ccs.valid_name(m.group(1)):
-            code, res = store.interrupt(m.group(1))
-            return self._send(code, {"status": res} if code == 200 else {"error": res})
+            return wrap(*store.create(body.get("name"), body.get("path"), body.get("ask"),
+                                      body.get("resume"), body.get("fork")))
+        m = re.fullmatch(r"/api/sessions/([^/]+)/rename", path)
+        if m and grovy.valid_name(m.group(1)):
+            return wrap(*store.rename(m.group(1), body.get("name")))
+        m = re.fullmatch(r"/api/sessions/([^/]+)/(resume|kill|forget|interrupt)", path)
+        if m and grovy.valid_name(m.group(1)):
+            return wrap(*getattr(store, m.group(2))(m.group(1)))
         m = re.fullmatch(r"/api/prompts/([^/]+)/cancel", path)
         if m and ID_RE.match(m.group(1)):
-            code, res = store.cancel_prompt(m.group(1))
-            return self._send(code, {"status": res} if code == 200 else {"error": res})
-        self._err(404, "not found")
+            return wrap(*store.cancel_prompt(m.group(1)))
+        return 404, {"error": "not found"}
 
     def _sse(self):
         self.send_response(200)
@@ -1178,12 +1285,14 @@ class HttpServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     stopping = False
     enforce = True
+    done_lock = threading.Lock()
     last_client_error = 0
     allowed_hosts = {"localhost"}
     MAX_CONNECTIONS = 64
 
     def server_activate(self):
         super().server_activate()
+        self.done = {}  # X-Request-Id -> outcome of an action (idempotent retries)
         self._slots = threading.BoundedSemaphore(self.MAX_CONNECTIONS)
 
     def process_request(self, request, client_address):
@@ -1215,17 +1324,17 @@ class HttpServer(http.server.ThreadingHTTPServer):
 
 
 def serve(bind, port):
-    sdir = ccs.state_dir()
+    sdir = grovy.state_dir()
     notifier = None
-    if os.environ.get("CCS_NOTIFY_CMD"):
-        notifier = Notifier(os.environ["CCS_NOTIFY_CMD"], os.environ.get("CCS_PUBLIC_URL"))
+    if grovy.env("NOTIFY_CMD"):
+        notifier = Notifier(grovy.env("NOTIFY_CMD"), grovy.env("PUBLIC_URL"))
     store = Store(sdir, notifier=notifier)
 
-    sp = ccs.sock_path()
+    sp = grovy.sock_path()
     if os.path.exists(sp):
         try:  # refuse to start twice
-            ccs.sock_request({"type": "status"}, timeout=1)
-            print(f"ccsd: already running (socket {sp})", file=sys.stderr)
+            grovy.sock_request({"type": "status"}, timeout=1)
+            print(f"grovyd: already running (socket {sp})", file=sys.stderr)
             return 1
         except (OSError, ValueError):
             os.unlink(sp)
@@ -1237,13 +1346,13 @@ def serve(bind, port):
     httpd = HttpServer((bind, port), Http)
     httpd.store = store
     # A token is always required, loopback included: other local users and DNS-rebinding pages can
-    # reach 127.0.0.1 too. Generated once into the state dir; see `ccs url`. CCS_AUTH=off keeps it
+    # reach 127.0.0.1 too. Generated once into the state dir; see `grovy url`. GROVY_AUTH=off keeps it
     # optional, e.g. while enrolling a phone that can only read the link through this page.
     loopback = bind in ("127.0.0.1", "::1", "localhost")
-    httpd.token = ccs.load_token(create=True)
+    httpd.token = grovy.load_token(create=True)
     httpd.allowed_hosts = {"localhost", socket.gethostname().lower(), socket.getfqdn().lower()} | {
-        h.strip().lower() for h in os.environ.get("CCS_HOSTS", "").split(",") if h.strip()}
-    httpd.enforce = os.environ.get("CCS_AUTH", "on") != "off"
+        h.strip().lower() for h in grovy.env("HOSTS", "").split(",") if h.strip()}
+    httpd.enforce = grovy.env("AUTH", "on") != "off"
     httpd.refresh_index()
     url = f"http://{bind}:{port}/"
     sock.url = url
@@ -1257,13 +1366,13 @@ def serve(bind, port):
             try:
                 store.reconcile()
             except Exception as e:  # keep the daemon alive; surface the problem
-                print(f"ccsd: reconcile error: {e}", file=sys.stderr)
+                print(f"grovyd: reconcile error: {e}", file=sys.stderr)
 
     threading.Thread(target=loop, daemon=True).start()
     if not loopback and not httpd.enforce:
-        print("ccsd: WARNING: listening beyond loopback with CCS_AUTH=off; anyone on the network can use ccs",
+        print("grovyd: WARNING: listening beyond loopback with GROVY_AUTH=off; anyone on the network can use grovy",
               file=sys.stderr)
-    print(f"ccsd: serving {url} (hooks on {sp})", file=sys.stderr)
+    print(f"grovyd: serving {url} (hooks on {sp})", file=sys.stderr)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

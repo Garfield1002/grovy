@@ -1,34 +1,34 @@
-# Working on ccs
+# Working on grovy
 
-ccs runs Claude Code sessions in tmux and serves a phone UI for them. Read `README.md` for what it
+grovy runs Claude Code sessions in tmux and serves a phone UI for them. Read `README.md` for what it
 does and the invariants it promises. This file covers **how to change it safely**.
 
-## You may be running inside ccs
+## You may be running inside grovy
 
-If `$CCS_SESSION` is set, you are a ccs-managed session. The user is probably talking to you
+If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename from ccs) is set, you are a grovy-managed session. The user is probably talking to you
 **through the code you're editing**. Breaking it cuts the user off.
 
-- **Never** kill your own tmux session (`ccs-$CCS_SESSION`), the daemon's (`ccsd`), or any session you
+- **Never** kill your own tmux session (`grovy-$GROVY_SESSION`), the daemon's (`grovyd`), or any session you
   didn't create. Never run `tmux kill-server` on the default server.
-- `ccs.py` runs as the hook adapter for **every** hook event, immediately after you save it. A syntax error
+- `grovy.py` runs as the hook adapter for **every** hook event, immediately after you save it. A syntax error
   makes all hooks fail. That fails safe (permissions fall back to the terminal dialog), but the phone goes blind.
-  Run `python3 -c "import ccs"` right after editing it.
+  Run `python3 -c "import grovy"` right after editing it.
 - `index.html` is hot-reloaded by the daemon, and the user gets it on their next page reload.
-- `ccsd.py` changes need a daemon restart. Restarting never touches Claude sessions:
-  `tmux respawn-pane -k -t =ccsd: "<same command line it was started with>"` (check it with
-  `tmux list-panes -t =ccsd: -F '#{pane_start_command}'`). Restart only after the tests pass. Events sent during
+- `grovyd.py` changes need a daemon restart. Restarting never touches Claude sessions:
+  `tmux respawn-pane -k -t =grovyd: "<same command line it was started with>"` (check it with
+  `tmux list-panes -t =grovyd: -F '#{pane_start_command}'`). Restart only after the tests pass. Events sent during
   the ~1s gap are lost.
-- Never `pkill -f 'ccs serve'`: the pattern matches your own shell's command line and kills it.
+- Never `pkill -f 'grovy serve'`: the pattern matches your own shell's command line and kills it.
   Use a pidfile, or a `[c]cs serve` style pattern.
 
 ## Files
 
 | file | what |
 |---|---|
-| `ccs.py` | CLI, tmux helpers (`tmux()`, `paste_prompt`, `send_key`), registry, hook adapter (`cmd_hook`), trusted projects |
-| `ccsd.py` | daemon: `Store` (state machine, permissions/questions, prompt queue, lifecycle, history), `Http`, `SockHandler` |
+| `grovy.py` | CLI, tmux helpers (`tmux()`, `paste_prompt`, `send_key`), registry, hook adapter (`cmd_hook`), trusted projects |
+| `grovyd.py` | daemon: `Store` (state machine, permissions/questions, prompt queue, lifecycle, history), `Http`, `SockHandler` |
 | `index.html` | the whole UI: vanilla JS, one inline `<script>` (its CSP hash is computed at load) |
-| `tests/test_ccs.py` | unit tests that drive `ccsd.Store` with fake tmux/paste callables, plus real-tmux integration tests on a private server |
+| `tests/test_grovy.py` | unit tests that drive `grovyd.Store` with fake tmux/paste callables, plus real-tmux integration tests on a private server |
 
 ## Rules
 
@@ -50,18 +50,18 @@ If `$CCS_SESSION` is set, you are a ccs-managed session. The user is probably ta
 python3 -m unittest discover -s tests        # ~5s, no API key, private tmux server
 ```
 
-**Scratch daemon** (never the live one, never `~/.local/state/ccs`, never port 7333). Keep the state dir short:
+**Scratch daemon** (never the live one, never `~/.local/state/grovy`, never port 7333). Keep the state dir short:
 AF_UNIX paths over ~100 bytes fall back to `$XDG_RUNTIME_DIR`.
 
 ```sh
-D=$(mktemp -d /tmp/ccsdev-XXXX)
-tmux new-session -d -s ccsd-scratch "CCS_STATE_DIR=$D python3 $PWD/ccs.py serve --port 7397"
-CCS_STATE_DIR=$D ./ccs new t1 /some/trusted/dir      # real claude; costs a few small API calls
-T=$(cat $D/token); curl -H "Cookie: ccs_token=$T" localhost:7397/api/sessions/t1
-CCS_STATE_DIR=$D ./ccs kill t1; tmux kill-session -t =ccsd-scratch; rm -rf $D
+D=$(mktemp -d /tmp/grovydev-XXXX)
+tmux new-session -d -s grovyd-scratch "GROVY_STATE_DIR=$D python3 $PWD/grovy.py serve --port 7397"
+GROVY_STATE_DIR=$D ./grovy new t1 /some/trusted/dir      # real claude; costs a few small API calls
+T=$(cat $D/token); curl -H "Cookie: grovy_token=$T" localhost:7397/api/sessions/t1
+GROVY_STATE_DIR=$D ./grovy kill t1; tmux kill-session -t =grovyd-scratch; rm -rf $D
 ```
 
-Each daemon only sees tmux sessions tagged with its own state dir (`@ccs_state`), so scratch sessions don't show
+Each daemon only sees tmux sessions tagged with its own state dir (`@grovy_state`), so scratch sessions don't show
 up on the user's phone. Remember that `tmux new-session` takes its environment from the tmux server, not your
 shell: pass config explicitly.
 

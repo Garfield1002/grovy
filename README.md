@@ -1,59 +1,64 @@
-# ccs: Claude Code sessions, from your phone
+# grovy: Claude Code sessions, from your phone
 
 A small session manager for Claude Code. Each session is a `claude` process in its own
 tmux session. Claude Code **hooks** feed a small daemon that serves a mobile web page,
 where you can watch sessions, read the last responses, approve or deny permission
-requests, and send prompts. tmux is always the escape hatch: `ccs attach NAME`.
+requests, and send prompts. tmux is always the escape hatch: `grovy attach NAME`.
 
 Python ≥ 3.11 standard library only. No database, no frontend build, no dependencies besides
 `tmux` and `claude`.
 
 ```
-claude ──hooks──► ccs hook NAME ──unix socket──► ccsd ──HTTP+SSE──► phone
+claude ──hooks──► grovy hook NAME ──unix socket──► grovyd ──HTTP+SSE──► phone
    ▲                                               │
    └───────────── tmux paste-buffer ◄──────────────┘  (prompts typed only when known safe)
 ```
 
 | file | what |
 |---|---|
-| `ccs` / `ccs.py` | CLI, tmux helpers, session registry, hook adapter |
-| `ccsd.py` | daemon: state from hooks, permission broker, prompt queue, HTTP/SSE |
+| `grovy` / `grovy.py` | CLI, tmux helpers, session registry, hook adapter |
+| `grovyd.py` | daemon: state from hooks, permission broker, prompt queue, HTTP/SSE |
 | `index.html` | the whole UI (vanilla JS, no innerHTML) |
-| `tests/test_ccs.py` | unit + tmux integration tests (`python3 -m unittest discover -s tests`) |
+| `tests/test_grovy.py` | unit + tmux integration tests (`python3 -m unittest discover -s tests`) |
 | `examples/` | systemd unit, Telegram notify script, the generated hook config |
+
+> **Renamed from `ccs`.** On first run, `~/.local/state/ccs` moves to `~/.local/state/grovy`, and a symlink is
+> left behind for sessions started before the rename. `CCS_*` environment variables are still accepted, and
+> `ccs`/`ccs.py` remain as aliases. Phones logged in with the old cookie stay logged in.
 
 ## Install
 
 ```sh
-ln -s "$PWD/ccs" ~/.local/bin/ccs          # any dir on PATH
-ccs doctor
+ln -s "$PWD/grovy" ~/.local/bin/grovy          # any dir on PATH
+grovy doctor
 ```
 
-**No changes to `~/.claude/settings.json` are needed.** `ccs new` writes a per-session
+**No changes to `~/.claude/settings.json` are needed.** `grovy new` writes a per-session
 settings file (`$STATE/hooks/NAME.json`, see `examples/claude-hooks.json`) and starts
 `claude --settings THAT_FILE`. Hook arrays from `--settings` are *merged* with your own
-settings, so your existing hooks keep working. Claude processes not started by ccs are unaffected.
+settings, so your existing hooks keep working. Claude processes not started by grovy are unaffected.
 
 ## Use
 
 ```sh
-ccs serve                                  # daemon (or use the systemd unit below)
-ccs new api ~/src/api                      # start Claude in tmux session "ccs-api"
-ccs new web ~/src/web -- --model sonnet    # extra args after -- go to claude
-ccs ls                                     # NAME / STATE / PATH
-ccs attach api                             # the real terminal; detach with C-b d
-ccs logs api -n 100                        # recent scrollback
-ccs kill api                               # explicit; never touches non-ccs tmux sessions
-ccs resume api                             # restart an exited session: claude --resume <last session_id>
-ccs resume api --fresh                     # ...or start a new conversation in the same slot
-ccs forget api                             # drop an exited session from the list
+grovy serve                                  # daemon (or use the systemd unit below)
+grovy new api ~/src/api                      # start Claude in tmux session "grovy-api"
+grovy new web ~/src/web -- --model sonnet    # extra args after -- go to claude
+grovy ls                                     # NAME / STATE / PATH
+grovy attach api                             # the real terminal; detach with C-b d
+grovy logs api -n 100                        # recent scrollback
+grovy kill api                               # explicit; never touches non-grovy tmux sessions
+grovy resume api                             # restart an exited session: claude --resume <last session_id>
+grovy resume api --fresh                     # ...or start a new conversation in the same slot
+grovy forget api                             # drop an exited session from the list
+grovy rename api backend                      # rename (also while running; "api" stays reserved as its alias)
 ```
 
 ### Daemon as a service
 
 ```sh
-cp examples/ccs.service ~/.config/systemd/user/   # edit ExecStart path + CCS_BIND
-systemctl --user daemon-reload && systemctl --user enable --now ccs
+cp examples/grovy.service ~/.config/systemd/user/   # edit ExecStart path + GROVY_BIND
+systemctl --user daemon-reload && systemctl --user enable --now grovy
 loginctl enable-linger "$USER"
 ```
 
@@ -65,22 +70,22 @@ The daemon binds to **127.0.0.1 by default**. To reach it from the phone, bind i
 machine's VPN address (Tailscale / WireGuard / …), never `0.0.0.0` on a machine with a public interface:
 
 ```sh
-CCS_BIND=100.101.102.103 ccs serve        # or 0.0.0.0 for every interface
-ccs url                                   # prints http://ADDR:7333/?token=... : open it once on the phone
+GROVY_BIND=100.101.102.103 grovy serve        # or 0.0.0.0 for every interface
+grovy url                                   # prints http://ADDR:7333/?token=... : open it once on the phone
 ```
 
 **A token is always required, loopback included**, because other local users and DNS-rebinding web pages can
-reach 127.0.0.1 too. It's generated once into `$STATE/token` (mode 0600). `CCS_TOKEN` overrides it. Opening the `ccs url` link sets an HttpOnly, SameSite=Strict
+reach 127.0.0.1 too. It's generated once into `$STATE/token` (mode 0600). `GROVY_TOKEN` overrides it. Opening the `grovy url` link sets an HttpOnly, SameSite=Strict
 cookie for a year. Without it the page shows "login needed" and the API returns 401. To rotate the token, delete the
-file and restart the daemon. `CCS_AUTH=off` temporarily accepts requests without a token while still setting the
-cookie from the link. That's useful for enrolling a phone whose only way to see the link is the ccs page itself.
+file and restart the daemon. `GROVY_AUTH=off` temporarily accepts requests without a token while still setting the
+cookie from the link. That's useful for enrolling a phone whose only way to see the link is the grovy page itself.
 Without TLS the token protects against other peers on the network, not an on-path observer; the VPN provides the
 encryption. Cookies aren't isolated by port, so another web service on the same host name/IP that your phone visits
 would also receive the cookie. Only browse services there that you trust.
 
 **Host check:** requests are accepted only when the `Host` header is an IP address, `localhost`, or this machine's
 host name. That defeats DNS rebinding, where a malicious page reaches the daemon through its own domain name. To use
-another name, such as a MagicDNS name, add it to `CCS_HOSTS` (comma-separated). Hook ingestion is **never** on the network: it uses a Unix socket with mode 0600 in the state directory.
+another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated). Hook ingestion is **never** on the network: it uses a Unix socket with mode 0600 in the state directory.
 
 "Add to Home Screen" on the phone gives it an app-like icon.
 
@@ -88,20 +93,20 @@ another name, such as a MagicDNS name, add it to `CCS_HOSTS` (comma-separated). 
 
 | var | default | |
 |---|---|---|
-| `CCS_BIND`, `CCS_PORT` | `127.0.0.1`, `7333` | HTTP listener (`ccs serve --bind/--port` too) |
-| `CCS_TOKEN` | `$STATE/token` | web UI token (auto-generated) |
-| `CCS_HOSTS` | unset | extra accepted `Host` names, comma-separated |
-| `CCS_AUTH` | `on` | `off` = don't require the token (enrollment only) |
-| `CCS_STATE_DIR` | `$XDG_STATE_HOME/ccs` → `~/.local/state/ccs` | all state, mode 0700 |
-| `CCS_PERMISSION_TIMEOUT` | `600` | seconds a permission waits for the phone (fixed per session at `ccs new`) |
-| `CCS_CLAUDE` | `claude` | claude executable |
-| `CCS_NOTIFY_CMD` | unset | command run with a short message on stdin (see below) |
-| `CCS_PUBLIC_URL` | unset | appended to notifications as a link |
-| `CCS_DEBUG` | unset | log HTTP requests |
+| `GROVY_BIND`, `GROVY_PORT` | `127.0.0.1`, `7333` | HTTP listener (`grovy serve --bind/--port` too) |
+| `GROVY_TOKEN` | `$STATE/token` | web UI token (auto-generated) |
+| `GROVY_HOSTS` | unset | extra accepted `Host` names, comma-separated |
+| `GROVY_AUTH` | `on` | `off` = don't require the token (enrollment only) |
+| `GROVY_STATE_DIR` | `$XDG_STATE_HOME/grovy` → `~/.local/state/grovy` | all state, mode 0700 |
+| `GROVY_PERMISSION_TIMEOUT` | `600` | seconds a permission waits for the phone (fixed per session at `grovy new`) |
+| `GROVY_CLAUDE` | `claude` | claude executable |
+| `GROVY_NOTIFY_CMD` | unset | command run with a short message on stdin (see below) |
+| `GROVY_PUBLIC_URL` | unset | appended to notifications as a link |
+| `GROVY_DEBUG` | unset | log HTTP requests |
 
 ### Notifications (Telegram or anything else)
 
-`CCS_NOTIFY_CMD` runs, without a shell, for: *permission needed*, *needs input in terminal*,
+`GROVY_NOTIFY_CMD` runs, without a shell, for: *permission needed*, *needs input in terminal*,
 *turn finished*, and *error*. Each message is one line, `[name] reason` (+ link), and never contains
 command output or the full prompt. It is rate-limited to one per session per kind per 60s, and runs
 in a background thread with a 15s timeout, so a failing bot never blocks hooks or Claude.
@@ -110,13 +115,13 @@ in a background thread with a 15s timeout, so a failing bot never blocks hooks o
 ## How it works
 
 **Identity.** Three different IDs, kept apart:
-* *ccs name* (`api`): stable; validated `[A-Za-z0-9][A-Za-z0-9_-]{0,31}`.
-* *tmux session* `ccs-api`: tagged with the tmux option `@ccs=api` and always addressed exactly
-  (`=ccs-api`). A session counts as managed only if it carries the tag, and tmux is the authority on whether it exists.
+* *grovy name* (`api`): stable; validated `[A-Za-z0-9][A-Za-z0-9_-]{0,31}`.
+* *tmux session* `grovy-api`: tagged with the tmux option `@grovy=api` and always addressed exactly
+  (`=grovy-api`). A session counts as managed only if it carries the tag, and tmux is the authority on whether it exists.
 * *Claude session_id*: learned from `SessionStart`. It changes on `/clear`, `/resume`, etc., and the latest one is
-  stored in the registry for `ccs resume`.
+  stored in the registry for `grovy resume`.
 
-  The hook command line is `ccs hook api`, so events are attributed from argv, not from cwd.
+  The hook command line is `grovy hook api`, so events are attributed from argv, not from cwd.
   Several sessions can share a project. A `claude` started inside a session (e.g. by a tool) does not
   inherit `--settings`, so it can't pose as the session.
 
@@ -147,7 +152,7 @@ socket and blocks while the phone shows the tool name and full input (Bash comma
   answer a dialog that no longer exists.
 * The first decision wins; later or concurrent ones get HTTP 409. The UI only reports `delivered`
   after the hook has actually written the decision.
-* If the daemon is down, crashes, or the request isn't answered within `CCS_PERMISSION_TIMEOUT`, the hook
+* If the daemon is down, crashes, or the request isn't answered within `GROVY_PERMISSION_TIMEOUT`, the hook
   exits 0 **with no output**, and Claude's normal terminal dialog takes over. **Nothing is ever approved
   by default.**
 * No "always allow" and no rule changes. Your permission rules, deny rules and mode still apply first, so the
@@ -160,7 +165,7 @@ structured questions. The phone shows a question card: option buttons, multi-sel
 Claude to use its judgment. Verified with real Claude 2.1.325, in auto and default mode, including free-text answers.
 The terminal picker stays live in parallel, and whichever is answered first wins.
 
-**Prompts.** Claude Code has no input API, so ccs types into the pane. Prompts up to 20,000 characters
+**Prompts.** Claude Code has no input API, so grovy types into the pane. Prompts up to 20,000 characters
 are **typed** in 64-character `send-keys -l` chunks with 15ms pauses, with `C-j` for newlines and every `;` sent as a
 raw byte (tmux drops a trailing `;` from an argument). Small bursts aren't detected as a paste, so Claude receives the
 text as the user's own words. A real paste gets wrapped as `<pasted_content>`, which Claude treats as quoted material.
@@ -187,13 +192,13 @@ accepted:
 * `/clear` and `/compact`
 
 Anything else (`/model`, `/config`, `/resume`, …) opens a terminal menu or prints only to the terminal, so it's
-refused with a pointer to `ccs attach`. Skill names that would shadow a built-in or alias (compared case-insensitively)
+refused with a pointer to `grovy attach`. Skill names that would shadow a built-in or alias (compared case-insensitively)
 are ignored. A message starting with `!` (bash mode) is refused as well. Commands are typed followed by a space, which closes Claude Code's fuzzy menu so
 Enter can't pick a neighbour. Skills confirm through `UserPromptSubmit`; `/clear` and `/compact` emit none and confirm
 through `SessionStart(source=clear|compact)`. Typing `/` in the composer opens a picker of the allowed commands.
 
 **Interrupt.** While a session is `working` with no pending dialog, the ■ button presses Esc (after a confirm). Esc
-emits no hook, so ccs records the interrupt itself and sets the state to `unknown`. The next send asks "type anyway?".
+emits no hook, so grovy records the interrupt itself and sets the state to `unknown`. The next send asks "type anyway?".
 
 **Sessions from the phone.** The **＋** on the session list opens *New session*:
 * **Folders.** Pick one from a list (never a typed path) of folders where Claude won't stop at the workspace-trust
@@ -204,15 +209,21 @@ emits no hook, so ccs records the interrupt itself and sets the state to `unknow
 * **Continue a conversation.** Picking a folder also lists Claude's saved conversations for it (from
   `~/.claude/projects/`), newest first, by AI title, size and age. Tapping one shows a preview (first message,
   Claude's last reply), then:
-  * **Continue here** starts a ccs session with `claude --resume <id>`.
+  * **Continue here** starts a grovy session with `claude --resume <id>`.
   * **Fork a copy** adds `--fork-session`, giving a new id and leaving the original untouched.
-  * If the conversation is already open in a ccs session, you get **Open session X** instead.
-  * If it's open in a plain terminal, only a fork is offered, so there's never a second writer. ccs detects that from
+  * If the conversation is already open in a grovy session, you get **Open session X** instead.
+  * If it's open in a plain terminal, only a fork is offered, so there's never a second writer. grovy detects that from
     Claude Code's own `~/.claude/sessions/<pid>.json` (undocumented; best effort, checked against `/proc` start
     times).
-* **Session page.** The ⋯ menu has *Search this conversation* and *Stop session*. An exited session shows **Resume
+* **Session page.** The ⋯ menu has *Search this conversation*, *Rename* and *Stop session* (or *Remove from list*
+  once it has ended; ended sessions also get a *Remove* button in the list). An exited session shows **Resume
   session**. Tapping the title switches between sessions. *Load earlier* pages back through the event log. Yes / No /
   Go ahead chips appear when Claude's last reply ends with a question.
+
+**Renaming.** Works while Claude runs: the tmux session is renamed live, and the registry keeps the old name as an
+*alias*. The running Claude keeps reporting its hook events under the old name until its next start (its hooks file is
+rewritten as well), so the daemon routes alias → current name. Old history records are shown under the new name. An
+alias can't be taken by another session until the renamed one is removed.
 
 ## Failure modes
 
@@ -223,7 +234,7 @@ emits no hook, so ccs records the interrupt itself and sets the state to `unknow
 | daemon restarted | sessions untouched; state reloaded and reconciled against tmux; `needs_input` stays `needs_input` (Claude falls back to its terminal dialog); in-flight prompts → `unconfirmed`; a "type anyway" consent never survives a restart |
 | daemon crashes during a permission | hook sees EOF → no output → terminal dialog |
 | Claude exits / tmux killed by hand | `SessionEnd` or reconciliation → `exited`; pending permissions expire; queued prompts → `failed` |
-| resumed with a new Claude session_id | `SessionStart` updates the id; history stays under the ccs name |
+| resumed with a new Claude session_id | `SessionStart` updates the id; history stays under the grovy name |
 | prompt while busy | queued, typed after `Stop` |
 | two clients send prompts | each is queued (under a lock) and delivered one at a time, in order |
 | two clients answer one permission | first wins, the other gets 409 |
@@ -236,12 +247,12 @@ emits no hook, so ccs records the interrupt itself and sets the state to `unknow
 ## Known limitations
 
 * **Prompt injection is keystrokes into a TUI.** If you've half-typed something in the terminal input, the
-  web prompt is appended to it. ccs can't see that without scraping the screen, which it deliberately doesn't do.
+  web prompt is appended to it. grovy can't see that without scraping the screen, which it deliberately doesn't do.
   If a dialog that emits no hook is open (`/model`, `/config`, a rewind menu, the workspace-trust prompt…), the
-  keystrokes go to that dialog. ccs only types in hook-confirmed idle states, and every typed prompt must be
+  keystrokes go to that dialog. grovy only types in hook-confirmed idle states, and every typed prompt must be
   confirmed by `UserPromptSubmit`, but a non-zero window remains. Use the terminal for anything unusual.
 * **Workspace trust.** Claude holds back *all* hooks until a new folder's trust dialog is accepted. For a new
-  project (or any git repo you haven't opened in Claude before), `ccs attach` once and accept it. Until then the
+  project (or any git repo you haven't opened in Claude before), `grovy attach` once and accept it. Until then the
   session shows `starting`. The phone only offers folders that won't hit the dialog.
 * **After answering a dialog in the terminal**, state can be `unknown` until Claude's next hook event
   (e.g. its `idle_prompt` notification); see the "type anyway?" confirmation above.
@@ -272,15 +283,15 @@ isolation between sessions, and that an unrelated look-alike session is never to
 
 ### Manual end-to-end procedure (real Claude Code)
 
-1. `ccs serve` in one terminal; `ccs new demo /tmp/demo -- --permission-mode default`. If it stays
-   `starting`, `ccs attach demo` and accept the trust dialog.
+1. `grovy serve` in one terminal; `grovy new demo /tmp/demo -- --permission-mode default`. If it stays
+   `starting`, `grovy attach demo` and accept the trust dialog.
 2. Open the page and check that `demo` becomes `idle`.
 3. Send `Reply with exactly: pong` plus a second line containing `"quotes"` and `$HOME`. Expect a `queued`/typed
    bubble, then the user bubble from `UserPromptSubmit`, then `pong`.
 4. Send `Use the Bash tool to run: touch x`. Expect a permission card with the exact command and the
-   dialog also visible in `ccs attach demo`. Tap **Allow once** and confirm the file exists.
+   dialog also visible in `grovy attach demo`. Tap **Allow once** and confirm the file exists.
 5. Repeat with `rm x`, but answer **No** in the terminal. The card should disappear (`expired`).
 6. Stop the daemon mid-permission. The terminal dialog should remain answerable. Restart the daemon; the session is still there.
-7. Close SSH, reopen, `ccs attach demo`.
+7. Close SSH, reopen, `grovy attach demo`.
 
 Steps 1–5 were run against Claude Code 2.1.325 during development.

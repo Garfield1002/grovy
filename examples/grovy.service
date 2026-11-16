@@ -1,0 +1,22 @@
+# systemd user unit for the grovy daemon.
+#   cp examples/grovy.service ~/.config/systemd/user/ && edit paths/env
+#   systemctl --user daemon-reload && systemctl --user enable --now grovy
+#   loginctl enable-linger $USER   # keep it running while logged out
+# Restarting/stopping this unit never affects Claude sessions (they live in tmux).
+[Unit]
+Description=grovy - Claude Code session manager daemon
+
+[Service]
+ExecStart=%h/dev/grovy/grovy serve
+# Bind to your VPN interface address (e.g. Tailscale/WireGuard IP). Default is loopback only.
+Environment=GROVY_BIND=127.0.0.1
+Environment=GROVY_PORT=7333
+# Beyond loopback a token is required automatically: run `grovy url` and open the link once per device.
+# Optional notifications: any command; receives the message on stdin.
+#Environment=GROVY_NOTIFY_CMD=%h/dev/grovy/examples/notify-telegram.sh
+#Environment=GROVY_PUBLIC_URL=http://100.x.y.z:7333/
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
