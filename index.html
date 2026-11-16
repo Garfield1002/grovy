@@ -79,8 +79,9 @@ body.home #backdrop { display:block; }
 /* conversation */
 .u { margin:18px 0 6px auto; max-width:86%; width:fit-content; background:var(--user); padding:9px 13px;
   border-radius:18px 18px 4px 18px; white-space:pre-wrap; overflow-wrap:anywhere; }
-.u .st { display:block; font-size:12px; color:var(--mut); margin-top:3px; text-align:right; }
-.u .st.bad { color:var(--bad); } .u .st.warn { color:var(--warn); } .u .rd { color:var(--busy); letter-spacing:-2px; }
+.u .st { display:block; font-size:12px; color:var(--mut); margin-top:3px; text-align:left; }
+.u .st.bad { color:var(--bad); } .u .st.warn { color:var(--warn); } .tk { display:inline-flex; margin-right:5px; font-size:14px; font-weight:600; }
+.tk i { font-style:normal; display:inline-block; transform:scaleY(.75); } .tk i+i { margin-left:-.45em; } .tk.rd { color:var(--busy); } .u .tm { margin-right:4px; }
 .u.pending { opacity:.75; }
 .u button.link { border:0; background:none; color:var(--acc); padding:0 0 0 6px; font-size:12px; }
 .a { margin:6px 0 4px; overflow-wrap:anywhere; }
@@ -370,7 +371,7 @@ function ago(ts) {
 const mmss = s => { s = Math.max(0, s); return Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0"); };
 let skew = 0;   // server clock minus this device's clock: timers compare server timestamps with "now"
 const serverNow = () => Date.now() / 1000 + skew;
-const clock = ts => new Date(ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+const clock = ts => new Date(ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
 const base = p => (p || "?").split("/").filter(Boolean).pop() || p;
 const LABEL = {needs_input: "needs you", idle: "idle", working: "working", starting: "starting",
                exited: "exited", unknown: "unknown", error: "error"};
@@ -862,7 +863,7 @@ function eventNode(e, isLatestReply) {
     case "UserPromptSubmit": {
       const m = String(d.prompt || "").match(MACHINE);
       if (m) return machineNode(m[1], d.prompt);      // not typed by you: subagent reports, task notices
-      return h("div", {class: "u"}, unwrap(d.prompt), h("span", {class: "st"}, READ()));
+      return h("div", {class: "u"}, unwrap(d.prompt), h("span", {class: "st"}, sent(d.sent || e.ts), READ()));
     }
     case "Stop": {
       const text = d.last_assistant_message || "";
@@ -881,7 +882,7 @@ function eventNode(e, isLatestReply) {
     case "SessionStart": return sysLine(SOURCE[d.source] || "session started");
     case "SessionEnd": return sysLine("Claude exited", d.reason && d.reason !== "other" ? " (" + d.reason.replace(/_/g, " ") + ")" : "");
     case "Exited": return sysLine("terminal closed");
-    case "Steered": return h("div", {class: "u"}, unwrap(d.prompt), h("span", {class: "st"}, "sent while Claude worked ", READ()));
+    case "Steered": return h("div", {class: "u"}, unwrap(d.prompt), h("span", {class: "st"}, sent(d.sent || e.ts), READ(), "sent while Claude worked"));
     case "Killed": return h("div", {class: "err"}, "⚠ Killed by the system's out-of-memory killer: memory ran short on this machine, "
       + "probably because of a big job (here or elsewhere). Resume continues the conversation.");
     case "Interrupted": return sysLine("■ interrupted from the phone");
@@ -1061,18 +1062,22 @@ function permNode(p) {
     h("div", {class: "row"}, deny, allow));
 }
 // WhatsApp-style receipts: ✓ grovy has it, ✓✓ typed into Claude Code, blue ✓✓ Claude read it (its hook fired).
-const PSTATUS = {queued: ["✓ waiting: Claude gets it at its next step, or when it's done", ""], injected: ["sending…", ""],
-  unconfirmed: ["not confirmed: check the terminal", "warn"], failed: ["failed", "bad"], cancelled: ["cancelled", ""]};
-const TYPED = {compact: "✓✓ compacting…", clear: "✓✓ clearing…"};
-const READ = () => h("span", {class: "rd", title: "Claude read it"}, "✓✓");
+// [ticks, label, class]
+const PSTATUS = {queued: [1, "waiting: Claude gets it at its next step, or when it's done", ""], injected: [0, "sending…", ""],
+  unconfirmed: [0, "not confirmed: check the terminal", "warn"], failed: [0, "failed", "bad"], cancelled: [0, "cancelled", ""]};
+const TYPED = {compact: "compacting…", clear: "clearing…"};
+const ticks = (n, read) => h("span", {class: "tk" + (read ? " rd" : ""), title: read ? "Claude read it" : n > 1 ? "typed into Claude Code" : "grovy has it"},
+  ...Array.from({length: n}, () => h("i", {}, "✓")));
+const READ = () => ticks(2, true);
+const sent = ts => typeof ts === "number" ? h("span", {class: "tm"}, clock(ts)) : "";
 function promptNode(p) {
-  const [label, cls] = p.status === "injected" && p.typed ? [TYPED[p.command] || "✓✓ delivered", ""]
-    : p.status === "unconfirmed" && p.typed ? ["✓✓ typed, but Claude never confirmed it: check the terminal", "warn"]
-    : PSTATUS[p.status] || [p.status, ""];
+  const [n, label, cls] = p.status === "injected" && p.typed ? [2, TYPED[p.command] || "delivered", ""]
+    : p.status === "unconfirmed" && p.typed ? [2, "typed, but Claude never confirmed it: check the terminal", "warn"]
+    : PSTATUS[p.status] || [0, p.status, ""];
   const cancel = p.status === "queued" ? h("button", {class: "link", onclick: async () => {
     try { await api(`/api/prompts/${p.id}/cancel`, {}); } catch (e) { say(e.message); } refresh(); }}, "cancel") : null;
   return h("div", {class: "u pending"}, p.text,
-    h("span", {class: "st " + cls}, label, p.error && p.status !== "unconfirmed" ? ": " + p.error : "", cancel));
+    h("span", {class: "st " + cls}, sent(p.created), ...(n ? [ticks(n)] : []), label, p.error && p.status !== "unconfirmed" ? ": " + p.error : "", cancel));
 }
 function cached(key, make) {
   if (!cache.has(key)) { const n = make(); if (!n) return null; cache.set(key, n); }

@@ -159,7 +159,7 @@ Longer prompts take the literal bracketed-paste path, with control characters st
   automatically**, and `injected` is persisted *before* typing, so a crash can't cause a double send.
 * Receipts, WhatsApp-style: ✓ `queued` (grovy has it); ✓✓ `injected` with `typed` set (Enter was pressed, so
   Claude Code has it; for `/compact` the UI says "compacting…"); blue ✓✓ on the chat bubble (`UserPromptSubmit`
-  or `Steered`: Claude read it). `typed` is only set after a send that wasn't aborted.
+  or `Steered`: Claude read it). `typed` is only set after a send that wasn't aborted. Bubbles show the time the user sent the message: `UserPromptSubmit` and `Steered` events from a grovy prompt carry `sent` (its `created`), since the event's own `ts` is when Claude read it; prompts typed in the terminal fall back to `ts`.
 * Typing re-checks between chunks and before Enter. If Claude starts something on its own meanwhile (a background
   task finishing) or opens a permission request, grovy stops **without pressing Enter**, so the Enter can't answer
   a dialog, and marks the prompt failed. Part of it may be left in the terminal input.

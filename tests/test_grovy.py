@@ -1106,6 +1106,24 @@ class TestSteering(StoreCase):
         self.assertEqual(self.pasted, [("a", "one more thing")])    # typed as a normal message
         self.assertIsNone(self.store.take_steers("a"))
 
+    def test_events_carry_the_send_time(self):
+        """The bubble shows when the user sent a message, not when Claude got to it."""
+        self.busy()
+        self.store.enqueue("a", "steer me")
+        created = self.store.prompts[-1]["created"]
+        time.sleep(0.05)
+        self.store.take_steers("a")
+        self.store.ingest("a", ev("Stop", last_assistant_message="ok"))
+        self.store.enqueue("a", "hello there")
+        self.wait_pasted(1)
+        typed = self.store.prompts[-1]["created"]
+        time.sleep(0.05)
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="hello there"))
+        sent = {e["type"]: e["data"].get("sent") for e in self.store.events["a"] if e["type"] in ("Steered", "UserPromptSubmit")}
+        self.assertEqual(sent, {"Steered": created, "UserPromptSubmit": typed})
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="typed in the terminal"))
+        self.assertNotIn("sent", self.store.events["a"][-1]["data"])
+
     def test_commands_and_long_messages_keep_their_place(self):
         self.busy()
         self.store.enqueue("a", "first")

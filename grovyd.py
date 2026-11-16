@@ -276,6 +276,10 @@ class Store:
                 data = {k: clip(payload[k]) for k in KEEP.get(ev, ()) if k in payload}
                 if ev == "Stop":
                     data["background_tasks"] = _count(payload.get("background_tasks"))
+                if ev == "UserPromptSubmit":
+                    p = self._confirm_prompt(name, payload.get("prompt", ""))
+                    if p:
+                        data["sent"] = p["created"]  # when the user sent it; the event's ts is when Claude read it
                 self._record(name, ev, data, sid)
             if ev == "SessionStart":
                 s["claude_session_id"] = sid
@@ -296,7 +300,6 @@ class Store:
                 m = MACHINE_PROMPT.match(text)  # injected by Claude Code itself, not typed by the user
                 self._set(name, "working", ("subagent report" if m.group(1) == "agent-message" else "task notification")
                           if m else "prompt: " + text[:120])
-                self._confirm_prompt(name, payload.get("prompt", ""))
             elif ev == "PostToolUse":
                 if s["state"] != "exited" and not self._pending(name):
                     self._set(name, "working", f"ran {payload.get('tool_name', 'tool')}")
@@ -910,7 +913,7 @@ class Store:
                 return None
             for p in take:
                 p["status"], p["updated"] = "steered", now()
-                self._record(name, "Steered", {"prompt": clip(p["text"])})
+                self._record(name, "Steered", {"prompt": clip(p["text"]), "sent": p["created"]})
             self._save_prompts()
         self.publish(name)
         one = len(take) == 1
@@ -934,7 +937,8 @@ class Store:
                     (squash(p["text"]) == t or squash(p["text"])[:200] == t[:200]):
                 p["status"], p["updated"] = "submitted", now()
                 self._save_prompts()
-                return
+                return p
+        return None
 
     def try_deliver(self, name):
         """Type the oldest queued prompt into the session, if and only if that is known to be safe."""
