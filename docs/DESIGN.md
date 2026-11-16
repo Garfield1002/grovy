@@ -219,7 +219,9 @@ are ignored. A message starting with `!` (bash mode) is refused as well. Command
 Enter can't pick a neighbour. Skills confirm through `UserPromptSubmit`; `/clear` and `/compact` emit none and confirm
 through `SessionStart(source=clear|compact)`. Typing `/` in the composer opens a picker of the allowed commands.
 
-**Interrupt.** While a session is `working` with no pending dialog, the ■ button presses Esc (after a confirm). Esc
+**Interrupt.** While a session is `working` with no pending dialog and the message box is empty, the send button
+becomes ■ (stop), which presses Esc (after a confirm); once you type, it becomes a blue steer arrow. Ctrl+Enter only
+ever sends, never stops. Esc
 emits no hook, so grovy records the interrupt itself and sets the state to `unknown`. The next send asks "type anyway?".
 
 **Sessions from the phone.** The **＋** on the session list opens *New session*:

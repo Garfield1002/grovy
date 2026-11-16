@@ -281,9 +281,12 @@ textarea:focus { border-color:var(--mut); }
 .attc button { border:0; background:none; color:var(--mut); min-width:30px; min-height:30px; flex:none; }
 .attl { display:flex; width:fit-content; max-width:100%; margin:4px 0; font-size:13.5px; padding:3px 10px; border-radius:8px;
   background:color-mix(in srgb, var(--fg) 7%, transparent); overflow-wrap:anywhere; }
-#stop { width:46px; height:46px; border-radius:50%; border:1px solid var(--line); background:var(--card); flex:none;
-  display:grid; place-items:center; color:var(--bad); }
-#stop i { width:14px; height:14px; border-radius:3px; background:currentColor; }
+/* one button, three jobs: send; steer (Claude is working and you typed something: blue, it gets it at its next step);
+   stop (Claude is working and the box is empty: interrupt, after a confirm) */
+#send .sq { display:none; width:14px; height:14px; border-radius:3px; background:currentColor; }
+#send.steer { background:var(--busy); }
+#send.stop { background:var(--card); border:1px solid var(--line); color:var(--bad); }
+#send.stop svg { display:none; } #send.stop .sq { display:block; }
 #picker { display:flex; flex-direction:column; gap:2px; margin:0 0 8px; max-height:40vh; overflow-y:auto; }
 #picker:empty { display:none; }
 .cmd { flex:none; text-align:left; border:0; background:var(--card); border-radius:10px; padding:8px 12px; min-height:44px; }
@@ -443,7 +446,6 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   <button id="resume" class="resume hidden">Resume session</button>
   <div id="atts"></div>
   <div class="cr">
-    <button id="stop" class="hidden" aria-label="Interrupt Claude"><i></i></button>
     <div class="tbox">
       <textarea id="input" rows="1" placeholder="Message Claude…" enterkeyhint="enter"></textarea>
       <button id="attach" class="tbtn" aria-label="Attach files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -452,7 +454,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
         stroke-width="2.2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
     </div><input id="file" type="file" multiple class="hidden">
     <button id="send" aria-label="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
-      stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+      stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg><i class="sq"></i></button>
   </div>
 </div></div>
 <div id="err" class="hidden" role="alert"></div>
@@ -1367,7 +1369,7 @@ async function renderDetail(name) {
     && (!input.value.trim() || $("quick").childElementCount > 0);   // a draft hides them, but keeps the space of ones shown
   $("quick").classList.toggle("hold", !!input.value.trim());
   $("quick").replaceChildren(...(asks ? ["Yes", "No", "Go ahead"].map(t => h("button", {class: "chip", onclick: () => quickSend(t)}, t)) : []));
-  $("stop").classList.toggle("hidden", !(s.state === "working" && !d.permissions.length));
+  canStop = s.state === "working" && !d.permissions.length; syncSend();
 
   // scrolling: new reply -> its first line; otherwise stick to the bottom if we were there
   const maxId = d.events.length ? d.events[d.events.length - 1].id : 0;
@@ -1459,7 +1461,18 @@ $("clear").onclick = () => {
   autosize(); picker(); input.focus();
 };
 input.addEventListener("input", () => { try { localStorage.setItem(draftKey(), input.value); } catch (e) {} autosize(); });
-$("send").onclick = async () => {
+let canStop = false;   // Claude is working with no dialog pending: an empty box turns Send into Stop
+function syncSend() {
+  const typed = !!input.value.trim() || atts.some(a => a.path);
+  const mode = canStop && !typed ? "stop" : cur && cur.state === "working" ? "steer" : "send";
+  const b = $("send");
+  b.classList.toggle("stop", mode === "stop"); b.classList.toggle("steer", mode === "steer");
+  b.setAttribute("aria-label", mode === "stop" ? "Interrupt Claude" : mode === "steer" ? "Steer: Claude gets this at its next step" : "Send");
+  b.title = b.getAttribute("aria-label");
+}
+input.addEventListener("input", syncSend);
+$("send").onclick = () => $("send").classList.contains("stop") ? interrupt() : sendNow();
+async function sendNow() {
   if (atts.some(a => a.busy)) return say("Wait for the attachments to finish uploading.");
   const files = atts.filter(a => a.path), typed = input.value;
   if ((!typed.trim() && !files.length) || !view) return;
@@ -1477,8 +1490,9 @@ $("send").onclick = async () => {
     first = true;   // jump to the bottom to show the outgoing message
   } catch (e) { say("Not sent: " + e.message); }
   $("send").disabled = false;
+  syncSend();
   refresh();
-};
+}
 
 // ---------------------------------------------------------------- scroll to the latest
 function syncToBottom() {
@@ -1503,6 +1517,7 @@ function loadAtts() {
 }
 const fmtSize = n => n < 1048576 ? Math.max(1, Math.round(n / 1024)) + " KB" : (n / 1048576).toFixed(1) + " MB";
 function drawAtts() {
+  syncSend();
   $("atts").replaceChildren(...atts.map(a => h("span", {class: "attc" + (a.busy ? " busy" : "")},
     ...(a.path && IMAGE.test(a.path) ? [h("img", {src: attUrl(a.path), alt: ""})] : []),
     h("span", {}, (a.path && IMAGE.test(a.path) ? "" : "📎 ") + a.name + (a.busy ? " · uploading…" : " · " + fmtSize(a.size))),
@@ -1571,11 +1586,11 @@ quoteBtn.onclick = () => {
   quoteInto(t, selWho);
 };
 
-$("stop").onclick = async () => {
+async function interrupt() {
   if (!view || !await ask("Interrupt Claude? (Same as pressing Esc in the terminal.)", "Interrupt", {danger: true})) return;
   try { await api(`/api/sessions/${encodeURIComponent(view)}/interrupt`, {}); } catch (e) { say(e.message); }
   refresh();
-};
+}
 
 // slash-command picker: only commands that are safe from the phone (skills, custom commands, /clear, /compact)
 let commands = [];
@@ -1896,7 +1911,7 @@ input.addEventListener("keydown", e => {
     e.preventDefault(); (hits[i < 0 ? 0 : i]).click();   // Tab or Enter completes the highlighted command (the first by default)
     return;
   }
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (!$("send").disabled) $("send").click(); return; }
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (!$("send").disabled) sendNow(); return; }
   if (e.key === "Escape" && !sheetOpen() && !viewing) {
     if ($("picker").childElementCount) $("picker").replaceChildren(); else input.blur();
   }
@@ -1943,7 +1958,7 @@ function go(hash) { location.hash = hash; }
 function route() {
   const m = location.hash.match(/^#\/s\/([A-Za-z0-9_-]+)$/);
   view = m ? m[1] : null; lastEventId = 0; cur = null; first = true; lastTool = ""; cache.clear();
-  older = []; noMore = false; closeSheet(); $("quick").replaceChildren();
+  older = []; noMore = false; closeSheet(); $("quick").replaceChildren(); canStop = false;
   $("add").classList.toggle("hidden", !!view); $("menu").classList.remove("hidden");
   $("title").classList.toggle("tap", !!view); $("resume").classList.add("hidden"); $("meta").classList.add("hidden");
   $("back").classList.toggle("hidden", !view);

@@ -46,7 +46,7 @@ in a terminal. grovy listens to Claude's hooks and shows everything on a phone-f
   publish full HTML pages (reports, dashboards) that open full-screen. A page can be shared on your network
   with a link.
 - **Steering:** a message you send while Claude is working reaches it at its next step, so you can correct course
-  without waiting or interrupting.
+  without waiting or interrupting (the button turns blue). With the box empty, the same button is ■ to stop Claude.
 - **Quote and copy:** each reply has Copy and Quote buttons; or select part of it and tap Quote selection. Tap a quote
   to jump back to where it came from. "Worked for 2m · 14 tool calls" under a reply lists what Claude ran.
 - **Attachments:** tap the paperclip in the empty message box to send photos or files; Claude gets them as files it can open (kept for 7 days). Photos
