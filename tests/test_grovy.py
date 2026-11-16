@@ -1650,6 +1650,13 @@ class TestHttp(unittest.TestCase):
         self.assertEqual(h["X-Frame-Options"], "DENY")
         self.assertNotIn("Access-Control-Allow-Origin", h)
 
+    def test_server_time_for_clock_offset(self):
+        """Regression: the phone's clock ran behind the server's, so the typing timer showed "-1:-1"."""
+        for path in ("/api/sessions", "/api/sessions/a"):
+            code, body, _ = self.req(path)
+            self.assertEqual(code, 200)
+            self.assertAlmostEqual(json.loads(body)["now"], time.time(), delta=5)
+
     def test_page_is_sandboxed(self):
         _, p = self.store.publish_page("a", "r", "T", "<!doctype html><script>1</script>")
         code, body, h = self.req("/p/" + p["id"])

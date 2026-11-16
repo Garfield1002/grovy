@@ -361,13 +361,15 @@ function h(tag, attrs, ...kids) {           // never uses innerHTML: all text is
 }
 function ago(ts) {
   if (!ts) return "";
-  const s = Math.max(0, Date.now() / 1000 - ts);
+  const s = Math.max(0, serverNow() - ts);
   if (s < 45) return "now";
   if (s < 3600) return Math.round(s / 60) + "m";
   if (s < 86400) return Math.round(s / 3600) + "h";
   return Math.round(s / 86400) + "d";
 }
-const mmss = s => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+const mmss = s => { s = Math.max(0, s); return Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0"); };
+let skew = 0;   // server clock minus this device's clock: timers compare server timestamps with "now"
+const serverNow = () => Date.now() / 1000 + skew;
 const clock = ts => new Date(ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
 const base = p => (p || "?").split("/").filter(Boolean).pop() || p;
 const LABEL = {needs_input: "needs you", idle: "idle", working: "working", starting: "starting",
@@ -783,7 +785,8 @@ function md(src) {
 let showAllPages = false;
 async function renderList() {
   document.body.classList.add("home");
-  const [{sessions}, {pages: all}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
+  const [{sessions, now: srv}, {pages: all}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
+  if (typeof srv === "number") skew = srv - Date.now() / 1000;
   if (view !== null) return;
   pages = Object.fromEntries(all.map(p => [p.id, p]));
   if (viewing && !pages[viewing.id]) closeViewer();
@@ -796,7 +799,7 @@ async function renderList() {
       `Show all ${all.length} pages`) : null] : [];
   document.title = "grovy" + (sessions.some(s => s.pending_permissions || s.state === "needs_input") ? " (!)" : "");
   main.replaceChildren(...(sessions.length ? sessions.map(s => {
-    const stalled = s.state === "working" && Date.now() / 1000 - s.last_event > STALL;
+    const stalled = s.state === "working" && serverNow() - s.last_event > STALL;
     return h("button", {class: "sess", onclick: () => go("#/s/" + s.name)},
       h("span", {class: "dot " + s.state + (stalled ? " stalled" : "")}),
       h("div", {class: "body"},
@@ -1080,8 +1083,9 @@ async function renderDetail(name) {
   catch (e) { if (view === name && seq === renderSeq) main.replaceChildren(h("div", {class: "empty"}, e.message)); return; }
   if (view !== name || seq !== renderSeq) return;
   const s = d.session; cur = s;
+  if (typeof d.now === "number") skew = d.now - Date.now() / 1000;
   const nearBottom = innerHeight + scrollY >= document.documentElement.scrollHeight - 160;
-  const stalled = s.state === "working" && Date.now() / 1000 - s.last_event > STALL;
+  const stalled = s.state === "working" && serverNow() - s.last_event > STALL;
   $("pdot").className = "dot " + s.state + (stalled ? " stalled" : "");
   renderMeta(s.meta);
   $("ptext").textContent = LABEL[s.state] || s.state;
@@ -1106,7 +1110,7 @@ async function renderDetail(name) {
     if (n) items.push([e.ts, n]);
   }
   const outgoing = d.prompts.filter(p => p.status !== "submitted" && p.status !== "steered" &&
-    (p.status !== "cancelled" && p.status !== "failed" || Date.now() / 1000 - p.updated < 3600));
+    (p.status !== "cancelled" && p.status !== "failed" || serverNow() - p.updated < 3600));
   const live = p => p.status === "queued" || p.status === "injected";
   for (const p of outgoing.filter(p => !live(p))) items.push([p.created, cached("p" + p.id + p.status, () => promptNode(p))]);
   items.sort((a, b) => a[0] - b[0]);
@@ -1135,7 +1139,7 @@ async function renderDetail(name) {
     : s.can_force ? (s.state === "unknown" ? "Claude's state is unknown (e.g. a dialog was answered in the terminal)."
         : "No activity for a while (an Esc interrupt sends no event).") + " Sending will ask first."
     : s.state === "needs_input" ? "Claude is waiting on a terminal dialog (grovy attach " + s.name + "). Messages will queue."
-    : s.state === "starting" && Date.now() / 1000 - (s.last_event || 0) > 20 ? "Still starting: Claude is probably showing "
+    : s.state === "starting" && serverNow() - (s.last_event || 0) > 20 ? "Still starting: Claude is probably showing "
         + "the workspace-trust dialog for this folder. Accept it once in the terminal: grovy attach " + s.name + "."
     : "Claude is working. A message goes to it at its next step (or when it finishes).";
   $("send").disabled = s.state === "exited";
@@ -1194,8 +1198,8 @@ $("meta").onclick = () => {
 };
 function tick() {
   if (turnStart && !$("typing").classList.contains("hidden")) {
-    const idle = cur ? Date.now() / 1000 - cur.last_event : 0;
-    $("elapsed").textContent = idle > STALL ? "quiet for " + mmss(idle) + " (a long command may still be running)" : mmss(Date.now() / 1000 - turnStart);
+    const idle = cur ? serverNow() - cur.last_event : 0;
+    $("elapsed").textContent = idle > STALL ? "quiet for " + mmss(idle) + " (a long command may still be running)" : mmss(serverNow() - turnStart);
   }
 }
 setInterval(tick, 1000);

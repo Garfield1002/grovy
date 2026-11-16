@@ -1118,7 +1118,7 @@ class Store:
         with self.lock:
             if name not in self.sessions:
                 return None
-            return {"session": self.summary(name),
+            return {"session": self.summary(name), "now": now(),   # the page corrects for its own clock's offset
                     "events": list(self.events.get(name, ()))[-limit:],
                     "permissions": [_public(p) for p in self.perms.values()
                                     if p["session"] == name and p["status"] in ("pending", "deciding")],
@@ -1609,7 +1609,7 @@ class Http(http.server.BaseHTTPRequestHandler):
             return self._send(200, self.server.index, "text/html",
                               [("Content-Security-Policy", self.server.csp)])
         if path == "/api/sessions":
-            return self._send(200, {"sessions": store.list_sessions()})
+            return self._send(200, {"sessions": store.list_sessions(), "now": time.time()})
         if path == "/api/permissions":
             return self._send(200, {"permissions": store.permissions()})
         if path == "/api/events":
