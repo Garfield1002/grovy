@@ -157,6 +157,21 @@ class TestHookAdapter(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GROVY_WIDGETS": "0"}):
             self.assertEqual(self.run_hook(json.dumps(ev("SessionStart", source="startup")))[1], "")
 
+    def test_session_start_adds_plugin_context(self):
+        """What the daemon's plugins add goes between grovy's guide and the user's own instructions."""
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "instructions.md"), "w") as f:
+            f.write("MINE")
+        start = json.dumps(ev("SessionStart", source="startup"))
+        with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": d}):
+            ctx = json.loads(self.run_hook(start, reply={"context": "SPEC"})[1])["hookSpecificOutput"]["additionalContext"]
+            self.assertTrue(ctx.endswith("\n\nSPEC\n\nMINE"), ctx[-40:])
+            self.assertIn("```widget", ctx)
+            for bad in (None, {"context": 3}, {}):   # an older daemon, or nonsense: the rest still goes
+                ctx = json.loads(self.run_hook(start, reply=bad)[1])["hookSpecificOutput"]["additionalContext"]
+                self.assertTrue(ctx.endswith("```widget block it prints in your reply.") or ctx.endswith("\n\nMINE"))
+                self.assertNotIn("SPEC", ctx)
+
     def test_session_start_adds_user_instructions(self):
         d = tempfile.mkdtemp(dir=TMP)
         start = json.dumps(ev("SessionStart", source="clear"))
@@ -1079,6 +1094,36 @@ class TestPlugins(StoreCase):
         self.assertIn(b"user's", host.handle("GET", "swap", "who", {}, None)[1])
         self.assertIn(b"built-in", host.handle("GET", "keep", "who", {}, None)[1])
         self.assertEqual(host.failed, {})
+
+    def test_context(self):
+        """grovy.context: texts in load order; a slow, failing or oversized one is skipped, the others still count."""
+        code = "import time\ndef setup(grovy):\n    grovy.context(lambda s, info: %s)\n"
+        with mock.patch.object(plugins, "CONTEXT_TIMEOUT", 0.3):
+            host, _ = self.load({"a.py": code % "f'A {s} {info[\"cwd\"]} {info[\"source\"]}'",
+                                 "b.py": code % "None", "c.py": code % "1 / 0", "d.py": code % "time.sleep(5)",
+                                 "e.py": code % "'x' * 20000", "f.py": code % "3", "g.py": code % "'  G  '"})
+            with mock.patch("sys.stderr", io.StringIO()) as err:
+                t = time.monotonic()
+                self.assertEqual(host.context("s1", {"cwd": "/p", "source": "clear"}), "A s1 /p clear\n\nG")
+                self.assertLess(time.monotonic() - t, 1.0)
+            for why in ("ZeroDivisionError", "no answer", "at most", "not text"):
+                self.assertIn(why, err.getvalue())
+        none, _ = self.load({})
+        self.assertEqual(none.context("s1", {}), "")
+
+    def test_context_over_the_socket(self):
+        host, _ = self.load({"a.py": "def setup(grovy):\n    grovy.context(lambda s, info: info['cwd'])\n"})
+        def ask(payload, **extra):
+            h = grovyd.SockHandler.__new__(grovyd.SockHandler)
+            h.server = type("S", (), {"store": self.store})()
+            h.rfile = io.BytesIO(json.dumps({"type": "hook", "session": "a", "event": payload, **extra}).encode() + b"\n")
+            h.wfile = io.BytesIO()
+            h.handle()
+            return json.loads(h.wfile.getvalue() or b"null")
+        self.assertEqual(ask(ev("SessionStart", source="startup", cwd="/proj"), want_context=True), {"context": "/proj"})
+        self.assertIsNone(ask(ev("SessionStart", source="startup", cwd="/proj")))   # nobody asked: no answer
+        self.store.plugins = None   # plugins not loaded yet: an answer all the same
+        self.assertEqual(ask(ev("SessionStart", source="startup"), want_context=True), {"context": ""})
 
     def test_events_reach_plugins_as_copies_off_the_lock(self):
         host, _ = self.load({"good.py": GOOD_PLUGIN})

@@ -16,6 +16,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import traceback
 
 from . import core
@@ -28,6 +29,8 @@ SETUP_TIMEOUT = 10        # seconds for one plugin's setup(); past that it is sk
 ROUTE_TIMEOUT = 30        # seconds a route may take before the request gets 504 (its thread is left to finish)
 ROUTES_RUNNING = 8        # routes running at once (hung ones included); more get 503, so they can't use up the server
 ANSWER_MAX = 4 * 1024 * 1024
+CONTEXT_TIMEOUT = 1.5     # seconds all plugins together have to add to a session's start-up context (the hook waits)
+CONTEXT_MAX = 16 * 1024   # characters one plugin may add there
 BUILTIN_DIR = os.path.join(core.HERE, "plugins")
 
 
@@ -86,6 +89,16 @@ class Api:
         self._register("route", lambda: self._host.routes.__setitem__((self.name, method, path), fn))
         return fn
 
+    def context(self, fn):
+        """grovy.context(fn): fn(session, info) returns text to add to what Claude is told when a session starts,
+        resumes, or after /clear and /compact (or None for nothing). info has "cwd" (the session's folder) and
+        "source" (startup, resume, clear or compact). Answer fast: all plugins together get 1.5s, and a late or
+        failing one is skipped for that start. Also usable as a decorator."""
+        if not callable(fn):
+            raise TypeError("grovy.context needs a function")
+        self._register("context", lambda: self._host.contexts.append((self.name, fn)))
+        return fn
+
     # Copies are made under Store's lock: the originals change under other threads, and a plugin must never hold
     # (or change) grovy's own objects.
     def sessions(self):
@@ -124,6 +137,7 @@ class Plugins:
         self.builtin = builtin or BUILTIN_DIR
         self.handlers = {e: [] for e in EVENTS}
         self.routes = {}
+        self.contexts = []
         self.loaded, self.failed = [], {}
         self.q = queue.Queue(maxsize=QUEUE_MAX)
         self.dropped = 0
@@ -213,6 +227,39 @@ class Plugins:
                 log(f"plugins are too slow: {self.dropped} events dropped so far")
         except Exception as e:   # never let passing it on break the state change that emitted it
             log(f"plugins: couldn't pass on {event}: {type(e).__name__}: {e}")
+
+    def context(self, session, info):
+        """What the plugins add to a starting session's context: their texts in load order, run in parallel under one
+        shared deadline. Called by the SessionStart hook's connection, never under Store's lock."""
+        if not self.contexts:
+            return ""
+        out = [None] * len(self.contexts)
+
+        def run(i, name, fn):
+            try:
+                text = fn(session, copy.deepcopy(info))
+                if text is not None and not isinstance(text, str):
+                    raise TypeError(f"returned {type(text).__name__}, not text")
+                if text and len(text) > CONTEXT_MAX:
+                    raise ValueError(f"returned {len(text)} characters (at most {CONTEXT_MAX})")
+                out[i] = text
+            except BaseException as e:
+                log(f"plugin {name} (context): {type(e).__name__}: {e}")
+
+        threads = []
+        for i, (name, fn) in enumerate(self.contexts):
+            t = threading.Thread(target=run, args=(i, name, fn), name=f"grovy-context-{name}", daemon=True)
+            try:
+                t.start()
+            except RuntimeError:
+                continue
+            threads.append((name, t))
+        end = time.monotonic() + CONTEXT_TIMEOUT
+        for name, t in threads:
+            t.join(max(0, end - time.monotonic()))
+            if t.is_alive():
+                log(f"plugin {name} (context): no answer in {CONTEXT_TIMEOUT}s, skipped")
+        return "\n\n".join(t.strip() for t in list(out) if t and t.strip())
 
     def _run(self):
         while True:

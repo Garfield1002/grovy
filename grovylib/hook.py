@@ -99,18 +99,27 @@ def cmd_hook(name):
                                                                 "additionalContext": steer}}))
             sys.stdout.flush()
         return 0
+    if event == "SessionStart":   # also after /clear and /compact
+        # The daemon answers with what plugins add (their deadline is shorter than ours); without it, Claude still
+        # gets the rest.
+        added = None
+        try:
+            reply = client.sock_request({**msg, "want_context": True}, timeout=3.0)
+            added = (reply or {}).get("context")
+        except (OSError, ValueError) as e:
+            print(f"grovy hook: no plugin context ({e})", file=sys.stderr)
+        context = "\n\n".join(filter(None, [claude.widget_guide() if core.env("WIDGETS", "1") != "0" else "",
+                                             added if isinstance(added, str) else "", claude.user_instructions()]))
+        if context:
+            sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                                                "additionalContext": context}}))
+            sys.stdout.flush()
+        return 0
     if event != "PermissionRequest":
         try:
             client.sock_request(msg, timeout=2.0, wait_reply=False)
         except OSError as e:
             print(f"grovy hook: daemon unreachable ({e}); event not recorded", file=sys.stderr)
-        if event == "SessionStart":   # also after /clear and /compact
-            context = "\n\n".join(filter(None, [claude.widget_guide() if core.env("WIDGETS", "1") != "0" else "",
-                                                 claude.user_instructions()]))
-            if context:
-                sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
-                                                                    "additionalContext": context}}))
-                sys.stdout.flush()
         return 0
     try:
         reply = client.sock_request(msg, timeout=core.PERMISSION_TIMEOUT + 10)

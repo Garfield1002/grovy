@@ -55,6 +55,14 @@ class SockHandler(socketserver.StreamRequestHandler):
                 self._permission(store, name, payload)
             else:
                 store.ingest(name, payload)
+                if msg.get("want_context"):   # the SessionStart hook waits for what plugins add to Claude's context
+                    info = {"cwd": payload.get("cwd") if isinstance(payload.get("cwd"), str) else None,
+                            "source": payload.get("source") if isinstance(payload.get("source"), str) else None}
+                    text = store.plugins.context(name, info) if store.plugins else ""
+                    try:
+                        self._reply({"context": text})
+                    except OSError:
+                        pass   # the hook gave up waiting
                 if msg.get("want_steer"):   # the main agent's PostToolUse hook waits for this answer
                     steer = None
                     if payload.get("hook_event_name") == "PostToolUse" and not payload.get("agent_id"):

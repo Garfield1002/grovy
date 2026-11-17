@@ -28,7 +28,7 @@ The plugin must be built only on public APIs (D10), so these come first.
 
 - [x] Built-in daemon plugins: a repo `plugins/` folder loaded like `~/.config/grovy/plugins/`, on by default,
       each one can be turned off {#R1}
-- [ ] Plugin API: add text to a session's SessionStart context (like `WIDGET_GUIDE`), per project {#R2}
+- [x] Plugin API: add text to a session's SessionStart context (like `WIDGET_GUIDE`), per project {#R2}
 - [ ] Plugin API: a plugin may add a note to the `additionalContext` the `PostToolUse` hook already waits for
       (steering, 3s; no answer in time = no note). In subagents, which don't wait today, the hook waits only when
       the edited file is a `.md` beside an `index.md` whose header has `spec:` {#R3}

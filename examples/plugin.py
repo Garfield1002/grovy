@@ -7,6 +7,9 @@ A plugin runs inside the daemon. It defines setup(grovy) and uses only `grovy`:
     grovy.on("event", fn)    fn(session, record): each event the conversation records (a copy)
     grovy.on("state", fn)    fn(session, old, new): a session's state changed (idle, working, needs_input, ...)
     grovy.on("notify", fn)   fn(session, kind, text): the moments GROVY_NOTIFY_CMD runs (kind: input, done, error)
+    grovy.context(fn)        fn(session, info) returns text added to what Claude is told when a session starts,
+                             resumes, or after /clear and /compact (info: cwd, source), or None. Answer fast:
+                             all plugins together get 1.5s, a late one is skipped for that start.
     grovy.route(method, path, fn)   GET or POST /api/x/PLUGIN/PATH, behind grovy's login; fn(request) returns
                              something JSON-able, or (status, value). request.query (GET), request.body (POST).
                              Call it with grovy.api() from custom.js (a GET needs its X-Grovy header, so a link

@@ -135,6 +135,11 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   the built-in of that name (copy it and edit), and an empty `NAME.off` beside yours turns it off. Each defines `setup(grovy)` and uses the `Api`
   it is given (`grovylib/plugins.py`, example in `examples/plugin.py`):
   * `on("event" | "state" | "notify", fn)`.
+  * `context(fn)`: `fn(session, {cwd, source})` returns text added to what the `SessionStart` hook tells Claude, after
+    grovy's widget guide and before `instructions.md` (start, resume, `/clear`, `/compact`). The hook asks the daemon
+    (`want_context`) and waits up to 3s; all plugins together get 1.5s, run in parallel. A late, failing, non-text or
+    over-16K answer is skipped and logged, and so is everything from a daemon that doesn't answer (not running, plugins
+    not loaded yet, or a version without this): Claude still gets the rest.
   * `route("GET" | "POST", path, fn)` for `/api/x/PLUGIN/PATH`. It sits behind the token. POST is checked like the
     rest of the API. A GET also needs an `X-Grovy: 1` header, which `grovy.api` sends and a tapped link or a page's
     navigation can't. Keep GET routes read-only all the same.
