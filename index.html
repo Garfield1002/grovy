@@ -508,11 +508,16 @@ const STALL = 60;
 const dotClass = s => "dot " + s.state + (s.state === "working" && serverNow() - s.last_event > STALL ? " stalled" : "");
 const runMark = (n, short) => h("span", {class: "run", title: `${n} running in background`}, h("i"), short ? String(n) : `${n} running`);
 // replaceChildren, but keyboard focus stays on the same control (or on its rebuilt twin, matched by data-fk):
-// live updates re-render often, and losing focus each time would make Tab navigation useless
+// live updates re-render often, and losing focus each time would make Tab navigation useless.
+// A node already in its place is left there: taking it out and back in restarts its CSS animation, so a
+// cached card (a pending question) would replay its entrance on every refresh.
 function paint(box, ...kids) {
   const a = document.activeElement, had = a && a !== document.body && box.contains(a) ? a : null;
   const key = had && had.getAttribute("data-fk");
-  box.replaceChildren(...kids);
+  kids = kids.map(k => k instanceof Node ? k : document.createTextNode(String(k)));
+  const keep = new Set(kids);
+  for (const c of [...box.childNodes]) if (!keep.has(c)) c.remove();   // first, so kept ones needn't move past them
+  kids.forEach((k, i) => { if (box.childNodes[i] !== k) box.insertBefore(k, box.childNodes[i] || null); });
   if (!had) return;
   const t = had.isConnected ? had : key ? [...box.querySelectorAll("[data-fk]")].find(x => x.getAttribute("data-fk") === key) : null;
   if (t) t.focus({preventScroll: true});

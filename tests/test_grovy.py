@@ -2701,5 +2701,49 @@ class TestTmuxIntegration(unittest.TestCase):
         sessions.kill_session("it3")
 
 
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestPaint(unittest.TestCase):
+    """index.html's paint(), run in node against a minimal DOM."""
+    FAKE_DOM = r"""
+class Node { constructor(n) { this.n = n; this.parent = null; this.removed = 0; }
+  get isConnected() { return !!this.parent; } remove() { if (this.parent) this.parent._take(this); } }
+class Box extends Node { constructor() { super("box"); this.childNodes = []; }
+  get lastChild() { return this.childNodes[this.childNodes.length - 1] || null; }
+  contains(x) { return this.childNodes.includes(x); }
+  _take(x) { this.childNodes.splice(this.childNodes.indexOf(x), 1); x.parent = null; x.removed++; }
+  insertBefore(x, ref) { if (x.parent) x.parent._take(x);
+    const i = ref ? this.childNodes.indexOf(ref) : this.childNodes.length; this.childNodes.splice(i, 0, x); x.parent = this; }
+  replaceChildren(...ks) { [...this.childNodes].forEach(c => this._take(c)); ks.forEach(k => this.insertBefore(k, null)); }
+  querySelectorAll() { return []; } }
+globalThis.Node = Node;
+const document = {activeElement: null, body: {}, createTextNode: t => new Node("text:" + t)};
+"""
+
+    def run_paint(self, body):
+        src = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
+        fn = re.search(r"^function paint\(box, \.\.\.kids\) \{.*?^\}", src, re.S | re.M).group(0)
+        out = subprocess.run(["node", "-e", self.FAKE_DOM + fn + body], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_kept_node_is_never_taken_out(self):
+        """A pending question card blinked: each refresh took it out of the page and back, replaying its animation."""
+        r = self.run_paint("""
+const box = new Box(), a = new Node("a"), card = new Node("card"), b = new Node("b"), c = new Node("c");
+paint(box, a, card);
+paint(box, b, card, c);          // new nodes before and after the cached card
+paint(box, card);                // others go away
+console.log(JSON.stringify({removed: card.removed, order: box.childNodes.map(x => x.n),
+                            gone: [a, b, c].map(x => x.isConnected)}));""")
+        self.assertEqual(r, {"removed": 0, "order": ["card"], "gone": [False, False, False]})
+
+    def test_reorders_and_text(self):
+        r = self.run_paint("""
+const box = new Box(), a = new Node("a"), b = new Node("b");
+paint(box, a, b); paint(box, b, "hi", a);
+console.log(JSON.stringify(box.childNodes.map(x => x.n)));""")
+        self.assertEqual(r, ["b", "text:hi", "a"])
+
+
 if __name__ == "__main__":
     unittest.main()
