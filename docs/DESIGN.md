@@ -140,6 +140,13 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
     (`want_context`) and waits up to 3s; all plugins together get 1.5s, run in parallel. A late, failing, non-text or
     over-16K answer is skipped and logged, and so is everything from a daemon that doesn't answer (not running, plugins
     not loaded yet, or a version without this): Claude still gets the rest.
+  * `after_edit(fn, glob="*")`: `fn(session, {path, tool, cwd, agent_id})` right after Claude or a subagent edits a
+    file (Edit, Write, MultiEdit, NotebookEdit) whose absolute path matches `glob` (`fnmatch`, `*` crosses `/`). Text it
+    returns goes back as the `PostToolUse` hook's `additionalContext`, which Claude reads before its next step. The main
+    agent's hook already waits for steering (`want_steer`, 3s); the daemon asks plugins first (all together 1s, at most
+    4K each) and takes steers last. A subagent's hook doesn't wait, except for an edit whose path matches a glob grovyd
+    publishes to `edit-watch.json` in the state dir (rewritten empty at each start, then with the plugins' globs); it
+    asks with `want_note` and never takes the main agent's steers.
   * `route("GET" | "POST", path, fn)` for `/api/x/PLUGIN/PATH`. It sits behind the token. POST is checked like the
     rest of the API. A GET also needs an `X-Grovy: 1` header, which `grovy.api` sends and a tapped link or a page's
     navigation can't. Keep GET routes read-only all the same.

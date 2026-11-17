@@ -50,6 +50,11 @@ def config_dir():
     return env("CONFIG_DIR") or os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "grovy")
 
 
+def edit_watch_path():
+    """The globs of edited files daemon plugins want to hear about (written by grovyd, read by subagents' hooks)."""
+    return os.path.join(state_dir(), "edit-watch.json")
+
+
 def state_dir():
     d = env("STATE_DIR") or default_state_dir()
     os.makedirs(d, mode=0o700, exist_ok=True)

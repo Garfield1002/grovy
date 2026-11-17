@@ -10,6 +10,9 @@ A plugin runs inside the daemon. It defines setup(grovy) and uses only `grovy`:
     grovy.context(fn)        fn(session, info) returns text added to what Claude is told when a session starts,
                              resumes, or after /clear and /compact (info: cwd, source), or None. Answer fast:
                              all plugins together get 1.5s, a late one is skipped for that start.
+    grovy.after_edit(fn, glob="*.md")   fn(session, info) right after Claude or a subagent edits a file matching glob
+                             (info: path, tool, cwd, agent_id). Text it returns is handed to Claude before its
+                             next step, e.g. to point out a mistake. All plugins together get 1s; Claude waits.
     grovy.route(method, path, fn)   GET or POST /api/x/PLUGIN/PATH, behind grovy's login; fn(request) returns
                              something JSON-able, or (status, value). request.query (GET), request.body (POST).
                              Call it with grovy.api() from custom.js (a GET needs its X-Grovy header, so a link

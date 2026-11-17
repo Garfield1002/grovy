@@ -63,12 +63,14 @@ class SockHandler(socketserver.StreamRequestHandler):
                         self._reply({"context": text})
                     except OSError:
                         pass   # the hook gave up waiting
-                if msg.get("want_steer"):   # the main agent's PostToolUse hook waits for this answer
-                    steer = None
-                    if payload.get("hook_event_name") == "PostToolUse" and not payload.get("agent_id"):
-                        steer = store.take_steers(name)
+                if msg.get("want_steer") or msg.get("want_note"):   # a PostToolUse hook waits for this answer
+                    steer = note = None
+                    if payload.get("hook_event_name") == "PostToolUse":
+                        note = store.plugins.after_edit(name, payload) if store.plugins else None
+                        if msg.get("want_steer") and not payload.get("agent_id"):   # last: the reply goes right after
+                            steer = store.take_steers(name)
                     try:
-                        self._reply({"steer": steer})
+                        self._reply({"steer": steer, "note": note or None})
                     except OSError:
                         pass   # the hook gave up waiting; the message was marked steered but may not have arrived
         elif t == "status":
@@ -716,8 +718,17 @@ def serve(bind, port):
     st.reconcile()
     threading.Thread(target=sock.serve_forever, daemon=True).start()
 
+    def publish_globs(globs):   # subagents' hooks ask about an edit only when its path matches one of these
+        try:
+            core.atomic_write_json(core.edit_watch_path(), globs)
+        except OSError as e:
+            print(f"grovyd: can't write {core.edit_watch_path()}: {e}", file=sys.stderr)
+
     def load_plugins():   # once the sockets are up (and this is the only daemon): plugins never delay hooks or the page
         st.plugins = plugins.Plugins(st).load()
+        publish_globs(st.plugins.edit_globs())
+
+    publish_globs([])   # not the last daemon's: its plugins may be gone
 
     threading.Thread(target=load_plugins, name="grovy-plugin-load", daemon=True).start()
 

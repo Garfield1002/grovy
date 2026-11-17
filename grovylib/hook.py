@@ -1,4 +1,5 @@
 """The hook adapter: Claude Code runs `grovy hook NAME` for every hook event (and `grovy statusline`)."""
+import fnmatch
 import json
 import os
 import subprocess
@@ -47,6 +48,23 @@ def permission_output(behavior, message=None, updated_input=None):
     return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
 
 
+def plugins_watch(payload):
+    """Whether a daemon plugin wants to hear about the file this PostToolUse edited: its path matches a glob grovyd
+    published (core.edit_watch_path). Read on each edit, so it follows a daemon restart."""
+    inp = payload.get("tool_input")
+    if payload.get("tool_name") not in claude.EDIT_TOOLS or not isinstance(inp, dict):
+        return False
+    path = inp.get("file_path") or inp.get("notebook_path")
+    if not isinstance(path, str):
+        return False
+    try:
+        with open(core.edit_watch_path()) as f:
+            globs = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return isinstance(globs, list) and any(isinstance(g, str) and fnmatch.fnmatchcase(path, g) for g in globs)
+
+
 def cmd_hook(name):
     """Read one hook event from stdin. stdout is reserved for protocol output; diagnostics -> stderr.
 
@@ -86,17 +104,19 @@ def cmd_hook(name):
         except OSError as e:
             print(f"grovy hook: registry update failed: {e}", file=sys.stderr)
     msg = {"type": "hook", "session": name, "event": payload, "pid": os.getppid()}
-    if event == "PostToolUse" and not payload.get("agent_id"):
-        # Steering: messages sent from the phone while Claude works come back here and are handed to Claude.
+    if event == "PostToolUse" and (not payload.get("agent_id") or plugins_watch(payload)):
+        # Steering: messages sent from the phone while Claude works come back here and are handed to Claude, with
+        # what daemon plugins say about an edit. A subagent waits only for an edit some plugin watches.
+        want = {"want_note": True} if payload.get("agent_id") else {"want_steer": True}
         try:
-            reply = client.sock_request({**msg, "want_steer": True}, timeout=3.0)
+            reply = client.sock_request({**msg, **want}, timeout=3.0)
         except (OSError, ValueError) as e:
             print(f"grovy hook: daemon unreachable ({e}); event not recorded", file=sys.stderr)
             return 0
-        steer = (reply or {}).get("steer")
-        if isinstance(steer, str) and steer:
+        said = [t for t in ((reply or {}).get("steer"), (reply or {}).get("note")) if isinstance(t, str) and t]
+        if said:
             sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
-                                                                "additionalContext": steer}}))
+                                                                "additionalContext": "\n\n".join(said)}}))
             sys.stdout.flush()
         return 0
     if event == "SessionStart":   # also after /clear and /compact

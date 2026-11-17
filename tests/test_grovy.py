@@ -172,6 +172,30 @@ class TestHookAdapter(unittest.TestCase):
                 self.assertTrue(ctx.endswith("```widget block it prints in your reply.") or ctx.endswith("\n\nMINE"))
                 self.assertNotIn("SPEC", ctx)
 
+    def test_post_tool_use_notes(self):
+        """The main agent's PostToolUse always asks (steering); a subagent's only for an edit a plugin watches."""
+        sent = []
+        def fake(msg, timeout=2.0, wait_reply=True):
+            sent.append((msg.get("want_steer"), msg.get("want_note"), wait_reply))
+            return {"steer": "STEER" if msg.get("want_steer") else None, "note": "NOTE"} if wait_reply else None
+        def run(payload):
+            out = io.StringIO()
+            with mock.patch.object(client, "sock_request", fake), mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                    redirect_stdout(out), mock.patch("sys.stderr", io.StringIO()):
+                hook.cmd_hook("x")
+            return json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"] if out.getvalue() else None
+        d = tempfile.mkdtemp(dir=TMP)
+        edit = lambda path, **kw: ev("PostToolUse", tool_name="Edit", tool_input={"file_path": path}, **kw)
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": d}):
+            self.assertEqual(run(edit("/p/a.md")), "STEER\n\nNOTE")
+            self.assertIsNone(run(edit("/p/a.md", agent_id="sub")))   # no globs published: a subagent doesn't wait
+            core.atomic_write_json(core.edit_watch_path(), ["*.md"])
+            self.assertEqual(run(edit("/p/a.md", agent_id="sub")), "NOTE")
+            self.assertIsNone(run(edit("/p/a.py", agent_id="sub")))
+            self.assertIsNone(run(ev("PostToolUse", tool_name="Read", tool_input={"file_path": "/p/a.md"}, agent_id="sub")))
+        self.assertEqual(sent, [(True, None, True), (None, None, False), (None, True, True), (None, None, False),
+                                (None, None, False)])
+
     def test_session_start_adds_user_instructions(self):
         d = tempfile.mkdtemp(dir=TMP)
         start = json.dumps(ev("SessionStart", source="clear"))
@@ -1124,6 +1148,41 @@ class TestPlugins(StoreCase):
         self.assertIsNone(ask(ev("SessionStart", source="startup", cwd="/proj")))   # nobody asked: no answer
         self.store.plugins = None   # plugins not loaded yet: an answer all the same
         self.assertEqual(ask(ev("SessionStart", source="startup"), want_context=True), {"context": ""})
+
+    def test_after_edit(self):
+        """grovy.after_edit: only edits whose path matches the plugin's glob, with what was edited and by whom."""
+        code = ("def setup(grovy):\n    @grovy.after_edit(glob=%r)\n"
+                "    def f(s, i): return f\"%s {s} {i['path']} {i['tool']} {i['agent_id']} {i['cwd']}\"\n")
+        host, _ = self.load({"md.py": code % ("*.md", "MD"), "all.py": code % ("*", "ALL")})
+        self.assertEqual(host.edit_globs(), ["*", "*.md"])
+        edit = lambda path, tool="Edit", **kw: ev("PostToolUse", tool_name=tool, tool_input={"file_path": path}, cwd="/p", **kw)
+        self.assertEqual(host.after_edit("s", edit("/p/a.md")), "ALL s /p/a.md Edit None /p\n\nMD s /p/a.md Edit None /p")
+        self.assertEqual(host.after_edit("s", edit("/p/a.py", "Write", agent_id="ag1")), "ALL s /p/a.py Write ag1 /p")
+        self.assertEqual(host.after_edit("s", edit("/p/a.md", "Read")), "")          # not an edit
+        self.assertEqual(host.after_edit("s", edit("a.md")), "")                     # not an absolute path
+        self.assertEqual(host.after_edit("s", ev("PostToolUse", tool_name="NotebookEdit",
+                                                 tool_input={"notebook_path": "/p/n.ipynb"})), "ALL s /p/n.ipynb NotebookEdit None None")
+        with self.assertRaises(ValueError):
+            plugins.Api(host, "x").after_edit(lambda s, i: None, glob="")
+
+    def test_after_edit_over_the_socket(self):
+        host, _ = self.load({"md.py": "def setup(grovy):\n    grovy.after_edit(lambda s, i: 'NOTE', glob='*.md')\n"})
+        self.store.ingest("a", ev("UserPromptSubmit", prompt="go"))
+        self.store.enqueue("a", "steer me")
+        def ask(payload, **extra):
+            h = grovyd.SockHandler.__new__(grovyd.SockHandler)
+            h.server = type("S", (), {"store": self.store})()
+            h.rfile = io.BytesIO(json.dumps({"type": "hook", "session": "a", "event": payload, **extra}).encode() + b"\n")
+            h.wfile = io.BytesIO()
+            h.handle()
+            return json.loads(h.wfile.getvalue() or b"null")
+        edit = lambda path, **kw: ev("PostToolUse", tool_name="Edit", tool_input={"file_path": path}, **kw)
+        r = ask(edit("/p/x.md", agent_id="sub"), want_note=True)   # a subagent never takes the main agent's steers
+        self.assertEqual(r, {"steer": None, "note": "NOTE"})
+        self.assertEqual(ask(edit("/p/x.py"), want_steer=True)["note"], None)
+        r = ask(edit("/p/x.md"), want_steer=True)
+        self.assertEqual(r["note"], "NOTE")
+        self.assertIsNone(r["steer"])   # taken by the previous edit already
 
     def test_events_reach_plugins_as_copies_off_the_lock(self):
         host, _ = self.load({"good.py": GOOD_PLUGIN})

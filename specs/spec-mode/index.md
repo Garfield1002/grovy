@@ -2,7 +2,7 @@
 spec: 1
 title: Spec mode
 status: draft
-next: {R: 17, D: 29, G: 8}
+next: {R: 17, D: 30, G: 8}
 parts: [format.md, decisions.md]
 ---
 
@@ -29,9 +29,9 @@ The plugin must be built only on public APIs (D10), so these come first.
 - [x] Built-in daemon plugins: a repo `plugins/` folder loaded like `~/.config/grovy/plugins/`, on by default,
       each one can be turned off {#R1}
 - [x] Plugin API: add text to a session's SessionStart context (like `WIDGET_GUIDE`), per project {#R2}
-- [ ] Plugin API: a plugin may add a note to the `additionalContext` the `PostToolUse` hook already waits for
-      (steering, 3s; no answer in time = no note). In subagents, which don't wait today, the hook waits only when
-      the edited file is a `.md` beside an `index.md` whose header has `spec:` {#R3}
+- [x] Plugin API: `grovy.after_edit(fn, glob)` answers an edit with a note Claude reads before its next step,
+      riding on the wait the main agent's hook already does for steering. A subagent's hook waits only when the
+      edited path matches a glob some plugin registered (D29) {#R3}
 - [ ] `window.grovy`: a full-screen view of an extension's own, with a route so it can be linked to {#R4}
 
 ### Phase 2: parser and lint

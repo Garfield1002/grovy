@@ -48,3 +48,6 @@ Append-only. Settled in the grill session of 2026-11-17 unless stated otherwise.
 - {#D27} 2026-11-17: Edits made outside Claude (by hand, `git pull`) are ignored for now: no rescan.
 - {#D28} 2026-11-17: Plugin notes ride on the after-edit wait the main session already does for steering. Subagents
   wait too, but only after editing a spec file, so their spec mistakes are caught and other edits stay fast.
+- {#D29} 2026-11-17: Plugins register a glob with `after_edit`, and grovyd publishes the globs for subagents'
+  hooks, instead of the hook recognising spec files itself. Why: grovy's core stays free of spec knowledge. The
+  spec plugin watches `*.md` and ignores files that aren't part of a spec. Amends D28.

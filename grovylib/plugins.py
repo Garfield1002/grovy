@@ -9,6 +9,7 @@ lock is held, so a slow or failing plugin can't stall hooks, permissions or the 
 GROVY_PLUGINS=0 loads none, built-in ones included (to rule them out when something misbehaves).
 """
 import copy
+import fnmatch
 import importlib.util
 import json
 import os
@@ -19,7 +20,7 @@ import threading
 import time
 import traceback
 
-from . import core
+from . import claude, core
 
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 ROUTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}){0,3}")
@@ -31,6 +32,17 @@ ROUTES_RUNNING = 8        # routes running at once (hung ones included); more ge
 ANSWER_MAX = 4 * 1024 * 1024
 CONTEXT_TIMEOUT = 1.5     # seconds all plugins together have to add to a session's start-up context (the hook waits)
 CONTEXT_MAX = 16 * 1024   # characters one plugin may add there
+NOTE_TIMEOUT = 1.0        # seconds all plugins together have to answer an edit (Claude waits for it)
+NOTE_MAX = 4 * 1024       # characters one plugin may say after an edit
+GLOB_RE = re.compile(r"[^\x00-\x1f]{1,200}")
+
+
+def edited_path(payload):
+    """The file a PostToolUse payload edited, or None (not an edit tool, or no path)."""
+    if payload.get("tool_name") not in claude.EDIT_TOOLS or not isinstance(payload.get("tool_input"), dict):
+        return None
+    p = payload["tool_input"].get("file_path") or payload["tool_input"].get("notebook_path")
+    return p if isinstance(p, str) and os.path.isabs(p) else None
 BUILTIN_DIR = os.path.join(core.HERE, "plugins")
 
 
@@ -89,6 +101,20 @@ class Api:
         self._register("route", lambda: self._host.routes.__setitem__((self.name, method, path), fn))
         return fn
 
+    def after_edit(self, fn=None, glob="*"):
+        """grovy.after_edit(fn, glob="*.md"): fn(session, info) right after Claude (or one of its subagents) edits a
+        file whose absolute path matches glob (fnmatch: * matches / too). info has "path", "tool", "cwd" and
+        "agent_id" (None for the main agent). Return text and Claude reads it before its next step (to point out a
+        mistake, say), or None. Answer fast: all plugins together get 1s, Claude waits for it. Also a decorator."""
+        if not isinstance(glob, str) or not GLOB_RE.fullmatch(glob):
+            raise ValueError(f"grovy.after_edit: bad glob {glob!r}")
+        if fn is None:
+            return lambda f: self.after_edit(f, glob)
+        if not callable(fn):
+            raise TypeError("grovy.after_edit needs a function")
+        self._register("after_edit", lambda: self._host.edits.append((self.name, fn, glob)))
+        return fn
+
     def context(self, fn):
         """grovy.context(fn): fn(session, info) returns text to add to what Claude is told when a session starts,
         resumes, or after /clear and /compact (or None for nothing). info has "cwd" (the session's folder) and
@@ -138,6 +164,7 @@ class Plugins:
         self.handlers = {e: [] for e in EVENTS}
         self.routes = {}
         self.contexts = []
+        self.edits = []    # (plugin, fn, glob)
         self.loaded, self.failed = [], {}
         self.q = queue.Queue(maxsize=QUEUE_MAX)
         self.dropped = 0
@@ -229,36 +256,55 @@ class Plugins:
             log(f"plugins: couldn't pass on {event}: {type(e).__name__}: {e}")
 
     def context(self, session, info):
-        """What the plugins add to a starting session's context: their texts in load order, run in parallel under one
-        shared deadline. Called by the SessionStart hook's connection, never under Store's lock."""
-        if not self.contexts:
+        """What the plugins add to a starting session's context. Called by the SessionStart hook's connection."""
+        return self._gather("context", [(n, fn) for n, fn in self.contexts], session, info, CONTEXT_TIMEOUT, CONTEXT_MAX)
+
+    def edit_globs(self):
+        """What the subagents' hooks check an edited path against before asking (grovyd publishes it to a file)."""
+        return sorted({g for _, _, g in self.edits})
+
+    def after_edit(self, session, payload):
+        """What the plugins say about the edit this PostToolUse reports ("" if nothing, or not an edit)."""
+        path = edited_path(payload)
+        if not path:
             return ""
-        out = [None] * len(self.contexts)
+        fns = [(n, fn) for n, fn, g in self.edits if fnmatch.fnmatchcase(path, g)]
+        agent = payload.get("agent_id")
+        info = {"path": path, "tool": payload.get("tool_name"), "agent_id": agent if isinstance(agent, str) else None,
+                "cwd": payload.get("cwd") if isinstance(payload.get("cwd"), str) else None}
+        return self._gather("after_edit", fns, session, info, NOTE_TIMEOUT, NOTE_MAX)
+
+    def _gather(self, what, fns, session, info, timeout, limit):
+        """Run fn(session, info) for each (plugin, fn) in parallel under one shared deadline, never under Store's lock;
+        their texts joined in load order. A late, failing, non-text or oversized answer is logged and skipped."""
+        if not fns:
+            return ""
+        out = [None] * len(fns)
 
         def run(i, name, fn):
             try:
                 text = fn(session, copy.deepcopy(info))
                 if text is not None and not isinstance(text, str):
                     raise TypeError(f"returned {type(text).__name__}, not text")
-                if text and len(text) > CONTEXT_MAX:
-                    raise ValueError(f"returned {len(text)} characters (at most {CONTEXT_MAX})")
+                if text and len(text) > limit:
+                    raise ValueError(f"returned {len(text)} characters (at most {limit})")
                 out[i] = text
             except BaseException as e:
-                log(f"plugin {name} (context): {type(e).__name__}: {e}")
+                log(f"plugin {name} ({what}): {type(e).__name__}: {e}")
 
         threads = []
-        for i, (name, fn) in enumerate(self.contexts):
-            t = threading.Thread(target=run, args=(i, name, fn), name=f"grovy-context-{name}", daemon=True)
+        for i, (name, fn) in enumerate(fns):
+            t = threading.Thread(target=run, args=(i, name, fn), name=f"grovy-{what}-{name}", daemon=True)
             try:
                 t.start()
             except RuntimeError:
                 continue
             threads.append((name, t))
-        end = time.monotonic() + CONTEXT_TIMEOUT
+        end = time.monotonic() + timeout
         for name, t in threads:
             t.join(max(0, end - time.monotonic()))
             if t.is_alive():
-                log(f"plugin {name} (context): no answer in {CONTEXT_TIMEOUT}s, skipped")
+                log(f"plugin {name} ({what}): no answer in {timeout}s, skipped")
         return "\n\n".join(t.strip() for t in list(out) if t and t.strip())
 
     def _run(self):

@@ -13,6 +13,7 @@ HOOK_EVENTS = ("SessionStart", "SessionEnd", "UserPromptSubmit", "PermissionRequ
                "Notification", "Stop", "StopFailure", "PostToolUse", "SubagentStart", "SubagentStop")
 # The ones still forwarded when fired inside a subagent (GROVY_SUBAGENT_HOOKS=1: all): requests waiting on the
 # user, and what the phone's list of background work needs. The daemon never takes session state from them.
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")   # their PostToolUse names the file in file_path
 SUBAGENT_EVENTS = ("PermissionRequest", "Notification", "SubagentStart", "SubagentStop", "PostToolUse")
 
 
