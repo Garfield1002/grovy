@@ -8,7 +8,7 @@ Description=grovy - Claude Code session manager daemon
 
 [Service]
 ExecStart=%h/dev/grovy/grovy serve
-# Bind to your VPN interface address (e.g. Tailscale/WireGuard IP). Default is loopback only.
+# Bind to your VPN interface address (e.g. your WireGuard IP). Default is loopback only.
 Environment=GROVY_BIND=127.0.0.1
 Environment=GROVY_PORT=7333
 # Beyond loopback a token is required automatically: run `grovy url` and open the link once per device.

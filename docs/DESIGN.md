@@ -35,7 +35,7 @@ by the user's own `~/.config/grovy/instructions.md` if there is one (see "Making
 ## Network access and the token
 
 The daemon binds to **127.0.0.1 by default**. To reach it from the phone, bind it to the
-machine's VPN address (Tailscale / WireGuard / …), never `0.0.0.0` on a machine with a public interface:
+machine's VPN address, never `0.0.0.0` on a machine with a public interface:
 
 ```sh
 GROVY_BIND=100.101.102.103 grovy serve        # or 0.0.0.0 for every interface

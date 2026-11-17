@@ -12,7 +12,7 @@ You need Linux (or macOS), Python 3.11+, tmux, and Claude Code signed in.
 git clone <this repo> ~/grovy && ~/grovy/grovy setup
 ```
 
-Setup asks one question (which network address your phone will use; it suggests your Tailscale address if
+Setup asks one question (which network address your phone will use; it suggests your VPN address if
 you have one), installs grovy as a background service that starts at boot, and prints a link. **Open that
 link once on your phone**: it logs the phone in. Bookmark the page or "Add to Home Screen".
 

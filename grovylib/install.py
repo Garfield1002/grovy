@@ -114,10 +114,10 @@ def _ask(prompt, default):
 def _pick_bind(assume_yes):
     out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5).stdout.split()
     addrs = [a for a in out if ":" not in a]
-    vpn = [a for a in addrs if ipaddress.ip_address(a) in ipaddress.ip_network("100.64.0.0/10")]   # Tailscale
+    vpn = [a for a in addrs if ipaddress.ip_address(a) in ipaddress.ip_network("100.64.0.0/10")]   # mesh-VPN range
     choices = [("127.0.0.1", "this computer only (no phone access)"),
                ("0.0.0.0", "every network this computer is on")] + \
-              [(a, "Tailscale/VPN address" if a in vpn else "this address only") for a in addrs]
+              [(a, "VPN address" if a in vpn else "this address only") for a in addrs]
     default = vpn[0] if vpn else "0.0.0.0"
     if assume_yes or not sys.stdin.isatty():
         return default
