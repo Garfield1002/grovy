@@ -399,24 +399,37 @@ when closed. With a mouse (`pointer: fine`), opening a session focuses the messa
 pop the keyboard), and permission cards are never focused automatically, so a stray Enter can't answer one. Live
 re-renders keep keyboard focus on the same control (`paint()`, matching rebuilt rows by `data-fk`).
 
-**Spec mode.** A built-in plugin (`plugins/spec.py`) and extension (`extensions/spec.js`); its own design, decisions
-and roadmap are the first spec, `specs/spec-mode/`. A spec is a folder of the session's git repo whose `index.md`
-header has `spec: 1`, plus the files its `parts:` lists. grovy only reads specs (from git-tracked and untracked,
-not ignored, `.md` files, rescanned at most every 5s); Claude writes them, and the page's actions only draft messages.
-* SessionStart (`grovy.context`): the conventions (`FORMAT`), a line per spec (counts, items in progress, problems),
-  and the index of each `active` spec (at most two, 6000 characters each). Parts are read on demand.
-* After an edit to a `.md` file (`grovy.after_edit`, glob `*.md`): if it is a spec's index or part, the spec is
-  parsed and checked, and its problems go back to Claude at once. Checks: format version, duplicate IDs, a `next`
-  counter behind the highest ID or missing a prefix, an item without an ID, `doing` without a claim, a decision
-  without a date, a missing part. IDs in code spans and fenced blocks are examples, not IDs.
-* Routes `GET /api/x/spec/list?session=` and `spec?session=&rel=`: the spec is chosen among those found in that
-  session's repo, so no path from the page is ever opened. ⋯ → Specs opens the view: overall and per-section
-  progress (an ID left in prose counts as done), items in progress with their claim, problems, decisions (superseded
-  ones greyed), glossary, and each file rendered. It reloads at most every 5s while the session reports updates.
-* References: when a session opens, the page fetches `ids?session=` (every ID of the repo's specs: `spec-mode#R7`
-  always, a bare `R7` only when a single spec has it). In rendered markdown (not code blocks, links or buttons), a
-  known ID becomes a chip that opens the view scrolled to it. Messages drawn before the IDs arrive are linked then;
-  your own messages are not markdown, so they stay plain.
+**Spec mode.** A built-in plugin (`plugins/spec.py`, which is also the `grovy spec` command) and extension
+(`extensions/spec.js`); its own design, decisions and roadmap are the first spec, `specs/spec-mode/`. A spec is a
+folder of the session's git repo whose `index.md` header has `spec: 1` (a number: the format version), plus the
+`.md` files its `parts:` lists. Only `index.md` files git knows of (tracked, or new and not ignored) are looked at,
+rescanned at most every 5s (at once when an `index.md` is edited). A part must resolve, symlinks included, to a
+`.md` file inside the repo, or it is left out with a problem: a cloned repo can't make grovy read files from
+elsewhere. Everything is designed to keep Claude's context small (an adversarial review measured it):
+* SessionStart (`grovy.context`): only a pointer, under 600 characters: one line per spec (counts, items in
+  progress with their claim) and the commands. The conventions (`GUIDE`) are read on demand with `grovy spec guide`,
+  like a skill; parts and the index are never injected.
+* Reading: `grovy spec status` (open items, one line each) and `grovy spec show R7` (one item, decision or term, where
+  it is, and the live decisions that mention it) instead of reading files.
+* Writing: `grovy spec add|claim|tick|todo|drop|decide|term` assign IDs (the highest in use plus one: no counter to
+  keep), change the line in place under a lock on the index, and print one line plus any problem they caused. Claude
+  never has to read a file before writing to it (Claude Code's Edit needs a Read first, which made one decision cost
+  ~3k tokens). `claim` takes `$GROVY_SESSION` and refuses an item someone else claimed. Editing by hand stays allowed.
+* After a hand edit to a `.md` file (`grovy.after_edit`, glob `*.md`): if it belongs to a spec, the spec is checked and
+  only the problems that weren't there before (compared without line numbers) go back to Claude, with a count of
+  older ones; nothing when nothing new. A subagent (which gets no SessionStart) is also pointed at `grovy spec guide`.
+  Checks: format version, duplicate IDs, an item without an ID, `doing` without a claim, a decision without a date, a
+  missing or outside part, a file over 8 KB (each Read of it costs that much). IDs in code spans, fenced blocks and
+  HTML comments are examples, not IDs; quoted and numbered list items count like others; only `D` IDs make decisions.
+* Routes `GET /api/x/spec/list?session=`, `spec?session=&rel=[&if=STAMP]` (`{"same": true}` when no file changed)
+  and `ids?session=`: the spec is chosen among those found in that session's repo, so no path from the page is ever
+  opened. ⋯ → Specs opens the view: overall and per-section progress (an ID left in prose counts as done), items in
+  progress with their claim, problems, decisions (superseded ones greyed), glossary, and each file rendered. While
+  the session reports updates it asks at most every 5s, and redraws only when a file changed, keeping what was open.
+* References: the page fetches `ids` when a session opens, and again (at most every 15s) when a reply names an
+  `R`/`D`/`G` ID it doesn't know. In rendered markdown (not code, links or buttons), a known ID becomes a chip that
+  opens the view scrolled to it (`spec-mode#R7` always; a bare `R7` only when a single spec has it; an unknown
+  `name#R7` falls back to `R7`). Your own messages are not markdown, so they stay plain.
 
 **Widgets.** Claude's reply can contain ` ```widget ` blocks holding one JSON object: `chart` (bar, line, pie),
 `stats`, `progress`, `checklist`, `choices`, `form`, `diagram` or `image`. The page draws them itself with DOM and SVG;

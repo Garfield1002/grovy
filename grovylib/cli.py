@@ -6,7 +6,7 @@ import re
 import sys
 import time
 
-from . import client, core, hook, install, projects, scriptlib, sessions, tmuxctl
+from . import client, core, hook, install, plugins, projects, scriptlib, sessions, tmuxctl
 
 
 def cmd_ls(_):
@@ -252,7 +252,22 @@ def cmd_tail(a):
     return 0
 
 
+def cmd_plugin(name, args):
+    """`grovy spec ...`: run a plugin file as a command (the user's copy if they have one)."""
+    path = plugins.plugin_file(name)
+    if not path:
+        print(f"grovy {name}: the {name} plugin is turned off or missing", file=sys.stderr)
+        return 1
+    os.execv(sys.executable, [sys.executable, path, *args])
+
+
+PLUGIN_COMMANDS = ("spec",)
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] in PLUGIN_COMMANDS:   # its own arguments, untouched by argparse
+        return cmd_plugin(argv[0], argv[1:])
     p = argparse.ArgumentParser(prog="grovy", description="Minimal Claude Code session manager")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("new", help="start Claude Code in a new tmux session")
@@ -322,6 +337,7 @@ def main(argv=None):
     s = sub.add_parser("tail", help="copy stdin to stdout, showing its last lines live on the phone")
     s.add_argument("--title"), s.add_argument("--lines", type=int, default=40), s.add_argument("--key")
     s.set_defaults(fn=cmd_tail)
+    sub.add_parser("spec", help="read and write this repo's specs (grovy spec guide)")   # handled before argparse
     sub.add_parser("doctor", help="check dependencies and connectivity").set_defaults(fn=install.cmd_doctor)
     sub.add_parser("url", help="print the web UI link(s), including the login token").set_defaults(fn=install.cmd_url)
     a = p.parse_args(argv)

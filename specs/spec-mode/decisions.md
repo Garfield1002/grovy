@@ -54,3 +54,15 @@ Append-only. Settled in the grill session of 2026-11-17 unless stated otherwise.
 - {#D30} 2026-11-17: A view has no URL: `grovy.open` shows it, and the back button closes it like the page viewer.
   Why: links into a spec come from inside the page (chips, menus), and a hash route per view would tangle with
   session routing. Narrows R4.
+- {#D31} 2026-11-17: Specs are written through `grovy spec` commands (add, claim, tick, drop, decide, term): they
+  assign the ID, change the line in place and print one line, so Claude never reads a spec file just to write to
+  it. Editing by hand stays allowed and checked. Why: Edit needs a Read first, which made one decision cost ~3k
+  tokens (adversarial review). Supersedes D5.
+- {#D32} 2026-11-17: No `next` counter: the next ID is the highest in use plus one, worked out by the commands.
+  Supersedes D2's counter (IDs stay stable and are never reused).
+- {#D33} 2026-11-17: At session start Claude gets a pointer, not the index: one line per spec and the commands
+  (`grovy spec show R7` for one item with its live decisions, `grovy spec guide` for the conventions, read on
+  demand like a skill). Supersedes D8's conventions-at-start and R9's index injection.
+- {#D34} 2026-11-17: After-edit notes report only the problems the edit introduced, plus a count of older ones.
+- {#D35} 2026-11-17: Documentation prose lives in parts; the index stays a short map (overview, now, roadmap,
+  glossary). The check warns when the index or a part grows past ~8 KB. Amends D17.

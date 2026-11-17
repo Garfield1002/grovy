@@ -3,6 +3,7 @@
 No API key needed: integration tests use a fake `claude` (a shell loop) inside real tmux,
 on a private tmux server socket (-L) so your own tmux sessions are never touched.
 """
+import datetime
 import io
 import json
 import re
@@ -2890,7 +2891,6 @@ SPEC_INDEX = """---
 spec: 1
 title: Demo
 status: active
-next: {R: 6, D: 3, G: 2}
 parts: [decisions.md]
 ---
 
@@ -2919,17 +2919,18 @@ Login links expire after a year {#R1}. Example syntax: `{#R99}` is not an ID.
 SPEC_DECISIONS = """# Decisions
 
 - {#D1} 2026-11-17: Markdown in the repo. Why: agents edit files.
-- {#D2} 2026-11-18: Plain checkboxes. Supersedes D1.
+- {#D2} 2026-11-18: Plain checkboxes, as R2
+  says. Supersedes D1.
 """
 
 
 @unittest.skipUnless(shutil.which("git"), "git not installed")
 class TestSpecPlugin(unittest.TestCase):
-    """plugins/spec.py: finding, parsing and checking specs in a git repo."""
+    """plugins/spec.py: finding, parsing and checking specs in a git repo, and the `grovy spec` command."""
 
     def setUp(self):
         self.sp = load_spec_plugin()
-        self.repo = tempfile.mkdtemp(dir=TMP)
+        self.repo = os.path.realpath(tempfile.mkdtemp(dir=TMP))
         subprocess.run(["git", "init", "-q", self.repo], check=True)
         self.folder = os.path.join(self.repo, "specs", "demo")
         os.makedirs(self.folder)
@@ -2942,6 +2943,15 @@ class TestSpecPlugin(unittest.TestCase):
         with open(os.path.join(self.folder, rel), "w") as f:
             f.write(text)
         self.sp._scans.clear()
+
+    def run_cmd(self, *args, env=None):
+        out = subprocess.run([sys.executable, os.path.join(ROOT, "plugins", "spec.py"), *args], cwd=self.folder,
+                             capture_output=True, text=True, timeout=30, env={**os.environ, **(env or {})})
+        self.sp._scans.clear()
+        return out.returncode, out.stdout + out.stderr
+
+    def text(self, rel="index.md"):
+        return open(os.path.join(self.folder, rel)).read()
 
     def test_parse(self):
         self.assertEqual(self.sp.find_specs(self.repo), [self.index])
@@ -2956,39 +2966,126 @@ class TestSpecPlugin(unittest.TestCase):
         self.assertEqual(self.sp.summary(spec), {"todo": 1, "doing": 1, "done": 2, "dropped": 1, "total": 4})
         self.assertEqual([(d["id"], d["date"], d.get("superseded_by")) for d in spec["decisions"]],
                          [("D1", "2026-11-17", "D2"), ("D2", "2026-11-18", None)])
+        self.assertEqual(spec["decisions"][1]["text"], "Plain checkboxes, as R2 says. Supersedes D1.")
         self.assertEqual(spec["terms"][0]["term"], "Spec")
+        self.assertEqual(self.sp.next_id(spec, "R"), "R6")
 
-    def test_lint_and_note(self):
+    def test_parse_corner_cases(self):
+        """Second review: quotes, numbered lists, comments, CRLF and block maps were misread."""
+        self.write("index.md", SPEC_INDEX.replace("- [x] Lint {#R4}", "> - [x] Lint {#R4}")
+                   .replace("- [-] Dropped: too slow {#R5}", "1. [-] Dropped: too slow {#R5}\n<!--\n- [ ] hidden {#R6}\n-->")
+                   .replace("status: active", "status: active\nsizes:\n  a: 1").replace("\n", "\r\n"))
+        spec = self.sp.load(self.index, self.repo)
+        self.assertEqual([(i["id"], i["state"]) for i in spec["items"]],
+                         [("R2", "todo"), ("R3", "doing"), ("R4", "done"), ("R5", "dropped")])
+        self.assertEqual(spec["meta"]["sizes"], {"a": 1})
+        self.assertEqual(spec["problems"], [])
+        self.write("index.md", SPEC_INDEX.replace("Login links expire", "- {#R7} Login links expire"))
+        spec = self.sp.load(self.index, self.repo)   # only D IDs make decisions: a listed R anchor is a written-up item
+        self.assertEqual([d["id"] for d in spec["decisions"]], ["D1", "D2"])
+
+    def test_not_a_spec(self):
+        """Second review: any markdown with a `spec:` key (say spec: openapi.yaml) was taken for a spec."""
+        os.makedirs(os.path.join(self.repo, "docs"))
+        for name, head in (("docs/api.md", "spec: 1"), ("docs/index.md", "spec: openapi.yaml"), ("index.md", "spec: true")):
+            with open(os.path.join(self.repo, name), "w") as f:
+                f.write(f"---\n{head}\n---\n- [ ] x\n")
+        self.sp._scans.clear()
+        self.assertEqual(self.sp.find_specs(self.repo), [self.index])
+        self.assertIsNone(self.sp.note_for(os.path.join(self.repo, "docs/api.md")))
+
+    def test_parts_stay_in_the_repo(self):
+        """Second review: a cloned repo's `parts:` could pull any .md file of the machine into the page."""
+        outside = os.path.join(tempfile.mkdtemp(dir=TMP), "secret.md")
+        with open(outside, "w") as f:
+            f.write("SECRET {#R50}\n")
+        os.symlink(outside, os.path.join(self.folder, "link.md"))
+        self.write("index.md", SPEC_INDEX.replace("parts: [decisions.md]",
+                                                  f"parts: [decisions.md, {outside}, ../../../x.md, link.md]"))
+        spec = self.sp.load(self.index, self.repo)
+        self.assertEqual(spec["files"], ["index.md", "decisions.md"])
+        self.assertEqual(sum("not a .md file inside the repo" in p for p in spec["problems"]), 3)
+        self.assertNotIn("SECRET", json.dumps(self.sp.public(spec)))
+
+    def test_symlinked_path(self):
+        """Second review: an edit through a symlinked path was never checked."""
+        link = os.path.join(tempfile.mkdtemp(dir=TMP), "repo")
+        os.symlink(self.repo, link)
+        self.assertEqual(self.sp.spec_of(os.path.join(link, "specs/demo/index.md"))[0], self.index)
+
+    def test_notes_report_only_what_the_edit_broke(self):
+        """Context review: every spec edit re-listed every existing problem."""
         self.assertIsNone(self.sp.note_for(self.index))
         self.assertIsNone(self.sp.note_for(os.path.join(self.repo, "README.md")))   # not part of a spec
         self.write("decisions.md", SPEC_DECISIONS + "- {#D2} 2026-11-19: Reused.\n- {#D3} no date\n")
-        note = self.sp.note_for(os.path.join(self.folder, "decisions.md"))      # a part leads to its spec
+        note = self.sp.note_for(os.path.join(self.folder, "decisions.md"), subagent=True)   # a part leads to its spec
         self.assertIn("D2 is already used at decisions.md:4", note)
-        self.assertIn("next D is 3 but D3 exists: set it to 4", note)
         self.assertIn("decision D3 has no date", note)
-        self.write("index.md", SPEC_INDEX.replace("- [~] @s1 Draw", "- [~] Draw").replace("- [ ] Write the parser {#R2}",
-                                                                                       "- [ ] Write the parser"))
+        self.assertIn("grovy spec guide", note)                      # a subagent is pointed at the conventions
+        self.assertIsNone(self.sp.note_for(self.index))              # nothing new: nothing said
+        self.write("index.md", SPEC_INDEX.replace("- [~] @s1 Draw", "- [~] Draw"))
         note = self.sp.note_for(self.index)
-        self.assertIn("item has no ID", note)
         self.assertIn("R3 is marked doing but not claimed", note)
-        self.write("index.md", SPEC_INDEX.replace("parts: [decisions.md]", "parts: [decisions.md, gone.md]"))
-        self.assertIn("gone.md: listed in parts but missing", self.sp.note_for(self.index))
+        self.assertNotIn("D3", note)
+        self.assertIn("2 older problem(s)", note)
+        self.write("decisions.md", SPEC_DECISIONS + "\n" + "x" * 9000)
+        self.assertIn("decisions.md: 8 KB", self.sp.note_for(self.index))
 
-    def test_context(self):
-        ctx = self.sp.context_for(self.folder)
-        self.assertIn("grovy spec mode", ctx)
-        self.assertIn("specs/demo/index.md: Demo [active], 2/4 done; in progress: R3 (s1)", ctx)
-        self.assertIn('<spec-index path="' + self.index + '">', ctx)                 # the active spec's index
-        self.assertNotIn("Plain checkboxes", ctx)                                     # parts are read on demand
-        self.assertIsNone(self.sp.context_for(tempfile.mkdtemp(dir=TMP)))              # not a git repo
+    def test_pointer(self):
+        ctx = self.sp.pointer(self.folder, "/g/grovy")
+        self.assertIn("- specs/demo: Demo [active], 2/4 done, in progress: R3 @s1", ctx)
+        self.assertIn("`grovy spec guide` once (grovy is /g/grovy)", ctx)
+        self.assertNotIn("Write the parser", ctx)                     # no spec text: read on demand
+        self.assertLess(len(ctx), 600)
+        self.assertIsNone(self.sp.pointer(tempfile.mkdtemp(dir=TMP)))   # not a git repo
         empty = tempfile.mkdtemp(dir=TMP)
         subprocess.run(["git", "init", "-q", empty], check=True)
-        self.assertIsNone(self.sp.context_for(empty))                                 # a repo without specs
+        self.assertIsNone(self.sp.pointer(empty))                     # a repo without specs
+
+    def test_read_commands(self):
+        rc, out = self.run_cmd("show", "R2")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("R2 [todo] specs/demo/index.md:16, under Demo > Roadmap\nWrite the parser", out)
+        self.assertIn("- D2 2026-11-18: Plain checkboxes", out)        # a live decision naming it
+        rc, out = self.run_cmd("show", "D1")
+        self.assertIn("(superseded by D2)", out)
+        self.assertNotIn("- D2", self.run_cmd("show", "R1")[1])
+        rc, out = self.run_cmd("status")
+        self.assertIn("specs/demo: Demo [active], 2/4 done", out)
+        self.assertLess(out.index("R3 @s1"), out.index("R2 todo"))     # in progress first
+        self.assertEqual(self.run_cmd("show", "R404")[0], 1)
+        self.assertIn("grovy specs:", self.run_cmd("guide")[1])
+
+    def test_write_commands(self):
+        rc, out = self.run_cmd("add", "Write  the\nexporter")
+        self.assertEqual((rc, out.strip()), (0, "added R6 to specs/demo under Roadmap"))
+        self.assertIn("- [-] Dropped: too slow {#R5}\n- [ ] Write the exporter {#R6}\n", self.text())
+        self.assertEqual(self.run_cmd("claim", "R6", env={"GROVY_SESSION": "me"})[1].strip(), "R6 doing @me")
+        self.assertIn("- [~] @me Write the exporter {#R6}", self.text())
+        rc, out = self.run_cmd("claim", "R3", env={"GROVY_SESSION": "me"})
+        self.assertEqual(rc, 1)
+        self.assertIn("claimed by @s1", out)
+        self.run_cmd("tick", "R6")
+        self.assertIn("- [x] Write the exporter {#R6}", self.text())
+        self.run_cmd("drop", "R2", "not needed")
+        self.assertIn("- [-] Write the parser (dropped: not needed) {#R2}", self.text())
+        self.run_cmd("todo", "R3")
+        self.assertIn("- [ ] Draw the view, a long item", self.text())
+        rc, out = self.run_cmd("decide", "Use JSON", "--why", "simpler", "--supersedes", "d2")
+        self.assertEqual(out.strip(), "recorded D3 in specs/demo/decisions.md")
+        self.assertTrue(self.text("decisions.md").endswith(
+            f"  says. Supersedes D1.\n- {{#D3}} {datetime.date.today().isoformat()}: Use JSON. Why: simpler. Supersedes D2.\n"))
+        self.assertEqual(self.run_cmd("decide", "x", "--supersedes", "D9")[0], 1)
+        self.run_cmd("term", "Part", "another file of a spec")
+        self.assertIn("**Spec** {#G1}: a folder with an index.\n\n**Part** {#G2}: another file of a spec\n", self.text())
+        self.assertEqual(self.sp.load(self.index, self.repo)["problems"], [])
+        self.assertEqual(self.run_cmd("tick", "D1")[0], 1)               # not an item
 
     def test_routes(self):
         """The page asks by session; only a spec found in that session's repo is ever read."""
         routes = {}
         class FakeApi:
+            bin = "grovy"
             def __init__(s, cwd): s.cwd = cwd
             context = staticmethod(lambda fn: fn)
             def after_edit(s, fn=None, glob="*"): return (lambda f: f) if fn is None else fn
@@ -3004,15 +3101,15 @@ class TestSpecPlugin(unittest.TestCase):
         self.assertEqual([(x["path"][-1], x["done"], x["total"], x["items"]) for x in one["sections"]],
                          [("Done so far", 1, 1, []), ("Roadmap", 1, 3, ["R2", "R3", "R4", "R5"])])
         self.assertIn("Plain checkboxes", one["texts"]["decisions.md"])
+        self.assertEqual(routes["spec"](req(session="t1", rel="specs/demo", **{"if": one["stamp"]})), {"same": True})
         refs = routes["ids"](req(session="t1"))["ids"]
         self.assertEqual(refs["R3"]["rel"], "specs/demo")
         self.assertEqual(refs["demo#D2"]["kind"], "decisions")
-        self.assertEqual(refs["G1"]["text"], "a folder with an index.")
         self.assertNotIn("R99", refs)                                   # an example in a code span
         other = os.path.join(self.repo, "specs", "other")
         os.makedirs(other)
         with open(os.path.join(other, "index.md"), "w") as f:
-            f.write("---\nspec: 1\nnext: {R: 4}\n---\n- [ ] Elsewhere {#R3}\n")
+            f.write("---\nspec: 1\n---\n- [ ] Elsewhere {#R3}\n")
         self.sp._scans.clear()
         refs = routes["ids"](req(session="t1"))["ids"]
         self.assertNotIn("R3", refs)                                    # two specs have one: only qualified
@@ -3021,6 +3118,11 @@ class TestSpecPlugin(unittest.TestCase):
             self.assertEqual(routes["spec"](req(session="t1", rel=bad))[0], 404)
         self.assertEqual(routes["spec"](req(session="nobody", rel="specs/demo"))[0], 404)
         self.assertEqual(routes["list"](req()), {"root": None, "specs": []})
+        self.assertEqual(self.run_cmd("add", "x")[1].strip(), "added R6 to specs/demo under Roadmap")   # the active one
+        with open(os.path.join(other, "index.md"), "w") as f:
+            f.write("---\nspec: 1\nstatus: active\n---\n- [ ] Elsewhere {#R3}\n")
+        self.assertEqual(self.run_cmd("add", "y")[0], 1)                # two active specs: which one?
+        self.assertEqual(self.run_cmd("--spec", "other", "add", "y")[1].strip(), "added R4 to specs/other")
 
     def test_header(self):
         meta, n = self.sp.parse_header("---\nspec: 1\nparts:\n  - a.md\n  - b.md\nnext: {R: 3}  # c\n---\nbody")
@@ -3028,6 +3130,16 @@ class TestSpecPlugin(unittest.TestCase):
         self.assertEqual(self.sp.parse_header("no header"), (None, 0))
         self.write("index.md", SPEC_INDEX.replace("spec: 1", "spec: 2"))
         self.assertIn("this grovy reads format 1", self.sp.note_for(self.index))
+
+    def test_grovy_spec_runs_the_plugin_in_effect(self):
+        mine, ours = tempfile.mkdtemp(dir=TMP), tempfile.mkdtemp(dir=TMP)
+        write_plugin(ours, "spec.py", "")
+        self.assertEqual(plugins.plugin_file("spec", mine, ours), os.path.join(ours, "spec.py"))
+        write_plugin(mine, "spec.off", "")
+        self.assertIsNone(plugins.plugin_file("spec", mine, ours))
+        write_plugin(mine, "spec.py", "")
+        self.assertEqual(plugins.plugin_file("spec", mine, ours), os.path.join(mine, "spec.py"))
+
 
 @unittest.skipUnless(shutil.which("node"), "node not installed")
 class TestPaint(unittest.TestCase):

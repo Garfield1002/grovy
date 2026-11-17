@@ -56,7 +56,7 @@ grovy.extension("spec", grovy => {
   }, {sub: "Roadmap, docs and decisions of this project"});
 
   grovy.view("spec", (panel, arg) => {
-    open = {panel, session: arg.session, rel: arg.rel, focus: arg.focus || null, loaded: 0};
+    open = {panel, session: arg.session, rel: arg.rel, focus: arg.focus || null, loaded: 0, stamp: null};
     panel.title(arg.rel);
     panel.actions(h("button", {class: "chip", onclick: () => load(true)}, "Refresh"));
     panel.onclose = () => { if (open && open.panel === panel) open = null; };
@@ -70,33 +70,40 @@ grovy.extension("spec", grovy => {
   // chips opening the spec there. Messages are drawn once: those drawn before the IDs arrive are linked after.
   const REF = /\b(?:([a-z0-9][a-z0-9_.-]*)#)?([A-Z][A-Za-z]{0,3}\d{1,5})\b/g;
   const HAS_REF = new RegExp(REF.source);   // without /g: test() keeps no position between texts
-  let ids = null, idsFor = null, waiting = [];
-  grovy.on("route", session => {
-    ids = null; idsFor = session; waiting = [];
-    if (!session) return;
+  let ids = null, idsFor = null, waiting = [], fetched = 0, fetching = false;
+  function fetchIds() {   // on opening a session, and again (at most every 15s) when a reply names an unknown ID
+    const session = idsFor;
+    if (!session || fetching) return;
+    fetching = true; fetched = Date.now();
     get("ids", {session}).then(r => {
       if (idsFor !== session) return;
       ids = r.ids || {};
       const w = waiting; waiting = [];
       for (const n of w) if (n.isConnected) link(n);
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => { fetching = false; });
+  }
+  grovy.on("route", session => { ids = null; idsFor = session; waiting = []; fetchIds(); });
+  grovy.on("render", node => {
+    if (!idsFor) return;
+    if (!ids) { waiting.push(node); return; }
+    if (link(node) && Date.now() - fetched > 15000) { waiting.push(node); fetchIds(); }
   });
-  grovy.on("render", node => { if (ids) link(node); else if (idsFor) waiting.push(node); });
 
-  function link(node) {
-    if (!ids || !Object.keys(ids).length) return;
+  function link(node) {   // true if it saw an ID-like word it doesn't know (Claude may just have added it)
+    if (!ids) return false;
+    let unknown = false;
     const roots = node.matches && node.matches(".md") ? [node] : [...node.querySelectorAll(".md")];
     for (const root of roots) {
       const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {acceptNode: t =>
-        t.parentElement.closest("pre, a, button, .spec-ref") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT});
+        t.parentElement.closest("pre, code, a, button, .spec-ref") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT});
       const texts = [];
       for (let t; (t = walk.nextNode());) if (HAS_REF.test(t.data)) texts.push(t);
       for (const t of texts) {
         const parts = [];
         let last = 0;
         t.data.replace(REF, (m, spec, id, at) => {
-          const hit = ids[spec ? spec + "#" + id : id];
-          if (!hit) return m;
+          const hit = ids[spec ? spec + "#" + id : id] || (spec ? ids[id] : null);   // "my-notes#R7": still R7
+          if (!hit) { if (/^[RDG]\d/.test(id)) unknown = true; return m; }
           parts.push(t.data.slice(last, at), chip(m, id, hit));
           last = at + m.length;
           return m;
@@ -104,6 +111,7 @@ grovy.extension("spec", grovy => {
         if (parts.length) t.replaceWith(...parts, t.data.slice(last));
       }
     }
+    return unknown;
   }
   function chip(label, id, hit) {
     const session = idsFor;
@@ -115,11 +123,14 @@ grovy.extension("spec", grovy => {
     const o = open; if (!o) return;
     o.loaded = Date.now();
     let s;
-    try { s = await get("spec", {session: o.session, rel: o.rel}); }
+    try { s = await get("spec", {session: o.session, rel: o.rel, ...(o.stamp && !shout ? {if: o.stamp} : {})}); }
     catch (e) { if (shout && !o.panel.closed) o.panel.body.replaceChildren(h("div", {class: "sys"}, e.message)); return; }
-    if (o.panel.closed) return;
+    if (o.panel.closed || s.same) return;   // unchanged since it was drawn: leave it as you were reading it
+    o.stamp = s.stamp;
+    const opened = new Set([...o.panel.body.querySelectorAll("details[open] > summary")].map(x => x.dataset.k));
     o.panel.title(s.title);
     o.panel.body.replaceChildren(...draw(s, o));
+    for (const d of o.panel.body.querySelectorAll("details")) if (opened.has(d.firstChild.dataset.k)) d.open = true;
     if (o.focus) {   // opened from a reference: show that item, decision or term
       const el = o.panel.body.querySelector(`[data-id="${CSS.escape(o.focus)}"]`);
       o.focus = null;
@@ -144,15 +155,15 @@ grovy.extension("spec", grovy => {
       h("h3", {}, x.path[x.path.length - 1] || x.file, h("span", {}, `${x.done}/${x.total}`)), bar(x.done, x.total),
       ...x.items.map(id => items[id]).filter(Boolean).map(it => row(it, s, o))));
     const loose = s.items.filter(it => !it.id).map(it => row(it, s, o));
-    const decisions = s.decisions.length ? h("details", {class: "spec-more"}, h("summary", {}, `Decisions (${s.decisions.length})`),
+    const decisions = s.decisions.length ? h("details", {class: "spec-more"}, h("summary", {"data-k": "decisions"}, `Decisions (${s.decisions.length})`),
       ...s.decisions.slice().reverse().map(d => h("div", {class: "spec-dec" + (d.superseded_by ? " old" : ""), role: "button", tabindex: "0", "data-id": d.id,
         onclick: () => ask(o, d.id, d.text, [["Revisit it", `Let's revisit decision ${d.id} of spec ${o.rel}: `],
                                              ["Explain it", `Explain decision ${d.id} of spec ${o.rel}.`]])},
         h("div", {class: "d"}, d.id, d.date ? " · " + d.date : "", d.superseded_by ? " · superseded by " + d.superseded_by : ""),
         ...inline(d.text)))) : null;
-    const terms = s.terms.length ? h("details", {class: "spec-more"}, h("summary", {}, `Glossary (${s.terms.length})`),
+    const terms = s.terms.length ? h("details", {class: "spec-more"}, h("summary", {"data-k": "terms"}, `Glossary (${s.terms.length})`),
       ...s.terms.map(t => h("div", {class: "spec-term", "data-id": t.id}, h("b", {}, t.term), ": ", ...inline(t.text)))) : null;
-    const files = s.files.map(f => h("details", {class: "spec-more"}, h("summary", {}, f),
+    const files = s.files.map(f => h("details", {class: "spec-more"}, h("summary", {"data-k": "file:" + f}, f),
       md(String(s.texts[f] || "").replace(HEADER, "").replace(ID_TOKEN, ""))));
     return [top, problems, now, ...secs, ...loose, decisions, terms, ...files].filter(Boolean);
   }

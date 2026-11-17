@@ -57,6 +57,7 @@ class Api:
 
     def __init__(self, host, name):
         self._host, self.name = host, name
+        self.bin = claude.GROVY_BIN   # the grovy command, to name in what Claude is told (it may not be on PATH)
         self._open = True    # on() and route() work only during setup(): a late registration can't sneak in
         self._dead = False   # a plugin that failed to load can't use anything, even from a thread it left running
 
@@ -151,6 +152,18 @@ class Api:
 
     def log(self, msg):
         log(f"plugin {self.name}: {msg}")
+
+
+def plugin_file(name, folder=None, builtin=None):
+    """The file the daemon would load for plugin NAME (the user's, else the built-in one unless NAME.off), or None.
+    `grovy spec` runs it as a command."""
+    folder = folder or os.path.join(core.config_dir(), "plugins")
+    builtin = builtin or BUILTIN_DIR
+    mine = os.path.join(folder, name + ".py")
+    if os.path.isfile(mine):
+        return mine
+    ours = os.path.join(builtin, name + ".py")
+    return ours if os.path.isfile(ours) and not os.path.exists(os.path.join(folder, name + ".off")) else None
 
 
 class Request:

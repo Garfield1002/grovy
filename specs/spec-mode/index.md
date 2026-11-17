@@ -2,7 +2,6 @@
 spec: 1
 title: Spec mode
 status: draft
-next: {R: 18, D: 31, G: 8}
 parts: [format.md, decisions.md]
 ---
 
@@ -40,7 +39,7 @@ The plugin must be built only on public APIs (D10), so these come first.
 - [x] Find specs: git-tracked `.md` files whose YAML header has `spec: N` (the format version); their parts are
       listed in `parts:`. Git repos only {#R5}
 - [x] Parse items, states, claims, anchors, decisions, glossary, across the index and its parts {#R6}
-- [ ] Lint: duplicate IDs, a `next` counter behind the highest ID, dangling references, an ID that vanished,
+- [ ] Lint: duplicate IDs, dangling references, an ID that vanished,
       a claim by an exited session. Problems go back to Claude mid-turn (R3) {#R7}
 - [ ] Snapshots: on each Edit/Write touching a spec file, store done/total per section and who changed what, in
       the plugin's folder under grovy's state dir {#R8}
@@ -65,6 +64,10 @@ The plugin must be built only on public APIs (D10), so these come first.
       definition {#R15}
 - [x] References in replies (`R7`, `spec-mode#R7`) that name an ID of the repo's specs become chips that open the
       view at that item, decision or term {#R17}
+- [x] Phase 5, from the adversarial review on context use: `grovy spec` commands (status, show, add, claim, tick, todo, drop, decide, term, check, guide) so Claude never reads a spec file to change a line (D31, D32) {#R18}
+- [x] Session start gets a pointer (specs, counts, claims, the commands), not the index; `grovy spec guide` holds the conventions (D33) {#R19}
+- [x] After-edit notes: only the problems the edit introduced, plus a count of older ones (D34) {#R20}
+- [x] Check: index or part over 8 KB; parts must stay inside the repo; specs are index.md files with a numeric `spec:` {#R21}
 
 ## Glossary
 
