@@ -167,7 +167,7 @@ class Plugins:
         self.routes = {}
         self.contexts = []
         self.edits = []    # (plugin, fn, glob)
-        self.busy = set()  # (what, plugin, id(fn)) of context/after_edit calls still running
+        self.hung = set()  # (what, plugin, id(fn)) of context/after_edit calls still running past their deadline
         self.loaded, self.failed = [], {}
         self.q = queue.Queue(maxsize=QUEUE_MAX)
         self.dropped = 0
@@ -188,8 +188,8 @@ class Plugins:
         modname = lambda f: f[:-3].replace("-", "_")
         yours = {modname(f) for f in mine if f.endswith(".py") and not f.startswith("_")}
         # yours replaces a built-in of the same name (a-b.py and a_b.py count as the same); NAME.off drops a built-in
-        files = {f: self.builtin for f in ours if f.endswith(".py") and f[:-3] + ".off" not in mine
-                 and modname(f) not in yours}
+        off = {f[:-4].replace("-", "_") for f in mine if f.endswith(".off")}
+        files = {f: self.builtin for f in ours if f.endswith(".py") and modname(f) not in off | yours}
         files.update({f: self.folder for f in mine if f.endswith(".py")})
         modules = {}
         for f, folder in sorted(files.items()):
@@ -284,9 +284,9 @@ class Plugins:
     def _gather(self, what, fns, session, info, timeout, limit):
         """Run fn(session, info) for each (plugin, fn) in parallel under one shared deadline, never under Store's lock;
         their texts joined in load order, at most 2 * limit in all. A late, failing, non-text or oversized answer is
-        logged and skipped. A callback whose last call is still running is skipped, so a hung one costs one thread,
-        not one per edit."""
-        out, threads = {}, []
+        logged and skipped. A callback with a call still running past an earlier deadline (hung) is skipped, so a hung
+        one costs one thread, not one per edit; calls that overlap in good time (two subagents editing) both run."""
+        out, threads, finished = {}, [], set()
 
         def run(i, key, name, fn):
             try:
@@ -300,27 +300,29 @@ class Plugins:
                 log(f"plugin {name} ({what}): {type(e).__name__}: {e}")
             finally:
                 with self.reg_lock:
-                    self.busy.discard(key)
+                    finished.add(i)
+                    self.hung.discard(key)
 
         for i, (name, fn) in enumerate(fns):
             key = (what, name, id(fn))
             with self.reg_lock:
-                if key in self.busy:
-                    continue   # still stuck in an earlier call (logged when that one timed out)
-                self.busy.add(key)
+                if key in self.hung:
+                    continue   # still stuck in a call that missed its deadline (logged then)
             t = threading.Thread(target=run, args=(i, key, name, fn), name=f"grovy-{what}-{name}", daemon=True)
             try:
                 t.start()
             except RuntimeError:
-                with self.reg_lock:
-                    self.busy.discard(key)
                 continue
-            threads.append((i, name, t))
+            threads.append((i, key, name, t))
         end = time.monotonic() + timeout
         texts = []
-        for i, name, t in threads:
+        for i, key, name, t in threads:
             t.join(max(0, end - time.monotonic()))
-            if t.is_alive():   # its answer, if it comes, is never used
+            with self.reg_lock:
+                late = i not in finished
+                if late:   # its answer, if it comes, is never used; until it returns, this callback is skipped
+                    self.hung.add(key)
+            if late:
                 log(f"plugin {name} ({what}): no answer in {timeout}s, skipped (and until that call returns)")
                 continue
             text = (out.get(i) or "").strip()

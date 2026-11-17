@@ -1128,8 +1128,8 @@ class TestPlugins(StoreCase):
         self.assertIn(b"built-in", host.handle("GET", "keep", "who", {}, None)[1])
         self.assertEqual(host.failed, {})
         # a-b.py and a_b.py are one name across the folders too; .off only ever drops a built-in
-        host, _ = self.load({"a_b.py": mark % "user's", "mine.py": mark % "mine", "mine.off": ""},
-                            builtin={"a-b.py": mark % "built-in"})
+        host, _ = self.load({"a_b.py": mark % "user's", "mine.py": mark % "mine", "mine.off": "", "c_d.off": ""},
+                            builtin={"a-b.py": mark % "built-in", "c-d.py": mark % "x"})
         self.assertEqual((host.loaded, host.failed), (["a_b", "mine"], {}))
         self.assertIn(b"user's", host.handle("GET", "a_b", "who", {}, None)[1])
 
@@ -1194,9 +1194,23 @@ class TestPlugins(StoreCase):
                     self.assertEqual(host.after_edit("s", edit), "OK")
                 self.assertEqual(len(mod.calls), 1)
                 mod.gate.set()                           # it returns at last: its late answer is never used...
-                self.assertTrue(self.wait_for(lambda: not host.busy))
+                self.assertTrue(self.wait_for(lambda: not host.hung))
                 self.assertEqual(host.after_edit("s", edit), "LATE\n\nOK")   # ...and it is asked again
                 self.assertEqual(len(mod.calls), 2)
+
+    def test_overlapping_calls_both_answer(self):
+        """Two subagents editing at once: a callback still busy (in good time) with one edit answers the other too."""
+        code = ("import threading\nstarted = threading.Barrier(2, timeout=5)\ndef setup(grovy):\n"
+                "    @grovy.after_edit(glob='*.md')\n    def f(s, i):\n        started.wait()\n        return 'N ' + s\n")
+        host, _ = self.load({"both.py": code})
+        edit = ev("PostToolUse", tool_name="Edit", tool_input={"file_path": "/p/a.md"})
+        got = {}
+        ts = [threading.Thread(target=lambda s=s: got.__setitem__(s, host.after_edit(s, edit))) for s in ("a", "b")]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(5)
+        self.assertEqual(got, {"a": "N a", "b": "N b"})
 
     def test_answers_are_capped_in_all(self):
         code = "def setup(grovy):\n" + "".join(f"    grovy.context(lambda s, i: '{c}' * 10000)\n" for c in "abcd")

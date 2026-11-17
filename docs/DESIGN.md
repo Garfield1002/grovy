@@ -123,8 +123,11 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
       send, since its answer would come too late.
   * `view(name, open)` and `open(name, arg)`: a full-screen view the extension draws. `open(panel, arg)` gets
     `panel.body` (a fresh element each time it opens), `panel.title(text)`, `panel.actions(...nodes)` (header buttons),
-    `panel.close()`, `panel.closed` and `panel.onclose`. Like the page viewer, the phone's back button and Esc close it,
-    and so does opening another session or the home screen. Sheets (`ask`, `say`, `sheet`) open above it. A view has
+    `panel.close()`, `panel.closed` and `panel.onclose` (called just after it closes). Like the page viewer, the phone's
+    back button and Esc close it, and so does opening another session or the home screen; focus goes back where it
+    was, and Tab stays inside it while it's open. One overlay at a time: a view and the page viewer replace each other
+    in a single history entry, and back steps over an entry whose overlay was closed some other way. Sheets (`ask`,
+    `say`, `sheet`) open above it. A view has
     no URL of its own: it is opened from the page (a menu item, a tap on a chip).
   * `extension`, `disable`, `extensions`.
 
@@ -158,7 +161,8 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
     edits get no notes.
   * `context` and `after_edit` calls each run on a thread of their own, at the same time as each other and as the
     `on` worker: a plugin that keeps state needs a lock. A call past its deadline is left to finish, and that callback
-    is skipped until it does, so a hung one holds one thread, not one per edit. An answer that arrives after the
+    is skipped until it does, so a hung one holds one thread, not one per edit (calls that overlap in good time, such as
+    two subagents editing at once, all run). An answer that arrives after the
     deadline is never used.
   * `route("GET" | "POST", path, fn)` for `/api/x/PLUGIN/PATH`. It sits behind the token. POST is checked like the
     rest of the API. A GET also needs an `X-Grovy: 1` header, which `grovy.api` sends and a tapped link or a page's

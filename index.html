@@ -1882,7 +1882,8 @@ function openPage(id) {
   const p = pageOf(id); if (!p) return;
   closeSheet();
   const src = "/p/" + id + "?v=" + p.version;
-  if (!viewing) history.pushState({viewer: 1}, "");   // the phone's back button closes the viewer
+  if (xviewing) { endView(); history.replaceState({viewer: 1}, ""); }   // one overlay at a time, one history entry
+  else if (!viewing) history.pushState({viewer: 1}, "");   // the phone's back button closes the viewer
   viewing = {id, version: p.version, share: p.share};
   $("vtitle").textContent = p.title; $("vver").textContent = "v" + p.version;
   $("vshare").textContent = p.share ? "Shared" : "Share"; $("vshare").classList.toggle("on", !!p.share);
@@ -2012,8 +2013,8 @@ document.addEventListener("keydown", e => {
     if (xviewing) { e.preventDefault(); return closeView(); }
     return;
   }
-  if (sheetOpen() && e.key === "Tab") {   // keep Tab inside the open sheet
-    const f = visibleIn($("sheet"));
+  if ((sheetOpen() || xviewing) && e.key === "Tab") {   // keep Tab inside the open sheet, or the open view
+    const f = visibleIn(sheetOpen() ? $("sheet") : $("xview"));
     if (!f.length) return;
     const i = f.indexOf(a);
     if (i < 0 || (e.shiftKey && i === 0) || (!e.shiftKey && i === f.length - 1)) {
@@ -2046,12 +2047,18 @@ function focusSheet() {
 // body, so a late async update from a closed one lands nowhere visible.
 const views = {};
 let xviewing = null;   // the open view: {name, arg, panel}
+let xreturn = null;    // what had focus before it opened: it gets it back
 const overlayOpen = () => !!viewing || !!xviewing;
 function openView(name, arg) {
   const make = views[name];
   if (!make) throw new Error(`grovy.open: no view named "${name}"`);
   closeSheet();
-  if (xviewing) endView(); else history.pushState({xview: 1}, "");
+  if (xviewing) endView();
+  else {
+    xreturn = document.activeElement;
+    if (viewing) { closeViewer(); history.replaceState({xview: 1}, ""); }   // one overlay at a time, one entry
+    else history.pushState({xview: 1}, "");
+  }
   const body = h("div", {id: "xbody", tabindex: "-1"});
   $("xbody").replaceWith(body);
   const panel = {body, arg, closed: false, onclose: null,
@@ -2068,11 +2075,21 @@ function endView() {   // close it without touching history (the back button, or
   const v = xviewing; if (!v) return;
   xviewing = null; v.panel.closed = true;
   $("xview").classList.add("hidden"); $("xbody").replaceChildren(); $("xacts").replaceChildren();
-  if (typeof v.panel.onclose === "function") runExt("view " + v.name + " onclose", v.panel.onclose);
+  // after the caller is done: an onclose that opens a view must not run in the middle of another opening
+  if (typeof v.panel.onclose === "function") setTimeout(() => runExt("view " + v.name + " onclose", v.panel.onclose));
+  setTimeout(() => {
+    if (!xviewing && !viewing && !sheetOpen() && xreturn && xreturn.isConnected && xreturn !== document.body)
+      xreturn.focus({preventScroll: true});
+    if (!xviewing) xreturn = null;
+  });
 }
 function closeView() { if (history.state && history.state.xview) history.back(); else endView(); }
 $("xclose").onclick = closeView;
 addEventListener("popstate", () => { if (xviewing) endView(); });
+// Back onto an overlay's entry with nothing open (it was closed by opening another session): step over it.
+addEventListener("popstate", e => {
+  if (!viewing && !xviewing && e.state && (e.state.xview || e.state.viewer)) history.back();
+});
 
 // ---------------------------------------------------------------- routing + live updates
 function go(hash) { location.hash = hash; }
