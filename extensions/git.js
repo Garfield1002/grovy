@@ -9,7 +9,10 @@ grovy.extension("git", grovy => {
   const {h} = grovy;
   const ROW = 46, LANE = 14, PAD = 9;   // graph geometry, px
   grovy.css(`
-code.gitref { cursor:pointer; text-decoration:underline dotted; text-underline-offset:3px; color:var(--acc); }
+code.gitref { cursor:pointer; text-decoration:underline dotted; text-underline-offset:3px; color:var(--acc);
+  white-space:nowrap; }
+code.gitref svg.gi { width:.95em; height:.95em; vertical-align:-.12em; margin-right:.25em; fill:none; stroke:currentColor;
+  stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 .gg-head { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; margin:2px 0 10px; font-size:13px; color:var(--mut); }
 .gg-head b { color:var(--fg); font-family:ui-monospace,monospace; font-weight:600; }
 .gg-head select { font:inherit; color:var(--fg); background:var(--card); border:1px solid var(--line); border-radius:8px;
@@ -95,8 +98,22 @@ button.gref { cursor:pointer; background:none; }
       }
     }
   }
+  // Small type icons (16×16, drawn with the text colour): a commit on its line, a branch forking, a tag.
+  const ICONS = {
+    commit: [["circle", {cx: 8, cy: 8, r: 3}], ["path", {d: "M1 8h4M11 8h4"}]],
+    branch: [["circle", {cx: 5, cy: 3.5, r: 1.8}], ["circle", {cx: 5, cy: 12.5, r: 1.8}], ["circle", {cx: 11, cy: 5, r: 1.8}],
+      ["path", {d: "M5 5.3v5.4M11 6.8c0 3-6 2-6 3.9"}]],
+    tag: [["path", {d: "M2 2.5v5l6.5 6.5 5-5L7 2.5z"}], ["circle", {cx: 5, cy: 5.5, r: 1}]],
+  };
+  ICONS.remote = ICONS.branch;
+  function icon(kind) {
+    const g = svg("svg", {class: "gi", viewBox: "0 0 16 16", "aria-hidden": "true"});
+    for (const [tag, attrs] of ICONS[kind] || ICONS.commit) g.append(svg(tag, attrs));
+    return g;
+  }
   function link(c, session, name, info) {
     c.classList.add("gitref");
+    c.prepend(icon(info.kind));
     c.setAttribute("role", "link");
     c.setAttribute("tabindex", "0");
     c.title = info.kind === "commit" ? "Commit " + short(info.hash) : `${info.kind === "tag" ? "Tag" : "Branch"} ${name}`;
@@ -247,7 +264,7 @@ button.gref { cursor:pointer; background:none; }
     if (grovy.session !== session || !loading.isConnected) return;
     if (!c.repo) return grovy.sheet(top, h("p", {class: "gg-note"}, "This session's folder isn't in a git repository."));
     const parent = p => h("code", {class: "gitref", role: "link", tabindex: "0", onclick: () => showCommit(session, p, back),
-      onkeydown: e => { if (e.key === "Enter") showCommit(session, p, back); }}, short(p));
+      onkeydown: e => { if (e.key === "Enter") showCommit(session, p, back); }}, icon("commit"), short(p));
     const files = c.files.length ? h("div", {class: "gc-files"}, ...c.files.map(f => h("div", {},
       h("span", {}, f.from ? `${f.from} → ${f.path}` : f.path),
       f.add == null ? h("span", {}, "binary") : h("span", {}, h("span", {class: "a"}, "+" + f.add), " ", h("span", {class: "d"}, "−" + f.del)))),

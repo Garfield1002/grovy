@@ -367,7 +367,7 @@ The built-in extension `extensions/git.js` uses it:
   (list items, code blocks, headings and trailers such as `Co-Authored-By:` keep their own lines), since markdown
   here keeps line breaks and a phone would break each line twice. "Ask Claude about it" puts the commit in the message box.
 * Inline `code` in a message whose text is a branch, remote branch, tag or commit hash (7–40 hex digits, not all
-  digits) of that repository becomes a link: a commit opens it, a ref opens the graph on it. Names are looked up in
+  digits) of that repository becomes a link, with a small icon for its type (commit, branch, tag): a commit opens it, a ref opens the graph on it. Names are looked up in
   batches (`POST /api/x/git/resolve`) after a message is drawn, and remembered per session; a miss is retried after a
   minute, and a session's answers are forgotten when its turn ends, since Claude may have made or moved a branch.
   Code blocks are left alone.
