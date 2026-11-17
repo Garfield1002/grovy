@@ -436,6 +436,21 @@ def setup(grovy):
                         "summary": summary(spec), "problems": len(spec["problems"])})
         return {"root": root, "specs": out}
 
+    @grovy.route("GET", "ids")
+    def ids(request):   # every ID of the repo's specs, for links in the conversation: "R7" and "spec-mode#R7"
+        root = repo_of(request)
+        out, seen = {}, {}
+        for index in find_specs(root) if root else []:
+            spec = load(index, root)
+            for id_, kind, x in all_ids(spec):
+                what = {"rel": spec["rel"], "kind": kind, "text": str(x.get("text") or x.get("title") or x.get("term") or "")[:160]}
+                out.setdefault(f"{spec['name']}#{id_}", what)
+                seen.setdefault(id_, []).append(what)
+        for id_, whats in seen.items():   # a bare ID only when one spec has it
+            if len({w["rel"] for w in whats}) == 1:
+                out[id_] = whats[0]
+        return {"ids": out}
+
     @grovy.route("GET", "spec")
     def one_spec(request):   # one of them, whole: chosen among those found, so no path from the page is ever opened
         root = repo_of(request)

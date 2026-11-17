@@ -30,7 +30,11 @@ grovy.extension("spec", grovy => {
 .spec-more summary { padding:12px 0; font-weight:650; cursor:pointer; }
 .spec-dec { padding:8px 0; border-top:1px solid var(--line); font-size:14.5px; }
 .spec-dec.old { color:var(--mut); } .spec-dec .d { font-size:12.5px; color:var(--mut); }
-.spec-term { padding:6px 0; font-size:14.5px; }`);
+.spec-term { padding:6px 0; font-size:14.5px; }
+.spec-ref { border:0; background:color-mix(in srgb, var(--acc) 12%, transparent); color:var(--acc); font:inherit;
+  font-weight:600; border-radius:6px; padding:0 4px; cursor:pointer; }
+.spec-flash { animation:specflash 1.6s ease-out; border-radius:8px; }
+@keyframes specflash { from { background:color-mix(in srgb, var(--acc) 22%, transparent) } to { background:transparent } }`);
 
   const ID_TOKEN = /\s*\{#[A-Z][A-Za-z]{0,3}\d{1,5}\}/g;
   const HEADER = /^---[ \t]*\n[\s\S]*?\n---[ \t]*(\n|$)/;
@@ -52,7 +56,7 @@ grovy.extension("spec", grovy => {
   }, {sub: "Roadmap, docs and decisions of this project"});
 
   grovy.view("spec", (panel, arg) => {
-    open = {panel, session: arg.session, rel: arg.rel, loaded: 0};
+    open = {panel, session: arg.session, rel: arg.rel, focus: arg.focus || null, loaded: 0};
     panel.title(arg.rel);
     panel.actions(h("button", {class: "chip", onclick: () => load(true)}, "Refresh"));
     panel.onclose = () => { if (open && open.panel === panel) open = null; };
@@ -61,6 +65,51 @@ grovy.extension("spec", grovy => {
   });
 
   grovy.on("update", () => { if (open && Date.now() - open.loaded > 5000) load(false); });   // Claude may be editing it
+
+  // ---- references in the conversation: "R7", "D5" or "spec-mode#R7" that name an ID of this repo's specs become
+  // chips opening the spec there. Messages are drawn once: those drawn before the IDs arrive are linked after.
+  const REF = /\b(?:([a-z0-9][a-z0-9_.-]*)#)?([A-Z][A-Za-z]{0,3}\d{1,5})\b/g;
+  const HAS_REF = new RegExp(REF.source);   // without /g: test() keeps no position between texts
+  let ids = null, idsFor = null, waiting = [];
+  grovy.on("route", session => {
+    ids = null; idsFor = session; waiting = [];
+    if (!session) return;
+    get("ids", {session}).then(r => {
+      if (idsFor !== session) return;
+      ids = r.ids || {};
+      const w = waiting; waiting = [];
+      for (const n of w) if (n.isConnected) link(n);
+    }).catch(() => {});
+  });
+  grovy.on("render", node => { if (ids) link(node); else if (idsFor) waiting.push(node); });
+
+  function link(node) {
+    if (!ids || !Object.keys(ids).length) return;
+    const roots = node.matches && node.matches(".md") ? [node] : [...node.querySelectorAll(".md")];
+    for (const root of roots) {
+      const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {acceptNode: t =>
+        t.parentElement.closest("pre, a, button, .spec-ref") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT});
+      const texts = [];
+      for (let t; (t = walk.nextNode());) if (HAS_REF.test(t.data)) texts.push(t);
+      for (const t of texts) {
+        const parts = [];
+        let last = 0;
+        t.data.replace(REF, (m, spec, id, at) => {
+          const hit = ids[spec ? spec + "#" + id : id];
+          if (!hit) return m;
+          parts.push(t.data.slice(last, at), chip(m, id, hit));
+          last = at + m.length;
+          return m;
+        });
+        if (parts.length) t.replaceWith(...parts, t.data.slice(last));
+      }
+    }
+  }
+  function chip(label, id, hit) {
+    const session = idsFor;
+    return h("button", {class: "spec-ref", title: hit.text || id,
+      onclick: e => { e.stopPropagation(); grovy.open("spec", {session, rel: hit.rel, focus: id}); }}, label);
+  }
 
   async function load(shout) {
     const o = open; if (!o) return;
@@ -71,6 +120,14 @@ grovy.extension("spec", grovy => {
     if (o.panel.closed) return;
     o.panel.title(s.title);
     o.panel.body.replaceChildren(...draw(s, o));
+    if (o.focus) {   // opened from a reference: show that item, decision or term
+      const el = o.panel.body.querySelector(`[data-id="${CSS.escape(o.focus)}"]`);
+      o.focus = null;
+      if (el) {
+        const box = el.closest("details"); if (box) box.open = true;
+        el.scrollIntoView({block: "center"}); el.classList.add("spec-flash");
+      }
+    }
   }
 
   function draw(s, o) {
@@ -88,13 +145,13 @@ grovy.extension("spec", grovy => {
       ...x.items.map(id => items[id]).filter(Boolean).map(it => row(it, s, o))));
     const loose = s.items.filter(it => !it.id).map(it => row(it, s, o));
     const decisions = s.decisions.length ? h("details", {class: "spec-more"}, h("summary", {}, `Decisions (${s.decisions.length})`),
-      ...s.decisions.slice().reverse().map(d => h("div", {class: "spec-dec" + (d.superseded_by ? " old" : ""), role: "button", tabindex: "0",
+      ...s.decisions.slice().reverse().map(d => h("div", {class: "spec-dec" + (d.superseded_by ? " old" : ""), role: "button", tabindex: "0", "data-id": d.id,
         onclick: () => ask(o, d.id, d.text, [["Revisit it", `Let's revisit decision ${d.id} of spec ${o.rel}: `],
                                              ["Explain it", `Explain decision ${d.id} of spec ${o.rel}.`]])},
         h("div", {class: "d"}, d.id, d.date ? " · " + d.date : "", d.superseded_by ? " · superseded by " + d.superseded_by : ""),
         ...inline(d.text)))) : null;
     const terms = s.terms.length ? h("details", {class: "spec-more"}, h("summary", {}, `Glossary (${s.terms.length})`),
-      ...s.terms.map(t => h("div", {class: "spec-term"}, h("b", {}, t.term), ": ", ...inline(t.text)))) : null;
+      ...s.terms.map(t => h("div", {class: "spec-term", "data-id": t.id}, h("b", {}, t.term), ": ", ...inline(t.text)))) : null;
     const files = s.files.map(f => h("details", {class: "spec-more"}, h("summary", {}, f),
       md(String(s.texts[f] || "").replace(HEADER, "").replace(ID_TOKEN, ""))));
     return [top, problems, now, ...secs, ...loose, decisions, terms, ...files].filter(Boolean);
@@ -104,7 +161,7 @@ grovy.extension("spec", grovy => {
     const claim = it.claim ? h("span", {class: "spec-claim"}, "@" + it.claim) : null;
     const text = it.claim ? it.text.replace(/^@\S+\s*/, "") : it.text;
     const name = it.id || "this item";
-    return h("button", {class: "spec-item " + it.state, onclick: () => ask(o, name, it.text, [
+    return h("button", {class: "spec-item " + it.state, ...(it.id ? {"data-id": it.id} : {}), onclick: () => ask(o, name, it.text, [
         ["Work on it", `Work on ${name} of spec ${o.rel}.`],
         ["Explain it", `Explain ${name} of spec ${o.rel}: where it stands and what's left.`],
         ["Drop it", `Drop ${name} from spec ${o.rel}: `]])},

@@ -2,7 +2,7 @@
 spec: 1
 title: Spec mode
 status: draft
-next: {R: 17, D: 31, G: 8}
+next: {R: 18, D: 31, G: 8}
 parts: [format.md, decisions.md]
 ---
 
@@ -61,8 +61,10 @@ The plugin must be built only on public APIs (D10), so these come first.
 ### Later
 
 - [ ] Burn-up chart (total and done over time) from the snapshots {#R14}
-- [ ] `spec` widget: a live progress card for a spec or a few items; `#R17` / `name#R17` references in replies
-      become chips that open the view there; glossary terms are underlined, a tap shows the definition {#R15}
+- [ ] `spec` widget: a live progress card for a spec or a few items; glossary terms are underlined, a tap shows the
+      definition {#R15}
+- [x] References in replies (`R7`, `spec-mode#R7`) that name an ID of the repo's specs become chips that open the
+      view at that item, decision or term {#R17}
 
 ## Glossary
 

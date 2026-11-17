@@ -413,6 +413,10 @@ not ignored, `.md` files, rescanned at most every 5s); Claude writes them, and t
   session's repo, so no path from the page is ever opened. ⋯ → Specs opens the view: overall and per-section
   progress (an ID left in prose counts as done), items in progress with their claim, problems, decisions (superseded
   ones greyed), glossary, and each file rendered. It reloads at most every 5s while the session reports updates.
+* References: when a session opens, the page fetches `ids?session=` (every ID of the repo's specs: `spec-mode#R7`
+  always, a bare `R7` only when a single spec has it). In rendered markdown (not code blocks, links or buttons), a
+  known ID becomes a chip that opens the view scrolled to it. Messages drawn before the IDs arrive are linked then;
+  your own messages are not markdown, so they stay plain.
 
 **Widgets.** Claude's reply can contain ` ```widget ` blocks holding one JSON object: `chart` (bar, line, pie),
 `stats`, `progress`, `checklist`, `choices`, `form`, `diagram` or `image`. The page draws them itself with DOM and SVG;

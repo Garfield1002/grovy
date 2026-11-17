@@ -3004,6 +3004,19 @@ class TestSpecPlugin(unittest.TestCase):
         self.assertEqual([(x["path"][-1], x["done"], x["total"], x["items"]) for x in one["sections"]],
                          [("Done so far", 1, 1, []), ("Roadmap", 1, 3, ["R2", "R3", "R4", "R5"])])
         self.assertIn("Plain checkboxes", one["texts"]["decisions.md"])
+        refs = routes["ids"](req(session="t1"))["ids"]
+        self.assertEqual(refs["R3"]["rel"], "specs/demo")
+        self.assertEqual(refs["demo#D2"]["kind"], "decisions")
+        self.assertEqual(refs["G1"]["text"], "a folder with an index.")
+        self.assertNotIn("R99", refs)                                   # an example in a code span
+        other = os.path.join(self.repo, "specs", "other")
+        os.makedirs(other)
+        with open(os.path.join(other, "index.md"), "w") as f:
+            f.write("---\nspec: 1\nnext: {R: 4}\n---\n- [ ] Elsewhere {#R3}\n")
+        self.sp._scans.clear()
+        refs = routes["ids"](req(session="t1"))["ids"]
+        self.assertNotIn("R3", refs)                                    # two specs have one: only qualified
+        self.assertEqual((refs["demo#R3"]["rel"], refs["other#R3"]["rel"]), ("specs/demo", "specs/other"))
         for bad in ("../..", "specs", "/etc", ""):
             self.assertEqual(routes["spec"](req(session="t1", rel=bad))[0], 404)
         self.assertEqual(routes["spec"](req(session="nobody", rel="specs/demo"))[0], 404)
