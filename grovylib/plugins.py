@@ -4,8 +4,10 @@ built-in of that name (copy it and edit); an empty NAME.off there turns the buil
 
 Each plugin file defines setup(grovy) and uses only the Api object it is given (examples/plugin.py shows it all).
 A plugin runs inside the daemon with the daemon's rights, like the rest of grovy: it is the user's own code.
-What grovy guarantees in return: callbacks run one at a time on a worker thread of their own, never while Store's
-lock is held, so a slow or failing plugin can't stall hooks, permissions or the page. Errors are logged and skipped.
+What grovy guarantees in return: on() callbacks run one at a time on a worker thread of their own, never while Store's
+lock is held, so a slow or failing plugin can't stall hooks, permissions or the page. context() and after_edit()
+callbacks are answered while a hook waits: each call runs on a thread of its own, under a deadline, at the same time as
+other callbacks (a plugin that keeps state needs a lock). Errors are logged and skipped.
 GROVY_PLUGINS=0 loads none, built-in ones included (to rule them out when something misbehaves).
 """
 import copy
@@ -42,7 +44,7 @@ def edited_path(payload):
     if payload.get("tool_name") not in claude.EDIT_TOOLS or not isinstance(payload.get("tool_input"), dict):
         return None
     p = payload["tool_input"].get("file_path") or payload["tool_input"].get("notebook_path")
-    return p if isinstance(p, str) and os.path.isabs(p) else None
+    return os.path.normpath(p) if isinstance(p, str) and os.path.isabs(p) else None
 BUILTIN_DIR = os.path.join(core.HERE, "plugins")
 
 
@@ -165,6 +167,7 @@ class Plugins:
         self.routes = {}
         self.contexts = []
         self.edits = []    # (plugin, fn, glob)
+        self.busy = set()  # (what, plugin, id(fn)) of context/after_edit calls still running
         self.loaded, self.failed = [], {}
         self.q = queue.Queue(maxsize=QUEUE_MAX)
         self.dropped = 0
@@ -182,8 +185,12 @@ class Plugins:
             except OSError:
                 return set()
         mine, ours = listing(self.folder), listing(self.builtin)
-        files = {f: self.builtin for f in ours if f.endswith(".py") and f[:-3] + ".off" not in mine}
-        files.update({f: self.folder for f in mine if f.endswith(".py")})   # yours replaces a built-in of that name
+        modname = lambda f: f[:-3].replace("-", "_")
+        yours = {modname(f) for f in mine if f.endswith(".py") and not f.startswith("_")}
+        # yours replaces a built-in of the same name (a-b.py and a_b.py count as the same); NAME.off drops a built-in
+        files = {f: self.builtin for f in ours if f.endswith(".py") and f[:-3] + ".off" not in mine
+                 and modname(f) not in yours}
+        files.update({f: self.folder for f in mine if f.endswith(".py")})
         modules = {}
         for f, folder in sorted(files.items()):
             if f.startswith("_"):
@@ -276,12 +283,12 @@ class Plugins:
 
     def _gather(self, what, fns, session, info, timeout, limit):
         """Run fn(session, info) for each (plugin, fn) in parallel under one shared deadline, never under Store's lock;
-        their texts joined in load order. A late, failing, non-text or oversized answer is logged and skipped."""
-        if not fns:
-            return ""
-        out = [None] * len(fns)
+        their texts joined in load order, at most 2 * limit in all. A late, failing, non-text or oversized answer is
+        logged and skipped. A callback whose last call is still running is skipped, so a hung one costs one thread,
+        not one per edit."""
+        out, threads = {}, []
 
-        def run(i, name, fn):
+        def run(i, key, name, fn):
             try:
                 text = fn(session, copy.deepcopy(info))
                 if text is not None and not isinstance(text, str):
@@ -291,21 +298,38 @@ class Plugins:
                 out[i] = text
             except BaseException as e:
                 log(f"plugin {name} ({what}): {type(e).__name__}: {e}")
+            finally:
+                with self.reg_lock:
+                    self.busy.discard(key)
 
-        threads = []
         for i, (name, fn) in enumerate(fns):
-            t = threading.Thread(target=run, args=(i, name, fn), name=f"grovy-{what}-{name}", daemon=True)
+            key = (what, name, id(fn))
+            with self.reg_lock:
+                if key in self.busy:
+                    continue   # still stuck in an earlier call (logged when that one timed out)
+                self.busy.add(key)
+            t = threading.Thread(target=run, args=(i, key, name, fn), name=f"grovy-{what}-{name}", daemon=True)
             try:
                 t.start()
             except RuntimeError:
+                with self.reg_lock:
+                    self.busy.discard(key)
                 continue
-            threads.append((name, t))
+            threads.append((i, name, t))
         end = time.monotonic() + timeout
-        for name, t in threads:
+        texts = []
+        for i, name, t in threads:
             t.join(max(0, end - time.monotonic()))
-            if t.is_alive():
-                log(f"plugin {name} ({what}): no answer in {timeout}s, skipped")
-        return "\n\n".join(t.strip() for t in list(out) if t and t.strip())
+            if t.is_alive():   # its answer, if it comes, is never used
+                log(f"plugin {name} ({what}): no answer in {timeout}s, skipped (and until that call returns)")
+                continue
+            text = (out.get(i) or "").strip()
+            if text and sum(len(x) + 2 for x in texts) + len(text) > 2 * limit:
+                log(f"plugin {name} ({what}): skipped, the plugins together said more than {2 * limit} characters")
+                continue
+            if text:
+                texts.append(text)
+        return "\n\n".join(texts)
 
     def _run(self):
         while True:

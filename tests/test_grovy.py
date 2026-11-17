@@ -192,9 +192,18 @@ class TestHookAdapter(unittest.TestCase):
             core.atomic_write_json(core.edit_watch_path(), ["*.md"])
             self.assertEqual(run(edit("/p/a.md", agent_id="sub")), "NOTE")
             self.assertIsNone(run(edit("/p/a.py", agent_id="sub")))
+            self.assertIsNone(run(edit("a.md", agent_id="sub")))          # relative: the daemon would ignore it
+            self.assertEqual(run(edit("/p/x/../b.md", agent_id="sub")), "NOTE")
             self.assertIsNone(run(ev("PostToolUse", tool_name="Read", tool_input={"file_path": "/p/a.md"}, agent_id="sub")))
         self.assertEqual(sent, [(True, None, True), (None, None, False), (None, True, True), (None, None, False),
-                                (None, None, False)])
+                                (None, None, False), (None, True, True), (None, None, False)])
+        for odd in ([1], "x", 3):   # a reply that isn't an object: nothing said, nothing broken
+            with mock.patch.object(client, "sock_request", lambda *a, r=odd, **k: r), mock.patch("sys.stderr", io.StringIO()), \
+                    mock.patch("sys.stdin", io.StringIO(json.dumps(edit("/p/a.md")))), redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(hook.cmd_hook("x"), 0)
+            self.assertEqual(out.getvalue(), "")
+            ctx = json.loads(self.run_hook(json.dumps(ev("SessionStart", source="startup")), reply=odd)[1])
+            self.assertIn("```widget", ctx["hookSpecificOutput"]["additionalContext"])
 
     def test_session_start_adds_user_instructions(self):
         d = tempfile.mkdtemp(dir=TMP)
@@ -1118,6 +1127,11 @@ class TestPlugins(StoreCase):
         self.assertIn(b"user's", host.handle("GET", "swap", "who", {}, None)[1])
         self.assertIn(b"built-in", host.handle("GET", "keep", "who", {}, None)[1])
         self.assertEqual(host.failed, {})
+        # a-b.py and a_b.py are one name across the folders too; .off only ever drops a built-in
+        host, _ = self.load({"a_b.py": mark % "user's", "mine.py": mark % "mine", "mine.off": ""},
+                            builtin={"a-b.py": mark % "built-in"})
+        self.assertEqual((host.loaded, host.failed), (["a_b", "mine"], {}))
+        self.assertIn(b"user's", host.handle("GET", "a_b", "who", {}, None)[1])
 
     def test_context(self):
         """grovy.context: texts in load order; a slow, failing or oversized one is skipped, the others still count."""
@@ -1165,6 +1179,33 @@ class TestPlugins(StoreCase):
         with self.assertRaises(ValueError):
             plugins.Api(host, "x").after_edit(lambda s, i: None, glob="")
 
+    def test_hung_callback_holds_one_thread(self):
+        """A callback that never returns is skipped while its earlier call runs: one stuck thread, not one per edit."""
+        code = ("import threading\ngate = threading.Event()\ncalls = []\ndef setup(grovy):\n"
+                "    @grovy.after_edit(glob='*.md')\n    def f(s, i):\n        calls.append(1)\n        gate.wait(5)\n"
+                "        return 'LATE'\n"
+                "    grovy.after_edit(lambda s, i: 'OK', glob='*.md')\n")
+        with mock.patch.object(plugins, "NOTE_TIMEOUT", 0.2):
+            host, _ = self.load({"hang.py": code})
+            mod = sys.modules["grovy_plugin_hang"]
+            edit = ev("PostToolUse", tool_name="Edit", tool_input={"file_path": "/p/a.md"})
+            with mock.patch("sys.stderr", io.StringIO()):
+                for _ in range(5):
+                    self.assertEqual(host.after_edit("s", edit), "OK")
+                self.assertEqual(len(mod.calls), 1)
+                mod.gate.set()                           # it returns at last: its late answer is never used...
+                self.assertTrue(self.wait_for(lambda: not host.busy))
+                self.assertEqual(host.after_edit("s", edit), "LATE\n\nOK")   # ...and it is asked again
+                self.assertEqual(len(mod.calls), 2)
+
+    def test_answers_are_capped_in_all(self):
+        code = "def setup(grovy):\n" + "".join(f"    grovy.context(lambda s, i: '{c}' * 10000)\n" for c in "abcd")
+        host, _ = self.load({"big.py": code})
+        with mock.patch("sys.stderr", io.StringIO()) as err:
+            text = host.context("s", {})
+        self.assertEqual(text, "a" * 10000 + "\n\n" + "b" * 10000 + "\n\n" + "c" * 10000)
+        self.assertIn("together", err.getvalue())
+
     def test_after_edit_over_the_socket(self):
         host, _ = self.load({"md.py": "def setup(grovy):\n    grovy.after_edit(lambda s, i: 'NOTE', glob='*.md')\n"})
         self.store.ingest("a", ev("UserPromptSubmit", prompt="go"))
@@ -1179,7 +1220,11 @@ class TestPlugins(StoreCase):
         edit = lambda path, **kw: ev("PostToolUse", tool_name="Edit", tool_input={"file_path": path}, **kw)
         r = ask(edit("/p/x.md", agent_id="sub"), want_note=True)   # a subagent never takes the main agent's steers
         self.assertEqual(r, {"steer": None, "note": "NOTE"})
-        self.assertEqual(ask(edit("/p/x.py"), want_steer=True)["note"], None)
+        with mock.patch.object(grovyd, "STEER_TAKE_BY", 0):   # the hook may have stopped waiting: it stays queued
+            self.assertEqual(ask(edit("/p/x.py"), want_steer=True), {"steer": None, "note": None})
+        r = ask(edit("/p/x.py"), want_steer=True)
+        self.assertIn("steer me", r["steer"])
+        self.assertIsNone(r["note"])
         r = ask(edit("/p/x.md"), want_steer=True)
         self.assertEqual(r["note"], "NOTE")
         self.assertIsNone(r["steer"])   # taken by the previous edit already
@@ -1206,7 +1251,7 @@ class TestPlugins(StoreCase):
             self.store.ingest("a", ev("Notification", message=f"m{i}"))
         self.assertLess(time.monotonic() - t, 1.0)              # ingest doesn't wait for the slow plugin
         with mock.patch.object(plugins, "QUEUE_MAX", 2), mock.patch("sys.stderr", io.StringIO()):
-            small = plugins.Plugins(self.store, "/nonexistent")
+            small = plugins.Plugins(self.store, "/nonexistent", builtin="/nonexistent")
             small.handlers["event"].append(("x", lambda *a: None))
             for _ in range(5):
                 small.emit("event", "a", {})                    # no worker: the queue fills, then events are dropped

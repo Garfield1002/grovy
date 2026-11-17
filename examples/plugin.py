@@ -10,8 +10,9 @@ A plugin runs inside the daemon. It defines setup(grovy) and uses only `grovy`:
     grovy.context(fn)        fn(session, info) returns text added to what Claude is told when a session starts,
                              resumes, or after /clear and /compact (info: cwd, source), or None. Answer fast:
                              all plugins together get 1.5s, a late one is skipped for that start.
-    grovy.after_edit(fn, glob="*.md")   fn(session, info) right after Claude or a subagent edits a file matching glob
-                             (info: path, tool, cwd, agent_id). Text it returns is handed to Claude before its
+    grovy.after_edit(fn, glob="*")      fn(session, info) right after Claude or a subagent edits a file whose absolute
+                             path matches glob (fnmatch, * crosses /: "*.md" is any markdown file; info: path, tool,
+                             cwd, agent_id). Text it returns is handed to Claude before its
                              next step, e.g. to point out a mistake. All plugins together get 1s; Claude waits.
     grovy.route(method, path, fn)   GET or POST /api/x/PLUGIN/PATH, behind grovy's login; fn(request) returns
                              something JSON-able, or (status, value). request.query (GET), request.body (POST).
@@ -21,7 +22,8 @@ A plugin runs inside the daemon. It defines setup(grovy) and uses only `grovy`:
     grovy.send(session, text)               send a message, with the phone's rules (never forced)
     grovy.log(text)                          a line in grovy's log (journalctl --user -u grovy)
 
-The on() callbacks run one at a time on a thread of their own; each route call on a thread of its own. on() and route()
+The on() callbacks run one at a time on a thread of their own; each route, context() and after_edit() call on a
+thread of its own (they can overlap: keep shared state under a lock). on() and route()
 only work inside setup(). If setup() fails or takes over 10s, the plugin is skipped; if a callback fails, the error is
 logged and grovy carries on. GROVY_PLUGINS=0 turns plugins off. grovy's built-in plugins (plugins/ in the grovy
 folder) work the same way: a file of yours with the same name replaces one, and an empty NAME.off turns it off.

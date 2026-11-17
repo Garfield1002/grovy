@@ -55,8 +55,9 @@ def plugins_watch(payload):
     if payload.get("tool_name") not in claude.EDIT_TOOLS or not isinstance(inp, dict):
         return False
     path = inp.get("file_path") or inp.get("notebook_path")
-    if not isinstance(path, str):
+    if not isinstance(path, str) or not os.path.isabs(path):   # the daemon ignores those too
         return False
+    path = os.path.normpath(path)
     try:
         with open(core.edit_watch_path()) as f:
             globs = json.load(f)
@@ -113,7 +114,8 @@ def cmd_hook(name):
         except (OSError, ValueError) as e:
             print(f"grovy hook: daemon unreachable ({e}); event not recorded", file=sys.stderr)
             return 0
-        said = [t for t in ((reply or {}).get("steer"), (reply or {}).get("note")) if isinstance(t, str) and t]
+        reply = reply if isinstance(reply, dict) else {}
+        said = [t for t in (reply.get("steer"), reply.get("note")) if isinstance(t, str) and t]
         if said:
             sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
                                                                 "additionalContext": "\n\n".join(said)}}))
@@ -125,7 +127,7 @@ def cmd_hook(name):
         added = None
         try:
             reply = client.sock_request({**msg, "want_context": True}, timeout=3.0)
-            added = (reply or {}).get("context")
+            added = reply.get("context") if isinstance(reply, dict) else None
         except (OSError, ValueError) as e:
             print(f"grovy hook: no plugin context ({e})", file=sys.stderr)
         context = "\n\n".join(filter(None, [claude.widget_guide() if core.env("WIDGETS", "1") != "0" else "",

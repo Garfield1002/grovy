@@ -137,21 +137,29 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
 * **`plugins/*.py`** run inside the daemon, loaded once it is serving (restart it to reload; `GROVY_PLUGINS=0` loads
   none; events in the first moments after a start may not reach them). grovy's own features built this way live in
   `plugins/` in the grovy folder and load the same way, together with yours in name order: your `NAME.py` replaces
-  the built-in of that name (copy it and edit), and an empty `NAME.off` beside yours turns it off. Each defines `setup(grovy)` and uses the `Api`
+  the built-in of that name (`a-b.py` and `a_b.py` count as one name; copy it and edit), and a file `NAME.off` in
+  your folder turns the built-in `NAME` off (it does nothing to a plugin of your own). Each defines `setup(grovy)` and uses the `Api`
   it is given (`grovylib/plugins.py`, example in `examples/plugin.py`):
   * `on("event" | "state" | "notify", fn)`.
   * `context(fn)`: `fn(session, {cwd, source})` returns text added to what the `SessionStart` hook tells Claude, after
     grovy's widget guide and before `instructions.md` (start, resume, `/clear`, `/compact`). The hook asks the daemon
     (`want_context`) and waits up to 3s; all plugins together get 1.5s, run in parallel. A late, failing, non-text or
-    over-16K answer is skipped and logged, and so is everything from a daemon that doesn't answer (not running, plugins
-    not loaded yet, or a version without this): Claude still gets the rest.
+    over-16K answer is skipped and logged (32K for all plugins together), and so is everything from a daemon that
+    doesn't answer (not running, plugins not loaded yet, or a version without this): Claude still gets the rest.
   * `after_edit(fn, glob="*")`: `fn(session, {path, tool, cwd, agent_id})` right after Claude or a subagent edits a
     file (Edit, Write, MultiEdit, NotebookEdit) whose absolute path matches `glob` (`fnmatch`, `*` crosses `/`). Text it
     returns goes back as the `PostToolUse` hook's `additionalContext`, which Claude reads before its next step. The main
     agent's hook already waits for steering (`want_steer`, 3s); the daemon asks plugins first (all together 1s, at most
-    4K each) and takes steers last. A subagent's hook doesn't wait, except for an edit whose path matches a glob grovyd
+    4K each, 8K in all) and takes steers last, and only within 2s of the hook's message (`STEER_TAKE_BY`): later,
+    the hook may have given up, so they stay queued and are typed at the end of the turn. A subagent's hook doesn't wait, except for an edit whose path matches a glob grovyd
     publishes to `edit-watch.json` in the state dir (rewritten empty at each start, then with the plugins' globs); it
-    asks with `want_note` and never takes the main agent's steers.
+    asks with `want_note` and never takes the main agent's steers. Paths are compared absolute and normalised
+    (`os.path.normpath`; relative paths are ignored). While plugins load (up to 10s each, after the daemon starts)
+    edits get no notes.
+  * `context` and `after_edit` calls each run on a thread of their own, at the same time as each other and as the
+    `on` worker: a plugin that keeps state needs a lock. A call past its deadline is left to finish, and that callback
+    is skipped until it does, so a hung one holds one thread, not one per edit. An answer that arrives after the
+    deadline is never used.
   * `route("GET" | "POST", path, fn)` for `/api/x/PLUGIN/PATH`. It sits behind the token. POST is checked like the
     rest of the API. A GET also needs an `X-Grovy: 1` header, which `grovy.api` sends and a tapped link or a page's
     navigation can't. Keep GET routes read-only all the same.

@@ -38,11 +38,15 @@ SSE_PER_CLIENT = 4  # live-update streams kept per client IP (older ones are clo
 RECONCILE_EVERY = 10
 
 
+STEER_TAKE_BY = 2.0   # seconds after a PostToolUse hook's message arrives: past that, steers stay queued (hook waits 3s)
+
+
 class SockHandler(socketserver.StreamRequestHandler):
     def handle(self):
         store = self.server.store
         try:
             line = self.rfile.readline(8 * pages.PAGE_MAX)   # a page's HTML, JSON-escaped
+            started = time.monotonic()
             msg = json.loads(line)
         except (ValueError, OSError):
             return
@@ -67,7 +71,10 @@ class SockHandler(socketserver.StreamRequestHandler):
                     steer = note = None
                     if payload.get("hook_event_name") == "PostToolUse":
                         note = store.plugins.after_edit(name, payload) if store.plugins else None
-                        if msg.get("want_steer") and not payload.get("agent_id"):   # last: the reply goes right after
+                        # Last, so the reply goes right after; not once the hook (3s) may have stopped waiting: a
+                        # steer taken then would be marked delivered and lost. Left queued, it's typed at turn end.
+                        if msg.get("want_steer") and not payload.get("agent_id") \
+                                and time.monotonic() - started < STEER_TAKE_BY:
                             steer = store.take_steers(name)
                     try:
                         self._reply({"steer": steer, "note": note or None})
