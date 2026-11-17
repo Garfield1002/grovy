@@ -271,10 +271,17 @@ textarea:focus { border-color:var(--mut); }
 #composer.full { position:fixed; inset:0; z-index:20; display:flex; border-top:0;
   padding:calc(8px + env(safe-area-inset-top)) 12px calc(8px + env(safe-area-inset-bottom)); }
 #composer.full .inner { flex:1; min-height:0; width:100%; display:flex; flex-direction:column; }
-#composer.full :is(#bg, #quick, #hint, #quotesel, #tobottom) { display:none; }
-#composer.full .cr { flex:1; min-height:0; align-items:stretch; }
-#composer.full .cr > #send { align-self:flex-end; }
-#composer.full textarea { height:auto !important; max-height:none; border-radius:14px; }
+#composer.full :is(#bg, #quick, #hint, #quotesel, #tobottom, #slot-composer) { display:none; }
+/* the text runs edge to edge, no frame; its buttons float: ⤡ and ✕ in the top corner, send at the bottom */
+#composer.full .cr { flex:1; min-height:0; align-items:stretch; position:relative; }
+#composer.full textarea { height:auto !important; max-height:none; border:0; border-radius:0; background:none;
+  padding:2px 2px 72px; }
+#composer.full .tbox { padding-top:44px; }   /* the title row: the text scrolls below it, never under it */
+#composer.full #clear { top:3px; bottom:auto; right:46px; }
+#fhead { display:none; } /* the full-screen box's title, on the line of its buttons */
+#composer.full #fhead { display:block; position:absolute; top:3px; left:2px; right:92px; line-height:40px; font-size:15px;
+  font-weight:650; color:var(--mut); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; pointer-events:none; }
+#composer.full #send { position:absolute; right:4px; bottom:4px; box-shadow:0 2px 10px rgba(0,0,0,.25); }
 body.fulledit { overflow:hidden; }
 #atts { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 8px; } #atts:empty { display:none; }
 .attc { display:inline-flex; align-items:center; gap:2px; max-width:100%; font-size:13px; background:var(--card);
@@ -449,6 +456,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   <div id="atts"></div>
   <div class="cr">
     <div class="tbox">
+      <div id="fhead"></div>
       <textarea id="input" rows="1" placeholder="Message Claude…" enterkeyhint="enter"></textarea>
       <button id="attach" class="tbtn" aria-label="Attach files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
         stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
@@ -1463,6 +1471,7 @@ const isFull = () => $("composer").classList.contains("full");
 function setFull(on) {
   if (on === isFull()) return;
   $("composer").classList.toggle("full", on);
+  $("fhead").textContent = on ? "Message to " + view : "";
   document.body.classList.toggle("fulledit", on);
   $("expand").setAttribute("aria-label", on ? "Shrink the message box" : "Full screen");
   $("expand").title = $("expand").getAttribute("aria-label");
