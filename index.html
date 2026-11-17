@@ -1496,7 +1496,7 @@ function fitFull() {
   $("composer").style.top = vv.offsetTop + "px"; $("composer").style.height = vv.height + "px";
 }
 if (window.visualViewport) for (const ev of ["resize", "scroll"]) visualViewport.addEventListener(ev, fitFull);
-addEventListener("popstate", () => { if (isFull() && !fullState()) { setFull(false); autosize(); } });
+addEventListener("popstate", () => { if (isFull() && !fullState()) { shrunk = true; setFull(false); autosize(); } });   // as ⤡
 function autosize(grow) {   // also swaps the text box's paperclip (empty) for its clear cross (anything typed)
   if (!input.value) { shrunk = false; setFull(false); }
   if (!isFull()) {
@@ -2086,7 +2086,7 @@ document.addEventListener("keydown", e => {
   if ((e.key === "Enter" || e.key === " ") && a && a.getAttribute("role") === "button" && a.tagName !== "BUTTON") {
     e.preventDefault(); a.click(); return;
   }
-  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && !sheetOpen() && !viewing) {
+  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && !sheetOpen() && !viewing && !isFull()) {
     e.preventDefault(); stepSession(e.key === "ArrowDown" ? 1 : -1); return;
   }
   // typing with nothing focused goes to the message box
@@ -2117,6 +2117,7 @@ function route() {
   $("title").textContent = view || "Sessions";
   main.replaceChildren();
   $("picker").replaceChildren(); commands = []; shrunk = false; setFull(false);
+  if (fullState()) history.replaceState(null, "");   // a reload while full: the next back shouldn't land on a stale entry
   if (view) { try { input.value = localStorage.getItem(draftKey()) || ""; } catch (e) { input.value = ""; } autosize(); loadAtts(); loadCommands(); }
   document.body.classList.toggle("home", !view);
   if (view) { $("title").setAttribute("tabindex", "0"); $("title").setAttribute("role", "button"); }
