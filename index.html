@@ -271,7 +271,9 @@ textarea:focus { border-color:var(--mut); }
 #composer.full { position:fixed; inset:0; z-index:20; display:flex; border-top:0;
   padding:calc(8px + env(safe-area-inset-top)) 12px calc(8px + env(safe-area-inset-bottom)); }
 #composer.full .inner { flex:1; min-height:0; width:100%; display:flex; flex-direction:column; }
-#composer.full :is(#bg, #quick, #hint, #quotesel, #tobottom, #slot-composer) { display:none; }
+#composer.full :is(#bg, #quick, #quotesel, #tobottom, #slot-composer) { display:none; }
+#composer.full #hint { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }   /* one line: "Sending will ask first"… */
+#composer.full #atts { flex:none; max-height:25%; overflow-y:auto; }   /* many files can't squeeze the text away */
 /* the text runs edge to edge, no frame; its buttons float: ⤡ and ✕ in the top corner, send at the bottom */
 #composer.full .cr { flex:1; min-height:0; align-items:stretch; position:relative; }
 #composer.full textarea { height:auto !important; max-height:none; border:0; border-radius:0; background:none;
@@ -1397,6 +1399,7 @@ async function renderDetail(name) {
   $("send").disabled = s.state === "exited";
   $("resume").classList.toggle("hidden", s.state !== "exited");
   document.querySelector("#composer .cr").classList.toggle("hidden", s.state === "exited");
+  if (s.state === "exited" && isFull()) { setFull(false); autosize(); }   // its buttons just went: never strand the user
   // quick replies: the last thing said was Claude asking something, and Claude is ready for input
   const lastConv = [...d.events].reverse().find(e => e.type === "Stop" || e.type === "UserPromptSubmit");
   const asks = lastConv && lastConv.type === "Stop" &&
@@ -1466,23 +1469,42 @@ const input = $("input");
 const draftKey = () => "grovy-draft:" + view;
 // A long message gets the whole screen: by itself once it outgrows the box (unless shrunk back for this draft), or
 // with the ⤢ button that shows from a few lines on. It goes back to the small box when sent, cleared or left.
+// It has a history entry of its own, so the phone's back button shrinks it rather than leaving the session.
 let shrunk = false;   // the user shrank this draft back: don't grow it again by itself until the box empties
 const isFull = () => $("composer").classList.contains("full");
+const fullState = () => !!(history.state && history.state.full);
 function setFull(on) {
+  if (on && ($("composer").classList.contains("hidden") || document.querySelector("#composer .cr").classList.contains("hidden"))) return;
   if (on === isFull()) return;
   $("composer").classList.toggle("full", on);
-  $("fhead").textContent = on ? "Message to " + view : "";
   document.body.classList.toggle("fulledit", on);
+  for (const el of [document.querySelector("header"), $("side"), $("main"), $("typing")]) el.inert = on;   // a modal for Tab and screen readers
+  $("fhead").textContent = on ? "Message to " + view : "";
   $("expand").setAttribute("aria-label", on ? "Shrink the message box" : "Full screen");
+  $("expand").setAttribute("aria-expanded", String(on));
   $("expand").title = $("expand").getAttribute("aria-label");
+  if (on) { if (!fullState()) history.pushState({full: 1}, ""); fitFull(); }
+  else {
+    $("composer").style.top = $("composer").style.height = "";
+    if (fullState()) history.back();
+  }
 }
-function autosize() {   // also swaps the text box's paperclip (empty) for its clear cross (anything typed)
+// iOS ignores interactive-widget=resizes-content: follow the visual viewport, so the keyboard doesn't cover Send.
+function fitFull() {
+  const vv = window.visualViewport;
+  if (!vv || !isFull()) return;
+  $("composer").style.top = vv.offsetTop + "px"; $("composer").style.height = vv.height + "px";
+}
+if (window.visualViewport) for (const ev of ["resize", "scroll"]) visualViewport.addEventListener(ev, fitFull);
+addEventListener("popstate", () => { if (isFull() && !fullState()) { setFull(false); autosize(); } });
+function autosize(grow) {   // also swaps the text box's paperclip (empty) for its clear cross (anything typed)
   if (!input.value) { shrunk = false; setFull(false); }
   if (!isFull()) {
     input.style.height = "auto";   // empty: one line (Chrome counts a wrapped placeholder in scrollHeight)
     const max = innerHeight * .4;
     if (input.value) input.style.height = Math.min(input.scrollHeight + 2, max) + "px";
-    if (input.value && input.scrollHeight + 2 > max && !shrunk) setFull(true);
+    // only typing grows it by itself: opening a session with a long draft shows the conversation first
+    if (grow && input.value && input.scrollHeight + 2 > max && !shrunk) setFull(true);
   }
   $("expand").classList.toggle("hidden", !isFull() && input.scrollHeight <= 90);   // from about three lines
   $("attach").classList.toggle("hidden", input.value !== "");
@@ -1491,13 +1513,13 @@ function autosize() {   // also swaps the text box's paperclip (empty) for its c
 $("expand").onclick = () => {
   const on = !isFull();
   shrunk = !on; setFull(on); autosize();
-  input.focus({preventScroll: true});
+  if (on) input.focus({preventScroll: true});   // shrinking mustn't pop the keyboard
 };
 $("clear").onclick = () => {
   input.value = ""; try { localStorage.removeItem(draftKey()); } catch (e) {}
   autosize(); picker(); input.focus();
 };
-input.addEventListener("input", () => { try { localStorage.setItem(draftKey(), input.value); } catch (e) {} autosize(); });
+input.addEventListener("input", () => { try { localStorage.setItem(draftKey(), input.value); } catch (e) {} autosize(true); });
 let canStop = false;   // Claude is working with no dialog pending: an empty box turns Send into Stop
 function syncSend() {
   const typed = !!input.value.trim() || atts.some(a => a.path);
