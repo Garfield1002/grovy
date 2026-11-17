@@ -362,7 +362,10 @@ their next start.
 **Git.** The built-in plugin `plugins/git.py` answers read-only questions about the repository a session runs in.
 The built-in extension `extensions/git.js` uses it:
 * ⋯ → Git: a graph of recent commits (all branches, or one), with the current branch, its upstream (ahead/behind) and
-  the number of changed files. Tap a commit for its message, files and diff (capped at 200 KB, shown at once when
+  the number of changed files, and a link to the remote's web page when there is one (the remote the branch tracks,
+  else `origin`, else the only one). ssh, scp-style and `git://` addresses become `https://HOST/PATH`, without user
+  name, password or `.git`; a local path, `file://` or a host name without a dot gives no link. Whether that host
+  really has a web page isn't checked (a plain ssh server has none). Tap a commit for its message, files and diff (capped at 200 KB, shown at once when
   short), with its parents and refs as links. The message's hand-wrapped lines are joined back into paragraphs
   (list items, code blocks, headings and trailers such as `Co-Authored-By:` keep their own lines), since markdown
   here keeps line breaks and a phone would break each line twice. "Ask Claude about it" puts the commit in the message box.

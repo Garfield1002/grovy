@@ -1341,6 +1341,24 @@ class TestGitPlugin(StoreCase):
         with mock.patch.dict(os.environ, {"GIT_DIR": os.path.join(other, ".git")}):
             self.assertEqual(self.call("GET", "graph", {"session": "a"})[1]["branch"], "main")
 
+    def test_remote_link(self):
+        self.assertIsNone(self.call("GET", "graph", {"session": "a"})[1]["remote"])        # no remote
+        self.git("remote", "add", "upstream", "/srv/elsewhere.git")
+        self.assertIsNone(self.call("GET", "graph", {"session": "a"})[1]["remote"])        # a local path has no page
+        self.git("remote", "add", "origin", "https://me:secret@github.com/me/proj.git")
+        self.assertEqual(self.call("GET", "graph", {"session": "a"})[1]["remote"],
+                         {"name": "origin", "url": "https://github.com/me/proj"})           # no password
+        self.git("remote", "add", "fork", "git@gitlab.com:you/proj.git")
+        self.git("config", "branch.main.remote", "fork")                                    # the one main tracks
+        self.assertEqual(self.call("GET", "graph", {"session": "a"})[1]["remote"],
+                         {"name": "fork", "url": "https://gitlab.com/you/proj"})
+        web = sys.modules["grovy_plugin_git"].web_url
+        for url, page in [("ssh://git@git.example.org:2222/a/b.git", "https://git.example.org/a/b"),
+                          ("http://git.lan.io/x", "http://git.lan.io/x"), ("git://host.org/x.git", "https://host.org/x"),
+                          ("file:///srv/r", None), ("../r", None), ("host:path", None), ("https://h.com/../x", None),
+                          ("javascript:alert(1)", None), ("https://h.com/r?x=1", None)]:
+            self.assertEqual(web(url), page, url)
+
     def test_numstat(self):
         num = sys.modules["grovy_plugin_git"].numstat
         self.assertEqual(num("1\t2\ta b\0-\t-\tbin\0" "0\t0\t\0old\0new\0" "3\t0\tz\0"),

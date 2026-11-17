@@ -17,6 +17,7 @@ code.gitref svg.gi { width:.95em; height:.95em; vertical-align:-.12em; margin-ri
 .gg-head b { color:var(--fg); font-family:ui-monospace,monospace; font-weight:600; }
 .gg-head select { font:inherit; color:var(--fg); background:var(--card); border:1px solid var(--line); border-radius:8px;
   padding:4px 6px; max-width:100%; }
+.gg-head a.gg-remote { color:var(--acc); text-decoration:none; overflow-wrap:anywhere; }
 .gg { position:relative; }
 .gg svg { position:absolute; left:0; top:0; overflow:visible; }
 .gg-row { display:block; width:100%; height:${ROW}px; padding:5px 4px 5px 0; border:0; background:none; text-align:left;
@@ -214,6 +215,8 @@ button.gref { cursor:pointer; background:none; }
     const head = h("div", {class: "gg-head"},
       d.branch ? h("span", {}, "On ", h("b", {}, d.branch)) : d.head ? h("span", {}, "Detached at ", h("b", {}, short(d.head))) : null,
       d.upstream ? h("span", {}, d.track ? `${d.track} ${d.upstream}` : `up to date with ${d.upstream}`) : null,
+      d.remote && /^https?:\/\//.test(d.remote.url) ? h("a", {class: "gg-remote", href: d.remote.url, target: "_blank",
+        rel: "noopener noreferrer", title: d.remote.url}, d.remote.url.replace(/^https?:\/\//, "") + " ↗") : null,
       d.changes ? h("span", {}, `${d.changes} changed file${d.changes > 1 ? "s" : ""}`) : d.changes === 0 ? h("span", {}, "clean") : null,
       pick);
     if (!d.commits.length) return grovy.sheet(h("h2", {}, "Git"), head, h("p", {class: "gg-note"}, "No commits yet."));

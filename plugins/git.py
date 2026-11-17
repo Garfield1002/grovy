@@ -125,6 +125,43 @@ def commits_of(cwd, hexes):
     return found
 
 
+SCP_RE = re.compile(r"(?:[\w.-]+@)?([A-Za-z0-9][\w.-]*):(?!//)([^\s?#]+)")       # user@host:path (scp style)
+URL_RE = re.compile(r"(https?|ssh|git)://(?:[^@/\s]*@)?([A-Za-z0-9][\w.-]*)(?::\d+)?/([^\s?#]+)")
+HOST_RE = re.compile(r"[A-Za-z0-9][\w.-]*\.[A-Za-z]{2,}")   # a dotted name: "localhost" or a bare alias has no web page
+
+
+def web_url(url):
+    """The web page of a remote, or None: https://HOST/PATH for ssh, scp-style and git:// remotes, the same scheme for
+    http(s) ones, without the user name or password and without ".git". Local paths and file:// give None."""
+    m = URL_RE.fullmatch(url.strip())
+    if m:
+        scheme, host, path = m.group(1), m.group(2), m.group(3)
+    else:
+        m = SCP_RE.fullmatch(url.strip())
+        if not m or "/" in m.group(1):
+            return None
+        scheme, host, path = "ssh", m.group(1), m.group(2)
+    path = path.strip("/")
+    path = path[:-4] if path.endswith(".git") else path
+    if not HOST_RE.fullmatch(host) or not path or ".." in path.split("/"):
+        return None
+    return f"{'http' if scheme == 'http' else 'https'}://{host}/{path}"
+
+
+def remote(cwd, branch):
+    """(name, web page) of the remote the current branch tracks, else of origin, else of the only remote; or None."""
+    try:
+        urls = dict(line.split(" ", 1) for line in git(cwd, "config", "--get-regexp", r"^remote\..*\.url$",
+                                                      ok=(0, 1)).splitlines() if " " in line)
+        tracked = git(cwd, "config", "--get", f"branch.{branch}.remote", ok=(0, 1)).strip() if branch else ""
+    except GitError:
+        return None
+    urls = {k[len("remote."):-len(".url")]: v for k, v in urls.items()}
+    name = next((n for n in (tracked, "origin") if n in urls), None) or (next(iter(urls)) if len(urls) == 1 else None)
+    page = web_url(urls[name]) if name else None
+    return {"name": name, "url": page} if page else None
+
+
 def changes(cwd):
     """Files changed in the working tree (untracked included), or None if git status fails or is too slow."""
     try:
@@ -249,7 +286,7 @@ def setup(grovy):
                                     for f, r in all_refs.items() if r["kind"] != "tag"}.values(),
                                    key=lambda r: (r["kind"] != "branch", r["name"])),
                 "upstream": local.get("upstream") if local else None, "track": local.get("track") if local else None,
-                "changes": changes(cwd)}
+                "changes": changes(cwd), "remote": remote(cwd, branch)}
 
     @grovy.route("GET", "commit")
     @answer
