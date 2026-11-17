@@ -2864,6 +2864,120 @@ class TestTmuxIntegration(unittest.TestCase):
         sessions.kill_session("it3")
 
 
+def load_spec_plugin():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("grovy_test_spec", os.path.join(ROOT, "plugins", "spec.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+SPEC_INDEX = """---
+spec: 1
+title: Demo
+status: active
+next: {R: 6, D: 3, G: 2}
+parts: [decisions.md]
+---
+
+# Demo
+
+## Done so far
+
+Login links expire after a year {#R1}. Example syntax: `{#R99}` is not an ID.
+
+## Roadmap
+
+- [ ] Write the parser {#R2}
+- [~] @s1 Draw the view, a long item
+      that goes on {#R3}
+- [x] Lint {#R4}
+- [-] Dropped: too slow {#R5}
+
+```
+- [ ] not an item {#R42}
+```
+
+## Glossary
+
+**Spec** {#G1}: a folder with an index.
+"""
+SPEC_DECISIONS = """# Decisions
+
+- {#D1} 2026-11-17: Markdown in the repo. Why: agents edit files.
+- {#D2} 2026-11-18: Plain checkboxes. Supersedes D1.
+"""
+
+
+@unittest.skipUnless(shutil.which("git"), "git not installed")
+class TestSpecPlugin(unittest.TestCase):
+    """plugins/spec.py: finding, parsing and checking specs in a git repo."""
+
+    def setUp(self):
+        self.sp = load_spec_plugin()
+        self.repo = tempfile.mkdtemp(dir=TMP)
+        subprocess.run(["git", "init", "-q", self.repo], check=True)
+        self.folder = os.path.join(self.repo, "specs", "demo")
+        os.makedirs(self.folder)
+        self.write("index.md", SPEC_INDEX)
+        self.write("decisions.md", SPEC_DECISIONS)
+        self.write("../../README.md", "# not a spec\n")
+        self.index = os.path.join(self.folder, "index.md")
+
+    def write(self, rel, text):
+        with open(os.path.join(self.folder, rel), "w") as f:
+            f.write(text)
+        self.sp._scans.clear()
+
+    def test_parse(self):
+        self.assertEqual(self.sp.find_specs(self.repo), [self.index])
+        spec = self.sp.load(self.index, self.repo)
+        self.assertEqual(spec["problems"], [])
+        self.assertEqual([(i["id"], i["state"]) for i in spec["items"]],
+                         [("R2", "todo"), ("R3", "doing"), ("R4", "done"), ("R5", "dropped")])
+        r3 = spec["items"][1]
+        self.assertEqual((r3["claim"], r3["text"], r3["section"]), ("s1", "@s1 Draw the view, a long item that goes on",
+                                                                     ["Demo", "Roadmap"]))
+        self.assertEqual([a["id"] for a in spec["anchors"]], ["R1"])            # code spans and fences are left out
+        self.assertEqual(self.sp.summary(spec), {"todo": 1, "doing": 1, "done": 2, "dropped": 1, "total": 4})
+        self.assertEqual([(d["id"], d["date"], d.get("superseded_by")) for d in spec["decisions"]],
+                         [("D1", "2026-11-17", "D2"), ("D2", "2026-11-18", None)])
+        self.assertEqual(spec["terms"][0]["term"], "Spec")
+
+    def test_lint_and_note(self):
+        self.assertIsNone(self.sp.note_for(self.index))
+        self.assertIsNone(self.sp.note_for(os.path.join(self.repo, "README.md")))   # not part of a spec
+        self.write("decisions.md", SPEC_DECISIONS + "- {#D2} 2026-11-19: Reused.\n- {#D3} no date\n")
+        note = self.sp.note_for(os.path.join(self.folder, "decisions.md"))      # a part leads to its spec
+        self.assertIn("D2 is already used at decisions.md:4", note)
+        self.assertIn("next D is 3 but D3 exists: set it to 4", note)
+        self.assertIn("decision D3 has no date", note)
+        self.write("index.md", SPEC_INDEX.replace("- [~] @s1 Draw", "- [~] Draw").replace("- [ ] Write the parser {#R2}",
+                                                                                       "- [ ] Write the parser"))
+        note = self.sp.note_for(self.index)
+        self.assertIn("item has no ID", note)
+        self.assertIn("R3 is marked doing but not claimed", note)
+        self.write("index.md", SPEC_INDEX.replace("parts: [decisions.md]", "parts: [decisions.md, gone.md]"))
+        self.assertIn("gone.md: listed in parts but missing", self.sp.note_for(self.index))
+
+    def test_context(self):
+        ctx = self.sp.context_for(self.folder)
+        self.assertIn("grovy spec mode", ctx)
+        self.assertIn("specs/demo/index.md: Demo [active], 2/4 done; in progress: R3 (s1)", ctx)
+        self.assertIn('<spec-index path="' + self.index + '">', ctx)                 # the active spec's index
+        self.assertNotIn("Plain checkboxes", ctx)                                     # parts are read on demand
+        self.assertIsNone(self.sp.context_for(tempfile.mkdtemp(dir=TMP)))              # not a git repo
+        empty = tempfile.mkdtemp(dir=TMP)
+        subprocess.run(["git", "init", "-q", empty], check=True)
+        self.assertIsNone(self.sp.context_for(empty))                                 # a repo without specs
+
+    def test_header(self):
+        meta, n = self.sp.parse_header("---\nspec: 1\nparts:\n  - a.md\n  - b.md\nnext: {R: 3}  # c\n---\nbody")
+        self.assertEqual((meta, n), ({"spec": 1, "parts": ["a.md", "b.md"], "next": {"R": 3}}, 7))
+        self.assertEqual(self.sp.parse_header("no header"), (None, 0))
+        self.write("index.md", SPEC_INDEX.replace("spec: 1", "spec: 2"))
+        self.assertIn("this grovy reads format 1", self.sp.note_for(self.index))
+
 @unittest.skipUnless(shutil.which("node"), "node not installed")
 class TestPaint(unittest.TestCase):
     """index.html's paint(), run in node against a minimal DOM."""

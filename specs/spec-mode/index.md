@@ -37,14 +37,14 @@ The plugin must be built only on public APIs (D10), so these come first.
 
 ### Phase 2: parser and lint
 
-- [ ] Find specs: git-tracked `.md` files whose YAML header has `spec: N` (the format version); their parts are
+- [x] Find specs: git-tracked `.md` files whose YAML header has `spec: N` (the format version); their parts are
       listed in `parts:`. Git repos only {#R5}
-- [ ] Parse items, states, claims, anchors, decisions, glossary, across the index and its parts {#R6}
+- [x] Parse items, states, claims, anchors, decisions, glossary, across the index and its parts {#R6}
 - [ ] Lint: duplicate IDs, a `next` counter behind the highest ID, dangling references, an ID that vanished,
       a claim by an exited session. Problems go back to Claude mid-turn (R3) {#R7}
 - [ ] Snapshots: on each Edit/Write touching a spec file, store done/total per section and who changed what, in
       the plugin's folder under grovy's state dir {#R8}
-- [ ] SessionStart: in a project with specs, add the conventions and each spec's index (not its parts) {#R9}
+- [x] SessionStart: in a project with specs, add the conventions and each spec's index (not its parts) {#R9}
 
 ### Phase 3: the spec view
 
