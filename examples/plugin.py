@@ -2,7 +2,8 @@
 (`systemctl --user restart grovy`). It counts how long each session has spent working since grovy started, and
 serves the totals at /api/x/worktime/totals.
 
-A plugin runs inside the daemon. It defines setup(grovy) and uses only `grovy`:
+A plugin runs inside the daemon. It defines setup(grovy) and uses only `grovy` (grovy's own plugins, in plugins/ in the
+grovy folder, are written the same way: read plugins/git.py for a longer example):
 
     grovy.on("event", fn)    fn(session, record): each event the conversation records (a copy)
     grovy.on("state", fn)    fn(session, old, new): a session's state changed (idle, working, needs_input, ...)

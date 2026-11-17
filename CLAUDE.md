@@ -36,6 +36,7 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 | `grovyd.py` | daemon entry: `Http` (API, SSE), `SockHandler` (hooks, CLI), `serve()`, `load_index()` |
 | `Store` | `grovylib/store.py`, assembled from one class per feature (`Tasks`, `Permissions`, `Prompts`, `SessionLifecycle`, `Pages`, `LiveCards`, `Attachments`), each in its own module, all sharing `self.lock` and `self.sessions` |
 | `extensions/` | built-in page extensions (`context-bar.js`, ...): features written only against `window.grovy`, loaded before the user's `custom.js`. A self-contained UI feature belongs here rather than in `index.html` when the API can carry it; when it can't, grow the API |
+| `plugins/` | built-in daemon plugins (`git.py`), loaded like the user's own and only through the plugin `Api`; a user plugin with the same name replaces one. Built-in extensions get their data from them |
 | `index.html` | the whole UI: vanilla JS, one inline `<script>` (its CSP hash is computed at load); a map of its parts is at the top of the script |
 | pages | `grovy page` (`cli.cmd_page`) → socket `page` → `Store.publish_page` (`pages.py`); served by `/p/<id>` with `PAGE_CSP` + `PAGE_BRIDGE`. Never loosen `PAGE_CSP` (no `allow-same-origin`, no `connect-src`) without the user agreeing |
 | setup | `grovy setup` (`install.cmd_setup`, `SERVICE_UNIT`; keep `examples/grovy.service` in sync) |

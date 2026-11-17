@@ -5,6 +5,7 @@ Entry points (in the grovy folder):
   grovyd.py      the daemon: HTTP API + live updates for the browser, Unix socket for hooks and the CLI
   index.html     the whole web UI (one file; its map is at the top of its <script>)
   extensions/    built-in page features written against window.grovy, like a user's custom.js
+  plugins/       built-in daemon plugins (git.py), written against the plugin Api, like a user's own
 
 Shared:
   core.py        settings from the environment, paths, login token, JSON files, names, small text helpers
@@ -35,5 +36,5 @@ Daemon state (Store, in store.py, is assembled from one class per feature; all s
   live.py        live widgets scripts show and update
   uploads.py     files sent from the phone
   notify.py      GROVY_NOTIFY_CMD
-  plugins.py     the user's own daemon plugins (~/.config/grovy/plugins/*.py)
+  plugins.py     daemon plugins: the built-in ones (plugins/) and the user's (~/.config/grovy/plugins/*.py)
 """

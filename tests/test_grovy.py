@@ -1233,6 +1233,121 @@ class TestPlugins(StoreCase):
             self.assertRaises((ValueError, TypeError), bad)
 
 
+class TestBuiltinPlugins(StoreCase):
+    def test_builtin_first_and_user_replaces(self):
+        builtin, mine = tempfile.mkdtemp(dir=TMP), tempfile.mkdtemp(dir=TMP)
+        write_plugin(builtin, "bx.py", "WHO = 'builtin'\ndef setup(grovy):\n    pass\n")
+        write_plugin(builtin, "by.py", "WHO = 'builtin'\ndef setup(grovy):\n    pass\n")
+        write_plugin(mine, "by.py", "WHO = 'mine'\ndef setup(grovy):\n    pass\n")
+        write_plugin(mine, "aa.py", "def setup(grovy):\n    pass\n")
+        with mock.patch("sys.stderr", io.StringIO()):
+            host = plugins.Plugins(self.store, mine, builtin=builtin).load()
+            self.assertEqual(host.loaded, ["bx", "aa", "by"])         # built-in ones first, then the user's
+            self.assertEqual(sys.modules["grovy_plugin_by"].WHO, "mine")
+            self.assertEqual(plugins.Plugins(self.store, mine).load().loaded, ["aa", "by"])   # tests: no built-ins
+            # the real built-in folder ships the git plugin, and it loads
+            self.assertIn("git", plugins.Plugins(self.store, "/nonexistent", builtin=plugins.BUILTIN_DIR).load().loaded)
+
+
+@unittest.skipUnless(shutil.which("git"), "git not installed")
+class TestGitPlugin(StoreCase):
+    def git(self, *args, cwd=None):
+        env = dict(os.environ, GIT_AUTHOR_NAME="Ada", GIT_AUTHOR_EMAIL="a@x", GIT_COMMITTER_NAME="Ada",
+                   GIT_COMMITTER_EMAIL="a@x")
+        return subprocess.run(["git", *args], cwd=cwd or self.repo, env=env, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def setUp(self):
+        super().setUp()
+        self.repo = tempfile.mkdtemp(dir=TMP)
+        self.git("init", "-q", "-b", "main")
+        with open(os.path.join(self.repo, "a.txt"), "w") as f:
+            f.write("one\ntwo\n")
+        with open(os.path.join(self.repo, "bin.dat"), "wb") as f:
+            f.write(b"\0\1\2")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "First\n\nThe body.")
+        self.first = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "-b", "feature/x")
+        self.git("mv", "a.txt", "b.txt")
+        self.git("commit", "-q", "-m", "Rename")
+        self.git("checkout", "-q", "main")
+        self.git("commit", "-q", "--allow-empty", "-m", "Main work")
+        self.git("merge", "-q", "--no-ff", "feature/x", "-m", "Merge feature/x")
+        self.git("tag", "-a", "v1", "-m", "release")
+        self.merge = self.git("rev-parse", "HEAD")
+        with self.store.lock:
+            self.store.sessions["a"]["cwd"] = self.repo
+            self.store.sessions["b"]["cwd"] = TMP          # not a repository
+        with mock.patch("sys.stderr", io.StringIO()):
+            self.host = plugins.Plugins(self.store, "/nonexistent", builtin=plugins.BUILTIN_DIR).load()
+
+    def call(self, method, path, args):
+        code, body = self.host.handle(method, "git", path, args if method == "GET" else {}, args if method == "POST" else None)
+        return code, json.loads(body) if isinstance(body, bytes) else body
+
+    def test_resolve(self):
+        short = self.first[:7]
+        code, res = self.call("POST", "resolve", {"session": "a", "names": [
+            "main", "feature/x", "v1", short, "feedbee", "nothing", "--all", "HEAD", "HEAD~1", "main..x", 3]})
+        self.assertEqual(code, 200)
+        f = res["found"]
+        self.assertEqual(sorted(f), sorted(["main", "feature/x", "v1", short]))
+        self.assertEqual(f["main"], {"kind": "branch", "hash": self.merge, "ref": "refs/heads/main"})
+        self.assertEqual(f["v1"]["hash"], self.merge)                                     # the annotated tag, peeled
+        self.assertEqual(f[short], {"kind": "commit", "hash": self.first})
+        self.assertEqual(self.call("POST", "resolve", {"session": "b", "names": ["main"]}), (200, {"repo": False}))
+        self.assertEqual(self.call("POST", "resolve", {"session": "zz", "names": []})[0], 404)
+        self.assertEqual(self.call("POST", "resolve", {"session": "a", "names": "main"})[0], 400)
+
+    def test_graph(self):
+        code, g = self.call("GET", "graph", {"session": "a"})
+        self.assertEqual(code, 200)
+        self.assertEqual((g["branch"], g["head"], g["changes"]), ("main", self.merge, 0))
+        self.assertEqual([c["s"] for c in g["commits"]][0], "Merge feature/x")
+        self.assertEqual(len(g["commits"]), 4)
+        self.assertEqual(len(g["commits"][0]["p"]), 2)
+        self.assertEqual({r["name"] for r in g["refs"][self.merge]}, {"main", "v1"})
+        code, g = self.call("GET", "graph", {"session": "a", "ref": "refs/heads/feature/x", "limit": "1"})
+        self.assertEqual((code, [c["s"] for c in g["commits"]]), (200, ["Rename"]))
+        for bad in ("HEAD~1", "--all", "main", "refs/heads/nope"):    # only the repo's own full ref names
+            self.assertEqual(self.call("GET", "graph", {"session": "a", "ref": bad})[0], 404, bad)
+        with open(os.path.join(self.repo, "new.txt"), "w") as f:
+            f.write("x")
+        self.assertEqual(self.call("GET", "graph", {"session": "a"})[1]["changes"], 1)
+        self.assertFalse(os.path.exists(os.path.join(self.repo, ".git", "index.lock")))
+
+    def test_commit(self):
+        code, c = self.call("GET", "commit", {"session": "a", "hash": self.first[:10]})
+        self.assertEqual(code, 200)
+        self.assertEqual((c["h"], c["s"], c["body"], c["p"]), (self.first, "First", "The body.", []))
+        self.assertEqual(c["files"], [{"path": "a.txt", "add": 2, "del": 0}, {"path": "bin.dat", "add": None, "del": None}])
+        self.assertIn("+one", c["diff"])
+        rename = self.git("rev-parse", "feature/x")
+        c = self.call("GET", "commit", {"session": "a", "hash": rename})[1]
+        self.assertEqual(c["files"], [{"path": "b.txt", "from": "a.txt", "add": 0, "del": 0}])
+        c = self.call("GET", "commit", {"session": "a", "hash": self.merge})[1]
+        self.assertEqual(c["files"][0]["path"], "b.txt")                               # against the first parent
+        self.assertEqual({r["name"] for r in c["refs"]}, {"main", "v1"})
+        for bad in ("--all", "HEAD", "main", "feedbee", self.first[:7] + "^"):
+            self.assertEqual(self.call("GET", "commit", {"session": "a", "hash": bad})[0], 404, bad)
+        with mock.patch.dict(sys.modules["grovy_plugin_git"].__dict__, DIFF_MAX=5):
+            c = self.call("GET", "commit", {"session": "a", "hash": self.first})[1]
+        self.assertEqual((len(c["diff"]), c["truncated"]), (5, True))
+
+    def test_ignores_daemon_git_env(self):
+        other = tempfile.mkdtemp(dir=TMP)
+        self.git("init", "-q", "-b", "elsewhere", cwd=other)
+        with mock.patch.dict(os.environ, {"GIT_DIR": os.path.join(other, ".git")}):
+            self.assertEqual(self.call("GET", "graph", {"session": "a"})[1]["branch"], "main")
+
+    def test_numstat(self):
+        num = sys.modules["grovy_plugin_git"].numstat
+        self.assertEqual(num("1\t2\ta b\0-\t-\tbin\0" "0\t0\t\0old\0new\0" "3\t0\tz\0"),
+                         [{"path": "a b", "add": 1, "del": 2}, {"path": "bin", "add": None, "del": None},
+                          {"path": "new", "from": "old", "add": 0, "del": 0}, {"path": "z", "add": 3, "del": 0}])
+
+
 class TestPluginRoutes(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

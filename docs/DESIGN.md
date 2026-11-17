@@ -95,7 +95,7 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
 
 * **Built-in extensions** are `extensions/*.js` in the grovy folder, loaded in file-name order right after grovy's own
   script. They are ordinary features written against `window.grovy` only: `context-bar.js` (the line above the message
-  box, see "Status info") is the first. Each registers with `grovy.extension(name, setup)`; the setups run at start-up,
+  box, see "Status info") and `git.js` (see "Git"). Each registers with `grovy.extension(name, setup)`; the setups run at start-up,
   after `custom.js`, so `grovy.disable(name)` there turns one off (or replace it: disable it and copy it under another
   name).
 * **`custom.css`** is added after the built-in styles (a later rule with the same selector wins).
@@ -130,7 +130,9 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   and even with `GROVY_WIDGETS=0`: for example how to use a widget type `custom.js` adds. It is read at each start,
   resume, `/clear` and `/compact`.
 * **`plugins/*.py`** run inside the daemon, loaded once it is serving (restart it to reload; `GROVY_PLUGINS=0` loads
-  none; events in the first moments after a start may not reach them). Each defines `setup(grovy)` and uses the `Api`
+  none, built-in ones included; events in the first moments after a start may not reach them). grovy's own built-in
+  plugins (`plugins/*.py` in the grovy folder, such as `git.py`, see "Git") load first, the same way and with the same
+  `Api`. A user plugin with the same file name replaces the built-in one. Each defines `setup(grovy)` and uses the `Api`
   it is given (`grovylib/plugins.py`, example in `examples/plugin.py`):
   * `on("event" | "state" | "notify", fn)`.
   * `route("GET" | "POST", path, fn)` for `/api/x/PLUGIN/PATH`. It sits behind the token. POST is checked like the
@@ -356,6 +358,30 @@ configured status line, so the terminal looks the same. Your status line is look
 session's own project folder, never in the folder Claude happens to be in: a cloned repo's `.claude/settings.json`
 must not get its command run without Claude's trust dialog. Sessions started before this existed report it after
 their next start.
+
+**Git.** The built-in plugin `plugins/git.py` answers read-only questions about the repository a session runs in.
+The built-in extension `extensions/git.js` uses it:
+* ⋯ → Git: a graph of recent commits (all branches, or one), with the current branch, its upstream (ahead/behind) and
+  the number of changed files. Tap a commit for its message, files and diff (capped at 200 KB, shown at once when
+  short), with its parents and refs as links. "Ask Claude about it" puts the commit in the message box.
+* Inline `code` in a message whose text is a branch, remote branch, tag or commit hash (7–40 hex digits, not all
+  digits) of that repository becomes a link: a commit opens it, a ref opens the graph on it. Names are looked up in
+  batches (`POST /api/x/git/resolve`) after a message is drawn, and remembered per session; a miss is retried after a
+  minute, and a session's answers are forgotten when its turn ends, since Claude may have made or moved a branch.
+  Code blocks are left alone.
+
+Safety: git runs only in the session's own folder (`cwd` from the registry; never a path from the request), as an
+argument array with `GIT_*` variables removed from its environment. A ref from the request is used only if it is
+exactly one of the repo's own full ref names, a hash only if it is hexadecimal and names a commit
+(`cat-file --batch-check`), both after `--end-of-options`; so no revision expression or option can be passed in.
+`--no-optional-locks` keeps `git status` from writing the index while Claude may be committing. External diff and
+textconv drivers are off. Each git command has a 10s deadline and its output is capped.
+
+Limitations: the graph keeps a lane's column for its whole length (no compaction), so a repo with many long-lived
+branches draws a wide graph. The session's folder is where it started: if Claude works in another repo (`cd`, a
+worktree elsewhere), the links and graph are still about the first one. Hashes in other forms (`abc1234^`, a URL) are
+not linked. Without the plugin (`GROVY_PLUGINS=0`, or a daemon started before it existed) there are no links, and
+⋯ → Git says so.
 
 **Desktop.** At 1000px wide or more, a conversation gets a sidebar with all sessions (state dot, pending-request
 badge, last activity) and all pages, refreshed on any session's event at most every 400ms and only fetched while it's

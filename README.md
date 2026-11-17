@@ -57,6 +57,8 @@ in a terminal. grovy listens to Claude's hooks and shows everything on a phone-f
 - **Live progress:** when Claude runs something long (a build, training, a batch job), its script can show a progress
   bar, notes or the latest output lines in the chat while it runs. Sessions started before you updated grovy get
   this after ⋯ → Update session.
+- **Git:** ⋯ → Git shows the session's repository as a graph of branches and commits; tap a commit for its files
+  and diff. Branch names and commit hashes in Claude's replies are links to them.
 - **On a computer:** on a wide screen your sessions and pages stay in a sidebar. Ctrl+Enter sends, Alt+↑/↓ switches session,
   Esc closes, Tab reaches every button.
 

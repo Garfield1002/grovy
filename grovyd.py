@@ -709,7 +709,7 @@ def serve(bind, port):
     threading.Thread(target=sock.serve_forever, daemon=True).start()
 
     def load_plugins():   # once the sockets are up (and this is the only daemon): plugins never delay hooks or the page
-        st.plugins = plugins.Plugins(st).load()
+        st.plugins = plugins.Plugins(st, builtin=plugins.BUILTIN_DIR).load()
 
     threading.Thread(target=load_plugins, name="grovy-plugin-load", daemon=True).start()
 
