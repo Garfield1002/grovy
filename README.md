@@ -145,7 +145,10 @@ other limits are in `docs/DESIGN.md` ("Other machines").
 ## Safety
 
 - The page needs the login link (a secret token); without it, nothing is visible. Only expose grovy on a home
-  network or VPN you trust: it uses plain HTTP.
+  network or VPN you trust: it uses plain HTTP unless you turn on HTTPS.
+- **HTTPS (optional):** run `grovy tls init --name NAME` (the name or address your phone opens grovy by), then
+  restart grovy. Copy the certificate file it names to each device yourself and install it (it prints how), then
+  use the `https://` link from `grovy url`. Each new `grovy tls init` needs installing again.
 - **Nothing is approved without you.** If you don't answer on the phone, Claude's normal question in the
   terminal is still there. Your own Claude permission settings keep applying.
 - grovy only touches the sessions it started. Your other Claude windows and tmux sessions are left alone.

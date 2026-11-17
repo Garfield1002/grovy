@@ -15,6 +15,9 @@ Environment=GROVY_PORT=7333
 # Optional notifications: any command; receives the message on stdin.
 #Environment=GROVY_NOTIFY_CMD=%h/dev/grovy/examples/notify-telegram.sh
 #Environment=GROVY_PUBLIC_URL=http://100.x.y.z:7333/
+# Optional HTTPS: `grovy tls init` needs nothing here. To use your own certificate instead:
+#Environment=GROVY_TLS_CERT=/path/to/fullchain.pem
+#Environment=GROVY_TLS_KEY=/path/to/privkey.pem
 # systemd's PATH usually lacks ~/.local/bin and nvm paths: give the daemon (and the Claude sessions it starts,
 # whose Bash tool inherits this) the PATH you use in a terminal, or set GROVY_CLAUDE to claude's full path.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin

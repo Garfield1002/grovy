@@ -343,6 +343,12 @@ def main(argv=None):
     s = sub.add_parser("tail", help="copy stdin to stdout, showing its last lines live on the phone")
     s.add_argument("--title"), s.add_argument("--lines", type=int, default=40), s.add_argument("--key")
     s.set_defaults(fn=cmd_tail)
+    s = sub.add_parser("tls", help="optional HTTPS: make a certificate for the name grovy is opened by")
+    ts = s.add_subparsers(dest="op", required=True)
+    ti = ts.add_parser("init", help="create (or renew) the certificate; phones install it again each time")
+    ti.add_argument("--name", action="append", help="host name or IP address the phone opens grovy by (repeatable; "
+                    "default: this machine's full host name)")
+    ti.set_defaults(fn=install.cmd_tls)
     sub.add_parser("doctor", help="check dependencies and connectivity").set_defaults(fn=install.cmd_doctor)
     sub.add_parser("url", help="print the web UI link(s), including the login token").set_defaults(fn=install.cmd_url)
     from . import peers   # imported here: hooks never load it

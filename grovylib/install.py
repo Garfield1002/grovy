@@ -3,35 +3,46 @@ import ipaddress
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
 
-from . import claude, client, core, sessions, tmuxctl
+from . import claude, client, core, sessions, tls, tmuxctl
 
 
 def lan_bases(url):
-    """http://HOST:PORT for each address the daemon is reachable on (all IPv4 addresses when bound to 0.0.0.0)."""
-    m = re.match(r"http://(.+):(\d+)/?", url or "")
-    host, port = (m.group(1), m.group(2)) if m else ("127.0.0.1", "7333")
+    """SCHEME://HOST:PORT for each address the daemon is reachable on (all IPv4 addresses when bound to 0.0.0.0)."""
+    m = re.match(r"(https?)://(.+):(\d+)/?", url or "")
+    scheme, host, port = m.groups() if m else ("http", "127.0.0.1", "7333")
     hosts = [host]
     if host in ("0.0.0.0", "::"):
         out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5).stdout.split()
         hosts = [h for h in out if ":" not in h] or ["127.0.0.1"]
-    return [f"http://{h}:{port}" for h in hosts]
+    return [f"{scheme}://{h}:{port}" for h in hosts]
 
 
 def cmd_url(_):
     """Print the phone login link(s): open one once per device; it sets a cookie."""
     try:
-        url = (client.sock_request({"type": "status"}) or {}).get("url", "")
+        st = client.sock_request({"type": "status"}) or {}
     except (OSError, ValueError):
         core.die("grovyd not running (grovy serve)")
+    url = st.get("url", "")
     tok = core.load_token()
+    ours = st.get("tls") == tls.own_cert()
     bases = lan_bases(url)
+    local_only = all(re.match(r"https?://(127\.|localhost|\[::1\])", b) for b in bases)   # where it listens
+    if ours:   # the certificate is only valid for its own names: links by any other address would fail
+        port = bases[0].rsplit(":", 1)[1]
+        named = [f"https://{f'[{n}]' if ':' in n else n}:{port}" for n in tls.cert_names(tls.own_cert())]
+        bases = named or bases
     for base in bases:
         print(base + "/" + (f"?token={tok}" if tok else ""))
-    if all(re.match(r"http://(127\.|localhost|\[::1\])", b) for b in bases):
+    if ours and tls.cert_der():
+        print(f"New device? Install {tls.public_cert()} on it first (copy the file over yourself; `grovy tls init` "
+              f"says how). Its SHA-256 fingerprint is\n  {tls.fingerprint(tls.cert_der())}", file=sys.stderr)
+    if local_only:
         print("note: the daemon only listens on this computer, so these links won't open on a phone.\n"
               "Restart it with --bind 0.0.0.0 (or your VPN address), or set GROVY_BIND.", file=sys.stderr)
     if not tok:
@@ -55,6 +66,21 @@ def cmd_doctor(_):
     check("claude", c, ver)
     sd = core.state_dir()
     check("state dir private", (os.stat(sd).st_mode & 0o077) == 0, sd)
+    try:
+        paths = tls.cert_paths()
+        if paths:
+            tls.context(*paths)
+            soon = tls.expires_soon(paths[0])
+            check("https certificate", not soon, paths[0] + (" expires within 30 days: rerun `grovy tls init` (or renew "
+                                                             "your own)" if soon else ""))
+            if paths == (tls.own_cert(), None):
+                ok = tls.matches() is not False
+                check("https certificate matches grovy.crt", ok,
+                      "" if ok else "devices that install grovy.crt won't trust it; rerun `grovy tls init`")
+        else:
+            print("[info] https: off (grovy tls init)")
+    except (OSError, ValueError) as e:   # ssl.SSLError is an OSError
+        check("https certificate", False, str(e))
     try:
         st = client.sock_request({"type": "status"})
         check("daemon socket", True, f"{len(st.get('sessions', {}))} session(s) known")
@@ -121,7 +147,8 @@ def _pick_bind(assume_yes):
     default = vpn[0] if vpn else "0.0.0.0"
     if assume_yes or not sys.stdin.isatty():
         return default
-    print("Where should the phone reach grovy? Only expose it on networks you trust (it is plain HTTP).")
+    print("Where should the phone reach grovy? Only expose it on networks you trust (it is plain HTTP unless you "
+          "run `grovy tls init`).")
     for i, (a, what) in enumerate(choices, 1):
         print(f"  {i}) {a:<16} {what}")
     got = _ask("Address or number", default)
@@ -176,6 +203,56 @@ def _pick_port(bind, assume_yes, own_port):
         last, default = port, _free_port(bind, port + 1)
         print(f"  port {port} on {bind} is already in use (maybe another user's grovy, bound to 0.0.0.0).\n"
               f"  press enter for {default}, or type {port} again to use it anyway.")
+
+
+INSTALL_HELP = """
+Copy that file to each device yourself (cable, AirDrop, USB stick; not over the network you are protecting
+against), install it, and check that the device shows the same SHA-256 fingerprint. A device that had the previous
+certificate installs this one again.
+  Firefox:  Settings > Privacy & Security > Certificates > View Certificates > Authorities > Import > the file,
+            and tick "Trust this CA to identify websites".
+  Linux, whole system (Fedora; Chrome, curl, and Fedora's Firefox):  sudo trust anchor --store {file}
+            (double-clicking the file in GNOME can't import it)
+  iPhone:   open the file (Files or AirDrop), then Settings > General > VPN & Device Management > the grovy
+            profile > Install; then Settings > General > About > Certificate Trust Settings > turn it on.
+  Android:  Settings > Security > Encryption & credentials > Install a certificate > CA certificate > the file.
+            (Firefox for Android ignores it unless "Use third party CA certificates" is on in its secret settings.)
+It can vouch for nothing but this server: its own key was destroyed once it had signed the server's certificate."""
+
+
+def cmd_tls(a):
+    """`grovy tls init`: a certificate for the names grovy is opened by, so the daemon serves HTTPS."""
+    names = a.name or tls.default_names()
+    if not names:
+        core.die("this machine has no full host name: give the name or address the phone uses, with --name")
+    try:
+        ips, names = tls.init(names)
+    except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as e:
+        core.die(str(e))
+    print(f"HTTPS certificate for: {', '.join([str(i) for i in sorted(ips, key=str)] + sorted(names))}")
+    print("  (valid only for these, and subdomains of the names)")
+    host = socket.gethostname().lower()
+    known = {host, host.split(".")[0] + ".local", socket.getfqdn().lower(), "localhost"} | {
+        h.strip().lower() for h in core.env("HOSTS", "").split(",")}
+    extra = sorted(n for n in names if n not in known)
+    if extra:
+        print(f"To open grovy by {', '.join(extra)}, also add it to GROVY_HOSTS in the daemon's environment.")
+    print(f"\nThe certificate to install on each device: {tls.public_cert()}\n  SHA-256 {tls.fingerprint(tls.cert_der())}")
+    try:
+        st = client.sock_request({"type": "status"}, timeout=1.0) or {}
+    except (OSError, ValueError):
+        st = None
+    restart = "systemctl --user restart grovy, or stop and start `grovy serve`; sessions keep running"
+    if st is None:
+        print("Start the daemon (grovy serve, or systemctl --user start grovy): it will use HTTPS.")
+    elif st.get("tls") == tls.own_cert():
+        print("The daemon picks up the new certificate within 10 seconds.")
+    elif st.get("tls"):
+        print(f"The daemon serves another certificate ({st['tls']}, GROVY_TLS_CERT): it ignores this one.")
+    else:
+        print(f"Restart the daemon to switch it to HTTPS ({restart}).")
+    print(INSTALL_HELP.format(file=tls.public_cert()))
+    return 0
 
 
 def cmd_setup(a):

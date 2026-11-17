@@ -4,11 +4,14 @@ No API key needed: integration tests use a fake `claude` (a shell loop) inside r
 on a private tmux server socket (-L) so your own tmux sessions are never touched.
 """
 import io
+import ipaddress
 import json
 import re
 import os
 import shutil
 import socket
+import ssl
+import struct
 import subprocess
 import sys
 import tempfile
@@ -33,7 +36,7 @@ for _k in ("GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
     os.environ.pop(_k, None)
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
-from grovylib import plugins, claude, client, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tmuxctl, uploads  # noqa: E402
+from grovylib import plugins, claude, client, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tls, tmuxctl, uploads  # noqa: E402
 
 
 def ev(name, **kw):
@@ -3388,6 +3391,14 @@ class TestHttp(unittest.TestCase):
         self.assertIn(b"GROVY_HOSTS=box.&lt;b&gt;tail&lt;/b&gt;.ts.net", body)
         self.assertNotIn(b"<b>tail", body)
 
+    def test_host_port_must_be_a_number(self):
+        """The Host is echoed into links (the HTTPS page): "127.0.0.1:x@evil.example" passed as an IP literal."""
+        for bad in ("127.0.0.1:x@evil.example", "127.0.0.1:80@evil.example", "[::1]x@evil.example", "localhost:",
+                    "[::1%@evil.example#]", "[fe80::1%25eth0]:7333"):
+            self.assertEqual(self.req("/api/sessions", headers={"Host": bad})[0], 403, bad)
+        for good in ("127.0.0.1:7333", "[::1]:7333", "localhost", "127.0.0.1", "[::1]"):
+            self.assertEqual(self.req("/api/sessions", headers={"Host": good})[0], 200, good)
+
     def test_public_assets_are_an_allowlist(self):
         with mock.patch.object(self.httpd, "token", "secret"):
             code, body, h = self.req("/assets/icon-192.png")                 # no token needed: nothing private
@@ -3570,6 +3581,307 @@ class TestHttp(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("tmux"), "tmux not installed")
+@unittest.skipUnless(shutil.which("openssl"), "needs the openssl command")
+class TestHttps(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sd = tempfile.mkdtemp(dir=TMP)
+        cls.env = mock.patch.dict(os.environ, {"GROVY_STATE_DIR": cls.sd})
+        cls.env.start()
+        cls.reg = mock.patch.object(sessions, "registry", lambda: {})
+        cls.reg.start()
+        tls.init(["127.0.0.1", "localhost"])
+        cls.store = store.Store(tempfile.mkdtemp(dir=TMP), tmux_live=lambda: {}, paste=lambda *a: None)
+        cls.store.reconcile()
+        cls.srv = cls.server()
+        cls.port = cls.srv.server_address[1]
+        cls.client = ssl.create_default_context(cadata=tls.cert_der())
+
+    @classmethod
+    def server(cls, klass=None):
+        srv = (klass or grovyd.HttpServer)(("127.0.0.1", 0), grovyd.Http)
+        srv.store, srv.token, srv.page = cls.store, "tok", grovyd.load_index()
+        srv.tls_paths = tls.cert_paths()
+        srv.reload_tls()
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.stopping = True
+        cls.srv.shutdown()
+        cls.reg.stop()
+        cls.env.stop()
+
+    def get(self, url, ctx=None, data=None):
+        r = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"} if data else {})
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx or self.client),
+                                             type("NoRedirect", (urllib.request.HTTPRedirectHandler,),
+                                                  {"redirect_request": lambda *a: None}))
+        try:
+            with opener.open(r, timeout=5) as resp:
+                return resp.status, resp.read(), resp.headers
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), e.headers
+
+    def test_https_login_sets_a_secure_cookie(self):
+        base = f"https://127.0.0.1:{self.port}"
+        self.assertEqual(self.get(base + "/api/sessions")[0], 401)
+        code, _, h = self.get(base + "/?token=tok")
+        self.assertEqual(code, 303)
+        set_cookies = h.get_all("Set-Cookie")
+        self.assertTrue(set_cookies[0].startswith("__Secure-grovy_token=tok;"))
+        self.assertIn("; Secure", set_cookies[0])
+        self.assertTrue(set_cookies[1].startswith("grovy_token=;") and "Max-Age=0" in set_cookies[1])   # the http one goes
+        self.assertEqual(self.get(f"https://localhost:{self.port}/?token=tok")[0], 303)   # the name is in the certificate too
+
+        def index(cookie):
+            r = urllib.request.Request(base + "/", headers={"Cookie": cookie})
+            with urllib.request.urlopen(r, context=self.client, timeout=5) as resp:
+                return resp.status, resp.headers.get_all("Set-Cookie") or []
+        code, got = index("grovy_token=tok")             # enrolled over HTTP: swapped for the Secure cookie
+        self.assertEqual(code, 200)
+        self.assertTrue(got[0].startswith("__Secure-grovy_token=tok;"))
+        self.assertEqual(index("__Secure-grovy_token=tok"), (200, []))   # already swapped: nothing more
+        self.assertEqual(self.get(base + "/grovy.crt")[0], 401)   # never served: it could be swapped on the way
+
+    def test_plain_http_to_the_https_port_points_to_https(self):
+        base = f"http://127.0.0.1:{self.port}"
+        code, body, h = self.get(base + "/?token=tok")
+        self.assertEqual(code, 200)
+        self.assertNotIn("Set-Cookie", h)                    # never logs in over plain HTTP
+        self.assertIn(f'href="https://127.0.0.1:{self.port}/?token=tok"'.encode(), body)
+        self.assertNotIn(tls.fingerprint(tls.cert_der()).encode(), body)   # meaningless on a page that came over HTTP
+        self.assertIn(b"<code>grovy.crt</code>", body)       # says which file to install...
+        self.assertNotIn(b"href=\"/grovy", body)             # ...and never offers it for download
+        self.assertNotIn(b"BEGIN", body)
+        code, body, _ = self.get(base + "/?token=wrong")
+        self.assertNotIn(b"wrong", body)                     # the token is echoed only when it is the right one
+        self.assertIn(f'href="https://127.0.0.1:{self.port}/"'.encode(), body)
+        self.assertEqual(self.get(base + "/api/sessions")[0], 200)   # the same page: nothing private
+        self.assertNotIn(b'"sessions"', self.get(base + "/api/sessions")[1])
+        self.assertNotIn(b"BEGIN", self.get(base + "/grovy.crt")[1])
+        self.assertNotIn(tls.cert_der(), self.get(base + "/grovy.crt")[1])
+        self.assertEqual(self.get(base + "/api/x", data=b"{}")[0], 400)
+        s = socket.create_connection(("127.0.0.1", self.port))
+        s.sendall(b"GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n")
+        s.settimeout(5)
+        got = b""
+        while chunk := s.recv(4096):
+            got += chunk
+        self.assertIn(b" 403 ", got)                          # DNS-rebinding guard applies here too
+        s.close()
+
+    def test_failed_handshakes_leave_the_server_working(self):
+        untrusting = ssl.create_default_context()
+        with self.assertRaises(urllib.error.URLError):
+            self.get(f"https://127.0.0.1:{self.port}/", ctx=untrusting)
+        s = socket.create_connection(("127.0.0.1", self.port))
+        s.sendall(b"\x16\x03\x01\x00\x05garbage")
+        s.settimeout(5)
+        try:
+            while s.recv(4096):   # a TLS alert, then the server closes (with our unread bytes: a reset)
+                pass
+        except ConnectionResetError:
+            pass
+        s.close()
+        with mock.patch("sys.stderr", io.StringIO()) as err:
+            self.assertEqual(self.get(f"https://127.0.0.1:{self.port}/?token=tok")[0], 303)
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_stalled_handshakes_are_cut_and_cannot_lock_out_the_phone(self):
+        class Small(grovyd.HttpServer):
+            MAX_CONNECTIONS = 4
+        with mock.patch.object(grovyd.Http, "HEADER_DEADLINE", 0.5):
+            srv = self.server(Small)
+            port = srv.server_address[1]
+            try:
+                s = socket.create_connection(("127.0.0.1", port))
+                s.sendall(b"\x16\x03\x01")                # the start of a handshake, then nothing
+                s.settimeout(3)
+                t0 = time.time()
+                self.assertEqual(s.recv(1), b"")         # cut by the deadline
+                self.assertLess(time.time() - t0, 2.5)
+                s.close()
+                idle = [socket.create_connection(("127.0.0.1", port)) for _ in range(6)]
+                for i in idle[::2]:
+                    i.sendall(b"\x16")
+                time.sleep(0.8)
+                self.assertEqual(self.get(f"https://127.0.0.1:{port}/?token=tok")[0], 303)
+                [x.close() for x in idle]
+            finally:
+                srv.stopping = True
+                srv.shutdown()
+                srv.server_close()
+
+    def test_aborted_tls_connections_print_no_tracebacks(self):
+        """Regression: a TLS connection the deadline cut, one a browser preconnected and closed unused, and one reset
+        right after its ClientHello each printed a traceback (plain HTTP prints none); the reset also skipped finish()."""
+        class Quick(grovyd.HttpServer):
+            pass
+        with mock.patch.object(grovyd.Http, "HEADER_DEADLINE", 1.0), mock.patch("sys.stderr", io.StringIO()) as err:
+            srv = self.server(Quick)
+            port = srv.server_address[1]
+            try:
+                c = self.client.wrap_socket(socket.create_connection(("127.0.0.1", port)), server_hostname="127.0.0.1")
+                c.close()                                    # preconnect: handshake, then nothing
+                idle = self.client.wrap_socket(socket.create_connection(("127.0.0.1", port)),
+                                               server_hostname="127.0.0.1")
+                t0 = time.time()
+                idle.settimeout(5)
+                try:
+                    self.assertEqual(idle.recv(1), b"")      # one deadline for handshake and headers together
+                except (ConnectionError, ssl.SSLError):
+                    pass
+                self.assertLess(time.time() - t0, 1.6)      # not a second full deadline after the handshake
+                idle.close()
+                for _ in range(3):
+                    r = socket.create_connection(("127.0.0.1", port))
+                    r.sendall(b"\x16\x03\x01\x02\x00\x01\x00\x01\xfc\x03\x03")
+                    r.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    r.close()                                # RST
+                time.sleep(1.2)
+                self.assertEqual(self.get(f"https://127.0.0.1:{port}/?token=tok")[0], 303)
+            finally:
+                srv.stopping = True
+                srv.shutdown()
+                srv.server_close()
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_expires_soon(self):
+        cert = tls.cert_paths()[0]
+        self.assertFalse(tls.expires_soon(cert))
+        self.assertTrue(tls.expires_soon(cert, days=tls.CERT_DAYS + 1))
+        self.assertIsNone(tls.expires_soon("/nonexistent.pem"))   # openssl's error isn't "expires soon"
+
+    def test_a_key_with_a_passphrase_fails_instead_of_prompting(self):
+        """Regression: OpenSSL asked for the passphrase on the daemon's terminal and blocked (the reload too)."""
+        d = tempfile.mkdtemp(dir=TMP)
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-subj", "/CN=x", "-keyout", "k", "-out", "c",
+                        "-passout", "pass:secret", "-days", "1"], cwd=d, capture_output=True, check=True)
+        with self.assertRaisesRegex(ValueError, "passphrase"):
+            tls.context(os.path.join(d, "c"), os.path.join(d, "k"))
+
+    def test_new_certificate_is_picked_up_and_a_broken_one_ignored(self):
+        srv = grovyd.HttpServer(("127.0.0.1", 0), grovyd.Http)
+        try:
+            srv.tls_paths = tls.cert_paths()
+            self.assertTrue(srv.reload_tls())
+            first = srv.ssl_ctx
+            self.assertTrue(srv.reload_tls())
+            self.assertIs(srv.ssl_ctx, first)            # unchanged files: nothing reloaded
+            path = srv.tls_paths[0]
+            with open(path) as f:
+                good = f.read()
+            try:
+                with open(path, "w") as f:
+                    f.write("not a certificate")
+                with mock.patch("sys.stderr", io.StringIO()) as err:
+                    self.assertTrue(srv.reload_tls())
+                self.assertIs(srv.ssl_ctx, first)        # kept the working one
+                self.assertIn("keeping the previous one", err.getvalue())
+            finally:
+                with open(path, "w") as f:
+                    f.write(good)
+            os.utime(path, ns=(time.time_ns() + 10**9,) * 2)
+            self.assertTrue(srv.reload_tls())
+            self.assertIsNot(srv.ssl_ctx, first)
+        finally:
+            srv.server_close()
+
+    def test_cert_paths(self):
+        self.assertEqual(tls.cert_paths(), (os.path.join(self.sd, "tls", "server.pem"), None))
+        with mock.patch.dict(os.environ, {"GROVY_TLS": "off"}):
+            self.assertIsNone(tls.cert_paths())
+        with mock.patch.dict(os.environ, {"GROVY_TLS_CERT": "/x.pem"}):
+            self.assertRaises(ValueError, tls.cert_paths)
+        with mock.patch.dict(os.environ, {"GROVY_TLS_CERT": "/x.pem", "GROVY_TLS_KEY": "/x.key"}):
+            self.assertEqual(tls.cert_paths(), ("/x.pem", "/x.key"))
+        self.assertEqual(install.lan_bases("https://10.1.2.3:7333/"), ["https://10.1.2.3:7333"])
+        self.assertEqual(install.lan_bases("http://10.1.2.3:7333/"), ["http://10.1.2.3:7333"])
+
+    def test_certificate_names(self):
+        for bad in ("dev", "bad name!", "fd00::1%eth0", "0.0.0.0", ""):
+            self.assertRaises(ValueError, tls.parse_names, [bad])
+        ips, names = tls.parse_names(["Box.Example.org.", "10.9.8.7", "localhost"])
+        self.assertEqual((ips, names), ({ipaddress.ip_address("10.9.8.7")}, {"box.example.org", "localhost"}))
+        self.assertEqual(os.stat(tls.own_cert()).st_mode & 0o777, 0o600)
+
+    def test_the_installed_certificate_vouches_only_for_this_server(self):
+        """Devices install a CA (phones only trust those; Firefox refuses a server certificate that is a CA): its key
+        must be gone, the only key left must not sign anything that verifies, and its constraints must name only
+        these names."""
+        sd = tempfile.mkdtemp(dir=TMP)
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": sd}):
+            tls.init(["box.example.org", "10.9.8.7"])
+            own, root = tls.own_cert(), tls.public_cert()
+        self.assertEqual(sorted(os.listdir(os.path.join(sd, "tls"))), ["grovy.crt", "server.pem"])   # no root key
+        self.assertTrue(tls.matches(own, root))
+        with open(own) as f:
+            self.assertEqual(f.read().count("PRIVATE KEY"), 2)   # BEGIN/END of the server's key, nothing else
+        text = subprocess.run(["openssl", "x509", "-in", own, "-noout", "-text"], capture_output=True, text=True).stdout
+        self.assertIn("CA:FALSE", text)                          # what Firefox requires of a server certificate
+        rt = subprocess.run(["openssl", "x509", "-in", root, "-noout", "-text"], capture_output=True, text=True).stdout
+        self.assertIn("CA:TRUE, pathlen:0", rt)
+        self.assertIn("DNS:box.example.org", rt.split("Name Constraints")[1])
+        self.assertEqual(subprocess.run(["openssl", "verify", "-CAfile", root, "-purpose", "sslserver", own],
+                                        capture_output=True).returncode, 0)
+        d = tempfile.mkdtemp(dir=TMP)                            # the server's key can't stand in for the root's
+        with open(os.path.join(d, "x.cnf"), "w") as f:
+            f.write("[e]\nsubjectAltName = DNS:box.example.org\nextendedKeyUsage = serverAuth\n")
+        subprocess.run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=x", "-keyout", "k",
+                        "-out", "r"], cwd=d, capture_output=True, check=True)
+        subprocess.run(["openssl", "x509", "-req", "-in", "r", "-CA", own, "-CAkey", own, "-extfile", "x.cnf",
+                        "-extensions", "e", "-out", "c"], cwd=d, capture_output=True, check=True)
+        with open(os.path.join(d, "chain"), "w") as f, open(own) as o:
+            f.write(o.read())
+        r = subprocess.run(["openssl", "verify", "-CAfile", root, "-untrusted", os.path.join(d, "chain"), "c"],
+                           cwd=d, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+
+    def test_a_killed_run_leaves_no_key_behind(self):
+        """A run killed midway skips Python's cleanup, leaving its temporary folder with the root key in it."""
+        sd = tempfile.mkdtemp(dir=TMP)
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": sd}):
+            os.makedirs(os.path.join(sd, "tls", "tmpdead"))
+            with open(os.path.join(sd, "tls", "tmpdead", "root.key"), "w") as f:
+                f.write("x")
+            tls.init(["box.example.org"])
+            first = tls.cert_der()
+            self.assertEqual(sorted(os.listdir(os.path.join(sd, "tls"))), ["grovy.crt", "server.pem"])
+            tls.init(["box.example.org"])                    # a second run: the first pair is gone
+            self.assertNotEqual(tls.cert_der(), first)
+            with open(os.path.join(sd, "old.crt"), "wb") as f:
+                f.write(ssl.DER_cert_to_PEM_cert(first).encode())
+            self.assertFalse(tls.matches(tls.own_cert(), os.path.join(sd, "old.crt")))   # what doctor reports
+            self.assertTrue(tls.matches(tls.own_cert(), tls.public_cert()))
+
+    def test_url_uses_the_certificate_names(self):
+        """With grovy's own certificate, links by IP address fail (it is only valid for its names)."""
+        self.assertEqual(tls.cert_names(tls.own_cert()), ["127.0.0.1", "localhost"])
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(client, "sock_request", lambda *a, **k: {"url": "https://0.0.0.0:7333/",
+                                                                        "tls": tls.own_cert()}), \
+                mock.patch.object(core, "load_token", lambda: "tok"), redirect_stdout(out), mock.patch("sys.stderr", err):
+            install.cmd_url(None)
+        self.assertEqual(out.getvalue().split(), ["https://127.0.0.1:7333/?token=tok", "https://localhost:7333/?token=tok"])
+        self.assertIn(tls.public_cert(), err.getvalue())   # the file a new device installs
+        self.assertIn(tls.fingerprint(tls.cert_der()), err.getvalue())
+
+    def test_public_certificate_file(self):
+        with open(tls.public_cert()) as f:
+            pem = f.read()
+        self.assertNotIn("PRIVATE", pem)
+        self.assertEqual(ssl.PEM_cert_to_DER_cert(pem), tls.cert_der())
+        self.assertEqual(os.stat(tls.public_cert()).st_mode & 0o777, 0o644)
+
+    def test_install_hint_only_for_grovys_own_certificate(self):
+        base = f"http://127.0.0.1:{self.port}"
+        self.assertIn(b"grovy.crt", self.get(base + "/")[1])
+        with mock.patch.object(self.srv, "tls_paths", ("/elsewhere/fullchain.pem", "/elsewhere/key.pem")):
+            self.assertNotIn(b"grovy.crt", self.get(base + "/")[1])
+
+
 class TestTmuxIntegration(unittest.TestCase):
     """Real tmux, fake claude, private tmux server (-L) so the user's server is untouched."""
 

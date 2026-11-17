@@ -53,8 +53,8 @@ on: the cookie is HttpOnly, so the page asks `POST /api/login-link`, which retur
 same-origin JSON request (a cross-site page can't send one). A script injected into the page could read the token
 that way; the strict script CSP is what prevents that. `GROVY_AUTH=off` temporarily accepts requests without a token while still setting the
 cookie from the link. That's useful for enrolling a phone whose only way to see the link is the grovy page itself.
-Without TLS the token protects against other peers on the network, not an on-path observer; the VPN provides the
-encryption. Cookies aren't isolated by port, so another web service on the same host name/IP that your phone visits
+Without HTTPS (below) the token protects against other peers on the network, not an on-path observer; the VPN
+provides the encryption. Cookies aren't isolated by port, so another web service on the same host name/IP that your phone visits
 would also receive the cookie. Only browse services there that you trust.
 
 **Host check:** requests are accepted only when the `Host` header is an IP address, `localhost`, or this machine's
@@ -63,6 +63,53 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 
 "Add to Home Screen" on the phone gives it an app-like icon.
 
+## HTTPS (optional)
+
+Off by default; plain HTTP is unchanged. The daemon serves HTTPS on the same port when it has a certificate:
+`GROVY_TLS_CERT` + `GROVY_TLS_KEY` (your own, e.g. Let's Encrypt), else `$STATE/tls/server.pem` (certificate and key
+in one file, so replacing it is atomic) if `grovy tls init` made one. `GROVY_TLS=off` ignores both. A certificate
+that is there but doesn't load stops the daemon at start (it never falls back to HTTP silently); a key with a
+passphrase is refused, never prompted for. The reconcile loop (10s) reloads it when its files change
+(`HttpServer.reload_tls`, a new `SSLContext` swapped in whole); a broken new file keeps the previous one. With HTTPS
+the login cookie is `__Secure-grovy_token` (`Secure`), and the plain `grovy_token` is deleted, also when the page
+loads for a phone that logged in over plain HTTP (it would otherwise keep sending it in the clear to the old
+`http://` address). A different name because a browser won't let `http://` overwrite a Secure cookie of the same
+name: turning HTTPS off again would lock phones out until they cleared the site's data. Links (`grovy url`, `status`) say
+`https`, and `status` reports which certificate is served.
+
+`grovy tls init [--name NAME ...]` (`grovylib/tls.py`, using the `openssl` command; default name: this machine's full
+host name) makes, each time, two certificates for exactly those names and IP addresses, valid 800 days (iOS refuses
+more than 825; `grovy doctor` warns 30 days before):
+* `grovy.crt`, what devices install: a CA, because phones only offer to trust a CA (`serverAuth` only). Its key
+  signs the next certificate and is then deleted (it only ever existed in a 0700 temporary folder, which a later run
+  removes if a killed run left it): it can never vouch for anything else. That is the protection. Its **name
+  constraints**, pinned to those names and addresses, are a second guard only where enforced: Android ignores them
+  on an installed certificate (and they aren't marked critical, so a client that doesn't understand them accepts
+  it). `grovy doctor` checks that the served certificate is signed by `grovy.crt` (an interrupted run could leave
+  them mismatched).
+* `server.pem`, what the daemon serves (certificate and key in one file, 0600): an ordinary server certificate
+  (`CA:FALSE`), signed by the above. Firefox refuses a server certificate that is a CA itself, so it can't be one file.
+
+X.509 can't exclude subdomains, so a name also covers its subdomains; a name must therefore have a dot (`dev` would
+be a whole top-level domain), except `localhost`. Every run makes a new pair, which each device installs again (with
+no lasting CA, nothing else could stay the same). A name other than the machine's own also needs `GROVY_HOSTS`;
+`grovy tls init` says so.
+
+**Getting the certificate onto a device.** `grovy tls init` also writes the certificate alone (no key) to
+`$STATE/tls/grovy.crt` and prints how to install it (Firefox, Linux system-wide with `trust anchor`, iPhone,
+Android), with its SHA-256 fingerprint. You copy that file over yourself (cable, AirDrop, USB stick): grovy **never serves it**. Over
+plain HTTP anyone on the path could swap it, and with it any fingerprint shown beside it; over HTTPS it's useless
+(a device that can open the page already trusts it). The fingerprint to check is the one the computer prints, against
+the one the device shows for what it installed.
+
+**Plain HTTP to the HTTPS port.** The daemon looks at the first byte of each connection, in the connection's thread
+(the TLS handshake also runs there, never in the accept loop), under one deadline (`HEADER_DEADLINE`) for handshake
+and headers together, and under idle eviction. A TLS handshake gets TLS; anything else gets `HTTPS_PAGE` for every
+request: it links to `https://<same Host>/` (with `?token=` only if the request carried the right one, so an old login
+link still works in one tap; the Host check requires a numeric port and no IPv6 zone id, since the Host is echoed)
+and, with grovy's own certificate, says to install `grovy.crt` first. It never sets a cookie or shows anything
+private. TLS reads that fail (a preconnect closed unused, a connection the deadline cut) end the connection quietly.
+
 ## Configuration (environment variables)
 
 | var | default | |
@@ -70,6 +117,8 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 | `GROVY_BIND`, `GROVY_PORT` | `127.0.0.1`, `7333` | HTTP listener (`grovy serve --bind/--port` too) |
 | `GROVY_TOKEN` | `$STATE/token` | web UI token (auto-generated) |
 | `GROVY_HOSTS` | unset | extra accepted `Host` names, comma-separated |
+| `GROVY_TLS_CERT`, `GROVY_TLS_KEY` | unset | serve HTTPS with this certificate (else `$STATE/tls/server.pem` if `grovy tls init` made one; see "HTTPS") |
+| `GROVY_TLS` | on | `off` = plain HTTP even if there is a certificate |
 | `GROVY_AUTH` | `on` | `off` = don't require the token (enrollment only) |
 | `GROVY_STATE_DIR` | `$XDG_STATE_HOME/grovy` → `~/.local/state/grovy` | all state, mode 0700 |
 | `GROVY_PERMISSION_TIMEOUT` | `600` | seconds a permission waits for the phone (fixed per session at `grovy new`) |
@@ -874,6 +923,10 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
   (above) gets around them.
 * A shared page's link is its only protection, over plain HTTP: anyone who sees the link, or the traffic on the
   network, can open it until you stop sharing.
+* HTTPS with `grovy tls init`: each device installs `grovy.crt` by hand, again after every run. Firefox on Android
+  ignores installed certificates unless "Use third party CA certificates" is on in its secret settings. Untested on
+  real phones so far, name constraints on iOS in particular. HTTP and HTTPS can't both be served normally: once HTTPS
+  is on, plain HTTP only gets the page pointing to it.
 
 ## Tests
 
