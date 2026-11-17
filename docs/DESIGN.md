@@ -134,7 +134,8 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   plugins (`plugins/*.py` in the grovy folder, such as `git.py`, see "Git") load first, the same way and with the same
   `Api`. A user plugin with the same file name (or the same module name: `a-b.py` for `a_b.py`) replaces the
   built-in one. Until plugins have loaded, `/api/x/...` answers 503 "still loading" (404 only with `GROVY_PLUGINS=0`),
-  so a page asking just after a restart can tell "not yet" from "no such plugin". Each defines `setup(grovy)` and uses the `Api`
+  so a page asking just after a restart can tell "not yet" from "no such plugin". If loading itself fails (not one
+  plugin: the loader), it's logged and the routes answer 404, never "still loading" for good. Each defines `setup(grovy)` and uses the `Api`
   it is given (`grovylib/plugins.py`, example in `examples/plugin.py`):
   * `on("event" | "state" | "notify", fn)`.
   * `route("GET" | "POST", path, fn)` for `/api/x/PLUGIN/PATH`. It sits behind the token. POST is checked like the
@@ -391,10 +392,15 @@ Claude's permission prompts:
 * No pager, fsmonitor, external diff or textconv driver; no signature checks (`log.showSignature=false`, which would
   run `gpg.program`); no lazy fetch in a partial clone (`GIT_NO_LAZY_FETCH`, which would run the remote's
   `uploadpack` or `sshCommand`, and needs the network).
-* `git status` (the changed-file count) runs clean filters. Those the repository's own config defines (local or
-  worktree scope) are switched off for it through `GIT_CONFIG_KEY_n`, which takes a key as it is (`-c key=` would
-  split a filter name containing `=`). The user's global ones, such as git-lfs, stay. Submodules aren't looked into
-  (`--ignore-submodules=all`: their configs would bring their own).
+* `git status` (the changed-file count) runs clean filters. If the repository's own config (local or worktree scope)
+  defines any filter, there is no count: fail closed. Switching such filters off one by one was tried and bypassed
+  (a name with a control character or invalid UTF-8 named a different key). The user's global filters, such as
+  git-lfs, don't count. Status doesn't look into submodules (`--ignore-submodules=all`), and a commit's diff shows a
+  submodule change as a pointer change (`--submodule=short`): with `diff.submodule=diff`, git would diff inside the
+  submodule with that submodule's own config, its `diff.external` included.
+* Log output is UTF-8 whatever `i18n.logOutputEncoding` says (UTF-16 would put NULs inside fields).
+* This needs git 2.44 or newer (`GIT_NO_LAZY_FETCH`). With an older git the plugin still links names and draws the
+  graph, but shows no changed-file count and no commit details (502), and logs why at start.
 * `--no-optional-locks` keeps `git status` from writing the index while Claude may be committing.
 
 Each git command runs in a process group of its own with a 10s deadline that kills the whole group (a child holding

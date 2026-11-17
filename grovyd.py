@@ -717,7 +717,11 @@ def serve(bind, port):
     threading.Thread(target=sock.serve_forever, daemon=True).start()
 
     def load_plugins():   # once the sockets are up (and this is the only daemon): plugins never delay hooks or the page
-        st.plugins = plugins.Plugins(st, builtin=plugins.BUILTIN_DIR).load()
+        try:
+            st.plugins = plugins.Plugins(st, builtin=plugins.BUILTIN_DIR).load()
+        except Exception as e:   # never leave st.plugins None: its routes would answer "still loading" for good
+            print(f"grovyd: plugins failed to load: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            st.plugins = plugins.Plugins(st, folder="/nonexistent")
 
     threading.Thread(target=load_plugins, name="grovy-plugin-load", daemon=True).start()
 

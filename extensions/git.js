@@ -30,8 +30,8 @@ code.gitref svg.gi { width:.95em; height:.95em; vertical-align:-.12em; margin-ri
 .gg-row .more { flex:none; font-size:11px; color:var(--mut); }
 .gg-row .m { font-size:12px; color:var(--mut); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:17px; }
 .gg-row .m code { font-size:11.5px; }
-.gref { flex:none; box-sizing:border-box; height:17px; font-size:11px; line-height:15px; padding:0 6px; border-radius:99px; border:1px solid var(--line);
-  font-family:ui-monospace,monospace; max-width:46%; overflow:hidden; text-overflow:ellipsis; }
+.gref { flex:0 1 auto; min-width:3em; box-sizing:border-box; height:17px; font-size:11px; line-height:15px; padding:0 6px; border-radius:99px; border:1px solid var(--line);
+  font-family:ui-monospace,monospace; max-width:30%; overflow:hidden; text-overflow:ellipsis; }
 .gref.branch { border-color:var(--ok); color:var(--ok); } .gref.head { background:var(--ok); color:var(--card); }
 .gref.tag { border-color:var(--warn); color:var(--warn); }
 button.gref { cursor:pointer; background:none; }
@@ -52,7 +52,7 @@ button.gref { cursor:pointer; background:none; }
   let pluginOff = 0;   // the daemon said the git plugin isn't there: don't ask again before this time (it may be loading)
   const enc = encodeURIComponent;
   async function call(path, body) {
-    try { return await grovy.api("/api/x/git/" + path, body); }
+    try { const r = await grovy.api("/api/x/git/" + path, body); pluginOff = 0; return r; }
     catch (e) { if (/not found/i.test(e.message) && !/no such/i.test(e.message)) pluginOff = Date.now() + 60000; throw e; }
   }
   const short = x => String(x).slice(0, 8);
@@ -102,6 +102,7 @@ button.gref { cursor:pointer; background:none; }
       const k = known.get(s), found = res.found || {};
       for (const n of list) {
         k.set(n, {info: found[n] || null, at: Date.now()});
+        tries.delete(s + "\0" + n);
         if (found[n]) for (const c of names.get(n)) link(c, s, n, found[n]);
       }
     }
@@ -190,7 +191,8 @@ button.gref { cursor:pointer; background:none; }
   }
   const laneColor = i => `var(--c${i % 6 + 1})`;
   function drawGraph({rows, width}) {
-    const lane = width > 1 ? Math.max(4, Math.min(LANE, 160 / (width - 1))) : LANE;   // many lanes: closer together
+    // many lanes: closer together, so the graph never takes more than ~180px from the text (past ~80 lanes they blur)
+    const lane = width > 1 ? Math.min(LANE, 160 / (width - 1)) : LANE;
     const x = i => PAD + i * lane, w = PAD * 2 + (width - 1) * lane;
     const g = svg("svg", {width: w, height: rows.length * ROW, "aria-hidden": "true"});
     const line = (x1, y1, x2, y2, color) => g.append(svg("path", {fill: "none", stroke: color, "stroke-width": 2,
@@ -280,9 +282,17 @@ button.gref { cursor:pointer; background:none; }
     const out = [];
     let fence = null, mode = null;   // mode: what the last line can be continued as ("prose", "item") or null
     // lines of their own: indented (pasted output), heading, quote, table row, rule, trailer ("Signed-off-by: x")
-    const own = l => /^\s|^(#|>|\||---|\*\*\*|___)|\|.*\||^[A-Z][\w-]*: \S/.test(l);
-    const item = l => /^\s*([-*+]|\d+[.)])\s/.test(l);
-    for (const l of text.split("\n")) {
+    const lines = text.split("\n");
+    // trailers ("Signed-off-by: x") are only in the last paragraph, as git has it: elsewhere "Note: ..." is prose
+    let tail = lines.length;
+    while (tail > 0 && !lines[tail - 1].trim()) tail--;
+    while (tail > 0 && lines[tail - 1].trim()) tail--;
+    const rule = l => /^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(l);
+    let i = -1;
+    const own = l => /^\s|^(#{1,6}\s|>|\|)/.test(l) || rule(l) || (i >= tail && /^[A-Z][\w-]*: \S/.test(l));
+    const item = l => !rule(l) && /^\s*([-*+]|\d+[.)])\s/.test(l);
+    for (const l of lines) {
+      i++;
       const f = /^\s*(```|~~~)/.exec(l);
       if (f || fence) {
         if (f && (!fence || f[1] === fence)) fence = fence ? null : f[1];

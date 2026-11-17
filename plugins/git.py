@@ -24,7 +24,10 @@ import time
 # Settings a repository's own .git/config could use to make these read-only commands run a program: off.
 # (Filter drivers, which `git status` runs, are switched off per repository: see changes().)
 GIT = ["git", "--no-pager", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "color.ui=false",
-       "-c", "log.showSignature=false"]
+       "-c", "log.showSignature=false", "-c", "i18n.logOutputEncoding=UTF-8"]
+# git older than 2.44 has no GIT_NO_LAZY_FETCH: a commit's files and diff could fetch (running the remote's uploadpack)
+# in a partial clone, so they are refused there; and `git status` is skipped (its --show-scope needs 2.26).
+MIN_GIT = (2, 44)
 TIMEOUT = 10                  # seconds per git command
 OUT_MAX = 4 * 1024 * 1024     # bytes read from one git command
 DIFF_MAX = 200 * 1024         # characters of diff sent to the page
@@ -36,6 +39,9 @@ HEX_RE = re.compile(r"[0-9a-f]{7,40}")
 NAME_RE = re.compile(r"[A-Za-z0-9][\w./+-]{0,99}")
 REF_KINDS = (("refs/heads/", "branch"), ("refs/remotes/", "remote"), ("refs/tags/", "tag"))
 US = "\x1f"   # between for-each-ref fields (ref names can't contain control characters)
+
+
+OLD_GIT = False   # set by setup(): git older than MIN_GIT
 
 
 class GitError(Exception):
@@ -63,17 +69,12 @@ def _env():
     return env
 
 
-def git(cwd, *args, stdin=None, limit=OUT_MAX, ok=(0,), config=(), raw=False):
+def git(cwd, *args, stdin=None, limit=OUT_MAX, ok=(0,), raw=False):
     """Run git in cwd; its output as text (at most `limit` bytes: the rest is dropped and git stopped).
     git runs in a process group of its own, and the deadline kills the whole group: anything git started (a filter,
     gpg, ssh) would otherwise hold the output pipe open past it. stderr goes to a file, so it can't fill a pipe that
-    nobody reads while stdout is being read. raw=True: (bytes, whether they were cut at `limit`). `config`: settings given to git through GIT_CONFIG_KEY_n, which takes a key
-    exactly as it is (`-c key=value` would split a subsection name that contains "=")."""
+    nobody reads while stdout is being read. raw=True: (bytes, whether they were cut at `limit`)."""
     env = _env()
-    for i, key in enumerate(config):
-        env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, ""
-    if config:
-        env["GIT_CONFIG_COUNT"] = str(len(config))
     with tempfile.TemporaryFile() as err:
         try:
             p = subprocess.Popen(GIT + list(args), cwd=cwd, env=env, start_new_session=True,
@@ -202,16 +203,20 @@ def remote(cwd, branch):
 
 
 def changes(cwd):
-    """Files changed in the working tree (untracked included), or None if git status fails or is too slow.
-    git status runs the clean filter of files whose attributes name one. A filter the repository's own config defines
-    (local or worktree scope: what a cloned or unpacked .git/ can bring) is switched off for it; the user's global
-    ones, such as git-lfs, stay. Submodules are not looked into (their configs would bring theirs)."""
+    """Files changed in the working tree (untracked included), or None: when git status fails or is too slow, or when
+    the repository's own config defines a filter. git status runs the clean filter of files whose attributes name one,
+    and a filter from the repo's own config (local or worktree scope: what a cloned or unpacked .git/ can bring) would
+    be run by the daemon. Switching such filters off one by one proved fragile (names with odd characters slipped
+    through), so any filter there means no count: fail closed. The user's global filters, such as git-lfs, don't
+    count. Submodules are not looked into (their configs would bring theirs)."""
+    if OLD_GIT:
+        return None
     try:
-        scoped = git(cwd, "config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|process|smudge)$", ok=(0, 1))
-        off = [parts[1] for parts in (line.split(None, 2) for line in scoped.splitlines())
-               if len(parts) >= 2 and parts[0] in ("local", "worktree", "command")]
-        out = git(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=all",
-                  config=off)
+        # -z: "scope\0key\nvalue\0" per entry; only the scopes are looked at, so no name can confuse the parsing
+        found = git(cwd, "config", "-z", "--show-scope", "--get-regexp", r"^filter\.", ok=(0, 1)).split("\0")
+        if any(scope not in ("global", "system") for scope in found[0:-1:2]):
+            return None
+        out = git(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=all")
     except GitError:
         return None
     # -z: a rename or copy (R or C) is followed by its old path as an entry of its own
@@ -256,6 +261,15 @@ def numstat(out):
 
 
 def setup(grovy):
+    global OLD_GIT
+    try:
+        v = re.search(r"(\d+)\.(\d+)", git(".", "version"))
+        OLD_GIT = not v or (int(v.group(1)), int(v.group(2))) < MIN_GIT
+    except GitError:
+        OLD_GIT = True
+    if OLD_GIT:
+        grovy.log(f"git older than {'.'.join(map(str, MIN_GIT))}: no changed-file count, no commit details")
+
     def repo(session):
         """The session's folder if it is inside a git repository, else None. Raises for an unknown session."""
         if not isinstance(session, str):
@@ -285,14 +299,15 @@ def setup(grovy):
             if heavy and not busy.acquire(blocking=False):
                 return 503, {"error": f"git: {BUSY_MAX} git views are still being read: try again in a moment"}
             try:
-                cwd = repo(args.get("session"))
+                try:
+                    cwd = repo(args.get("session"))
+                except Unknown:   # no hook has said where it works yet: unknown, not "no repository"
+                    return {"repo": None}
+                except LookupError:
+                    return 404, {"error": "no such session"}
                 if cwd is None:
                     return {"repo": False}
                 return dict(fn(cwd, args), repo=True)
-            except Unknown:   # no hook has said where it works yet: unknown, not "no repository"
-                return {"repo": None}
-            except LookupError:
-                return 404, {"error": "no such session"}
             except GitError as e:
                 return e.status, {"error": f"git: {e}"}
             finally:
@@ -359,6 +374,8 @@ def setup(grovy):
     @grovy.route("GET", "commit")
     @lambda fn: answer(fn, heavy=True)
     def commit(cwd, args):
+        if OLD_GIT:
+            raise GitError(f"showing a commit needs git {'.'.join(map(str, MIN_GIT))} or newer")
         x = args.get("hash") or ""
         full = commits_of(cwd, [x]).get(x) if HEX_RE.fullmatch(x) else None
         if not full:
@@ -367,7 +384,10 @@ def setup(grovy):
                    "--end-of-options", full).rstrip("\n").split("\0", 5)
         if len(meta) != 6:
             raise GitError("unexpected output from git show")
-        diff_opts = ["--no-ext-diff", "--no-textconv", "--diff-merges=first-parent", "-M", "--format="]
+        # --submodule=short: with diff.submodule=diff, git would diff inside the submodule, with that submodule's own
+        # config (its diff.external included) and without these options
+        diff_opts = ["--no-ext-diff", "--no-textconv", "--submodule=short", "--diff-merges=first-parent", "-M",
+                     "--format="]
         files = numstat(git(cwd, "show", "--numstat", "-z", *diff_opts, "--end-of-options", full))
         diff, cut = git(cwd, "show", "--patch", *diff_opts, "--end-of-options", full, limit=DIFF_MAX, raw=True)
         diff = diff.decode("utf-8", "replace")

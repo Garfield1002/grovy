@@ -1406,6 +1406,51 @@ class TestGitPlugin(StoreCase):
         self.call("GET", "commit", {"session": "a", "hash": self.first})
         self.assertFalse(os.path.exists(mark), open(mark).read() if os.path.exists(mark) else "")
 
+    def test_hostile_repo_second_review(self):
+        """Second review: a filter name with a control character or invalid UTF-8 slipped past the per-filter switch-off;
+        diffing a submodule bump with diff.submodule=diff ran the submodule's own diff.external."""
+        mark = os.path.join(TMP, f"pwn2-{id(self)}")
+        for name in (b"a\x1fb", b"c\xffd"):
+            subprocess.run([b"git", b"config", b"filter." + name + b".clean", f"sh -c 'echo f >> {mark}; cat'".encode()],
+                           cwd=self.repo, check=True)
+        with open(os.path.join(self.repo, ".git", "info", "attributes"), "wb") as f:
+            f.write(b"b.txt filter=a\x1fb\nbin.dat filter=c\xffd\n")
+        for name in ("b.txt", "bin.dat"):
+            os.utime(os.path.join(self.repo, name), (1, 1))
+        g = self.call("GET", "graph", {"session": "a"})[1]
+        self.assertIsNone(g["changes"])                       # the repo's own config has filters: no count, nothing run
+        self.assertFalse(os.path.exists(mark))
+        os.unlink(os.path.join(self.repo, ".git", "info", "attributes"))   # or the test's own git add would run them
+        # a submodule bump, diffed with the submodule's config
+        sub = tempfile.mkdtemp(dir=TMP)
+        self.git("init", "-q", "-b", "main", cwd=sub)
+        self.git("commit", "-q", "--allow-empty", "-m", "s1", cwd=sub)
+        self.git("-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
+        self.git("commit", "-q", "-m", "add sub")
+        with open(os.path.join(self.repo, "sub", "s.txt"), "w") as f:   # a real change: an empty one diffs nothing
+            f.write("s2\n")
+        self.git("add", "s.txt", cwd=os.path.join(self.repo, "sub"))
+        self.git("commit", "-q", "-m", "s2", cwd=os.path.join(self.repo, "sub"))
+        self.git("add", "sub")
+        self.git("commit", "-q", "-m", "bump sub")
+        self.git("config", "diff.submodule", "diff")
+        self.git("config", "diff.external", f"sh -c 'echo sub >> {mark}' --", cwd=os.path.join(self.repo, "sub"))
+        code, c = self.call("GET", "commit", {"session": "a", "hash": self.git("rev-parse", "HEAD")})
+        self.assertEqual(code, 200)
+        self.assertEqual(c["files"][0]["path"], "sub")
+        self.assertFalse(os.path.exists(mark), open(mark).read() if os.path.exists(mark) else "")
+
+    def test_old_git_and_route_errors(self):
+        mod = sys.modules["grovy_plugin_git"]
+        with mock.patch.object(mod, "OLD_GIT", True):         # no GIT_NO_LAZY_FETCH: no commit details, no status
+            self.assertEqual(self.call("GET", "commit", {"session": "a", "hash": self.first})[0], 502)
+            g = self.call("GET", "graph", {"session": "a"})
+        self.assertEqual((g[0], g[1]["changes"]), (200, None))
+        # a bug inside a route (a KeyError is a LookupError) isn't "no such session"
+        with mock.patch.object(mod, "parse_log", lambda out: {}["x"]), mock.patch("sys.stderr", io.StringIO()):
+            code, res = self.call("GET", "graph", {"session": "a"})
+        self.assertEqual(code, 500)
+
     def test_stderr_flood_and_stuck_children(self):
         """Reviews: stderr filled its pipe while stdout was read (every call took the full 10s), and the deadline
         killed git but not what git started, which kept the pipe open (a route could hang forever)."""
