@@ -1245,6 +1245,13 @@ class TestBuiltinPlugins(StoreCase):
             self.assertEqual(host.loaded, ["bx", "aa", "by"])         # built-in ones first, then the user's
             self.assertEqual(sys.modules["grovy_plugin_by"].WHO, "mine")
             self.assertEqual(plugins.Plugins(self.store, mine).load().loaded, ["aa", "by"])   # tests: no built-ins
+            # robustness review: a built-in a_b.py skipped the user's a-b.py (same module name); the user's wins
+            write_plugin(builtin, "c_d.py", "WHO = 'builtin'\ndef setup(grovy):\n    pass\n")
+            write_plugin(mine, "c-d.py", "WHO = 'mine'\ndef setup(grovy):\n    pass\n")
+            host = plugins.Plugins(self.store, mine, builtin=builtin).load()
+            self.assertIn("c-d", host.loaded)
+            self.assertNotIn("c_d", host.failed)
+            self.assertEqual(sys.modules["grovy_plugin_c_d"].WHO, "mine")
             # the real built-in folder ships the git plugin, and it loads
             self.assertIn("git", plugins.Plugins(self.store, "/nonexistent", builtin=plugins.BUILTIN_DIR).load().loaded)
 
@@ -1359,6 +1366,135 @@ class TestGitPlugin(StoreCase):
                           ("javascript:alert(1)", None), ("https://h.com/r?x=1", None)]:
             self.assertEqual(web(url), page, url)
 
+    def test_hostile_repo_config_runs_nothing(self):
+        """Security review: a repo's own .git/config made the daemon run commands (a clean filter through git status,
+        gpg.program through log.showSignature, uploadpack through a partial clone's lazy fetch)."""
+        mark = os.path.join(TMP, f"pwn-{id(self)}")
+        cmd = f"sh -c 'echo $0 >> {mark}; cat'"
+        with open(os.path.join(self.repo, ".git", "info", "attributes"), "w") as f:
+            f.write("* filter=evil\n")
+        self.git("config", "filter.evil.clean", cmd.replace("$0", "filter"))
+        self.git("config", "filter.e=vil.clean", cmd.replace("$0", "eqfilter"))   # "=" in the name: -c would miss it
+        with open(os.path.join(self.repo, ".git", "info", "attributes"), "a") as f:
+            f.write("b.txt filter=e=vil\n")
+        # a signed-looking commit: log.showSignature makes git run gpg.program on it
+        tree = self.git("rev-parse", "HEAD^{tree}")
+        body = (f"tree {tree}\nparent {self.merge}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 1 +0000\n"
+                "gpgsig -----BEGIN PGP SIGNATURE-----\n x\n -----END PGP SIGNATURE-----\n\nsigned\n")
+        signed = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=self.repo, input=body,
+                                capture_output=True, text=True, check=True).stdout.strip()
+        self.git("update-ref", "refs/heads/signed", signed)
+        self.git("config", "log.showSignature", "true")
+        gpg = os.path.join(TMP, f"gpg-{id(self)}.sh")
+        with open(gpg, "w") as f:
+            f.write(f"#!/bin/sh\necho gpg >> {mark}\n")
+        os.chmod(gpg, 0o755)
+        self.git("config", "gpg.program", gpg)                                # run as is, not through a shell
+        os.utime(os.path.join(self.repo, "b.txt"), (1, 1))                    # stat-dirty: status would run the filter
+        self.assertEqual(self.call("GET", "graph", {"session": "a"})[0], 200)
+        self.assertEqual(self.call("GET", "commit", {"session": "a", "hash": signed})[0], 200)
+        # a partial clone: showing a missing blob would fetch it, running the remote's uploadpack
+        src = tempfile.mkdtemp(dir=TMP)
+        self.git("clone", "-q", "--bare", self.repo, src + "/r.git")
+        self.git("config", "uploadpack.allowFilter", "true", cwd=src + "/r.git")
+        clone = src + "/c"
+        self.git("clone", "-q", "--no-checkout", "--filter=blob:none", "file://" + src + "/r.git", clone)
+        self.git("config", "remote.origin.uploadpack", f"sh -c 'echo fetch >> {mark}; exec git-upload-pack \"$@\"' x",
+                 cwd=clone)
+        with self.store.lock:
+            self.store.sessions["a"]["cwd"] = clone
+        self.call("GET", "commit", {"session": "a", "hash": self.first})
+        self.assertFalse(os.path.exists(mark), open(mark).read() if os.path.exists(mark) else "")
+
+    def test_stderr_flood_and_stuck_children(self):
+        """Reviews: stderr filled its pipe while stdout was read (every call took the full 10s), and the deadline
+        killed git but not what git started, which kept the pipe open (a route could hang forever)."""
+        for i in range(3000):
+            with open(os.path.join(self.repo, ".git", "refs", "heads", f"broken-{i:04}-with-a-long-name-x"), "w") as f:
+                f.write("garbage\n")
+        t = time.monotonic()
+        code, res = self.call("POST", "resolve", {"session": "a", "names": ["main"]})
+        self.assertEqual((code, sorted(res.get("found", {}))), (200, ["main"]))
+        self.assertLess(time.monotonic() - t, 5)
+        mod = sys.modules["grovy_plugin_git"]
+        fake = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(fake, "git"), "w") as f:
+            f.write("#!/bin/sh\nsleep 30 &\nsleep 30\n")   # a child holding stdout and stderr open
+        os.chmod(os.path.join(fake, "git"), 0o755)
+        t = time.monotonic()
+        with mock.patch.dict(os.environ, {"PATH": fake + os.pathsep + os.environ["PATH"]}), \
+                mock.patch.object(mod, "TIMEOUT", 0.5):
+            with self.assertRaises(mod.GitError):
+                mod.git(self.repo, "status")
+        self.assertLess(time.monotonic() - t, 5)
+
+    def test_review_fixes(self):
+        mod = sys.modules["grovy_plugin_git"]
+        # a non-ASCII diff cut short said truncated: false (bytes counted, then characters compared)
+        with open(os.path.join(self.repo, "cjk.txt"), "w") as f:
+            f.write("漢字かな交じり文\n" * 2000)
+        self.git("add", "cjk.txt")
+        self.git("commit", "-q", "-m", "CJK")
+        with mock.patch.object(mod, "DIFF_MAX", 5000):
+            c = self.call("GET", "commit", {"session": "a", "hash": self.git("rev-parse", "HEAD")})[1]
+        self.assertTrue(c["truncated"])
+        self.assertNotIn("\ufffd", c["diff"])
+        # control characters in a subject split the record (the commit vanished or was cut)
+        self.git("commit", "-q", "--allow-empty", "-m", "odd \x1e and \x1f subject")
+        g = self.call("GET", "graph", {"session": "a"})[1]
+        self.assertEqual(g["commits"][0]["s"], "odd \x1e and \x1f subject")
+        self.assertEqual(self.call("GET", "commit", {"session": "a", "hash": g["commits"][0]["h"]})[0], 200)
+        # a rename counted twice in the changed files
+        self.git("mv", "b.txt", "a b c.txt")
+        self.assertEqual(self.call("GET", "graph", {"session": "a"})[1]["changes"], 1)
+        # no hook yet: where the session works is unknown, which isn't "not a repository"
+        with self.store.lock:
+            self.store.sessions["a"]["cwd"] = None
+        self.assertEqual(self.call("GET", "graph", {"session": "a"}), (200, {"repo": None}))
+        # remotes: insteadOf applies, a web port is kept, the scheme's case doesn't matter
+        with self.store.lock:
+            self.store.sessions["a"]["cwd"] = self.repo
+        self.git("config", "url.https://github.com/.insteadOf", "gh:")
+        self.git("remote", "add", "origin", "gh:me/proj")
+        self.assertEqual(self.call("GET", "graph", {"session": "a"})[1]["remote"]["url"], "https://github.com/me/proj")
+        self.assertEqual(mod.web_url("HTTPS://git.example.com:8443/a/b.git"), "https://git.example.com:8443/a/b")
+        self.assertEqual(mod.web_url("ssh://git@git.example.com:2222/a/b"), "https://git.example.com/a/b")
+
+    def test_git_failing_is_not_no_repo_and_heavy_routes_are_capped(self):
+        """Robustness review: a git that failed or timed out was reported as "not a git repository"; and graph or
+        commit requests could take all 8 plugin route slots."""
+        mod = sys.modules["grovy_plugin_git"]
+        fake = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(fake, "git"), "w") as f:
+            f.write("#!/bin/sh\nsleep 5\n")
+        os.chmod(os.path.join(fake, "git"), 0o755)
+        with mock.patch.dict(os.environ, {"PATH": fake + os.pathsep + os.environ["PATH"]}), \
+                mock.patch.object(mod, "TIMEOUT", 0.3):
+            code, res = self.call("GET", "graph", {"session": "a"})
+        self.assertEqual(code, 502)
+        self.assertIn("longer than", res["error"])
+        gate, started = threading.Event(), threading.Semaphore(0)
+        orig_git = mod.git
+
+        def slow_git(*a, **k):   # every git call of a heavy route waits for the gate
+            started.release()
+            gate.wait(5)
+            return orig_git(*a, **k)
+        with mock.patch.object(mod, "git", slow_git):
+            out = []
+            threads = [threading.Thread(target=lambda: out.append(self.call("GET", "graph", {"session": "a"})[0]))
+                       for _ in range(mod.BUSY_MAX)]
+            for t in threads:
+                t.start()
+            for _ in threads:
+                self.assertTrue(started.acquire(timeout=5))
+            self.assertEqual(self.call("GET", "commit", {"session": "a", "hash": self.first})[0], 503)
+            gate.set()
+            for t in threads:
+                t.join(10)
+        self.assertEqual(out, [200] * mod.BUSY_MAX)
+        self.assertEqual(self.call("GET", "commit", {"session": "a", "hash": self.first})[0], 200)   # slots given back
+
     def test_numstat(self):
         num = sys.modules["grovy_plugin_git"].numstat
         self.assertEqual(num("1\t2\ta b\0-\t-\tbin\0" "0\t0\t\0old\0new\0" "3\t0\tz\0"),
@@ -1401,6 +1537,18 @@ class TestPluginRoutes(unittest.TestCase):
                 return resp.status, json.loads(resp.read())
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read() or b"null")
+
+    def test_plugin_routes_while_loading(self):
+        """Robustness review: before plugins had loaded, their routes answered 404 "not found", which the page took
+        as "no git plugin" (and stopped asking)."""
+        was, self.store.plugins = self.store.plugins, None
+        try:
+            self.assertEqual(self.req("/api/x/good/hello")[0], 503)
+            self.assertEqual(self.req("/api/x/good/echo/body", {"a": 1})[0], 503)
+            with mock.patch.dict(os.environ, {"GROVY_PLUGINS": "0"}):
+                self.assertEqual(self.req("/api/x/good/hello")[0], 404)   # plugins off: there will be none
+        finally:
+            self.store.plugins = was
 
     def test_routes(self):
         self.assertEqual(self.req("/api/x/good/hello?who=me"), (200, {"hi": "me"}))

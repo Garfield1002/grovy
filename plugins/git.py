@@ -6,28 +6,36 @@ Routes (behind grovy's login, called with grovy.api() from the page):
     GET  /api/x/git/graph?session=S[&ref=R][&limit=N] -> recent commits with parents and refs, HEAD, upstream, changes
     GET  /api/x/git/commit?session=S&hash=H          -> one commit: message, author, files changed, its diff (capped)
 
-Safety: git only ever runs in the folder grovy started the session in (never a path from the request), with argument
-arrays. A ref from the request is used only if it is one of the repo's own branch or tag names, and a hash only if it
-is hexadecimal; both come after --end-of-options. --no-optional-locks keeps `git status` from taking the index lock
-while Claude may be committing. External diff and textconv drivers are off, and outputs are capped.
+Safety (docs/DESIGN.md, "Git", has the reasons): git only runs in the folder Claude last reported working in, never a
+path from the request, with argument arrays. A ref from the request is used only if it is one of the repo's own ref
+names, and a hash only if it is hexadecimal; both come after --end-of-options. That folder may hold a hostile repo:
+nothing its config names is run (pager, fsmonitor, diff and textconv drivers, gpg, lazy fetch, its own clean filters).
+Each command has a deadline that kills its whole process group, and its output is capped.
 A plugin of your own named git.py (~/.config/grovy/plugins/) replaces this one.
 """
 import os
 import re
+import signal
 import subprocess
+import tempfile
 import threading
+import time
 
-GIT = ["git", "--no-pager", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "color.ui=false"]
+# Settings a repository's own .git/config could use to make these read-only commands run a program: off.
+# (Filter drivers, which `git status` runs, are switched off per repository: see changes().)
+GIT = ["git", "--no-pager", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "color.ui=false",
+       "-c", "log.showSignature=false"]
 TIMEOUT = 10                  # seconds per git command
 OUT_MAX = 4 * 1024 * 1024     # bytes read from one git command
 DIFF_MAX = 200 * 1024         # characters of diff sent to the page
 FILES_MAX = 300               # files listed for one commit
 NAMES_MAX = 200               # names in one resolve request
 LIMIT_MAX = 400               # commits in one graph
+BUSY_MAX = 3                  # graphs and commits being read at once
 HEX_RE = re.compile(r"[0-9a-f]{7,40}")
 NAME_RE = re.compile(r"[A-Za-z0-9][\w./+-]{0,99}")
 REF_KINDS = (("refs/heads/", "branch"), ("refs/remotes/", "remote"), ("refs/tags/", "tag"))
-US, RS = "\x1f", "\x1e"
+US = "\x1f"   # between for-each-ref fields (ref names can't contain control characters)
 
 
 class GitError(Exception):
@@ -42,55 +50,81 @@ class BadRequest(GitError):
     status = 400
 
 
+class Unknown(LookupError):
+    pass
+
+
 def _env():
-    """The daemon's environment without GIT_* (a stray GIT_DIR would point every command at another repository)."""
+    """The daemon's environment without GIT_* (a stray GIT_DIR would point every command at another repository).
+    GIT_NO_LAZY_FETCH: in a partial clone, a missing object must not start a fetch (network, and the remote's
+    uploadpack / sshCommand settings run)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", LC_ALL="C")
+    env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1", LC_ALL="C")
     return env
 
 
-def git(cwd, *args, stdin=None, limit=OUT_MAX, ok=(0,)):
-    """Run git in cwd; its output as text (at most `limit` bytes: the rest is dropped and git stopped)."""
-    try:
-        p = subprocess.Popen(GIT + list(args), cwd=cwd, env=_env(), stdin=subprocess.PIPE if stdin else
-                             subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except OSError as e:
-        raise GitError(f"can't run git: {e}")
-    timer = threading.Timer(TIMEOUT, p.kill)
-    timer.start()
-    try:
-        if stdin:
-            # small inputs only (a few KB of names): written before reading, which can't deadlock at this size
-            p.stdin.write(stdin.encode())
-            p.stdin.close()
-        out = p.stdout.read(limit + 1)
-        if len(out) > limit:
-            p.kill()
-            out = out[:limit]
-        err = p.stderr.read(4096)
-        code = p.wait()
-    finally:
-        timer.cancel()
-        for f in (p.stdout, p.stderr):
-            f.close()
-    if code == -9 and len(out) < limit:
-        raise GitError(f"git {args[0]} took longer than {TIMEOUT}s")
-    if code not in ok and code != -9:
-        raise GitError(err.decode("utf-8", "replace").strip()[:300] or f"git {args[0]} failed")
-    return out.decode("utf-8", "replace")
+def git(cwd, *args, stdin=None, limit=OUT_MAX, ok=(0,), config=(), raw=False):
+    """Run git in cwd; its output as text (at most `limit` bytes: the rest is dropped and git stopped).
+    git runs in a process group of its own, and the deadline kills the whole group: anything git started (a filter,
+    gpg, ssh) would otherwise hold the output pipe open past it. stderr goes to a file, so it can't fill a pipe that
+    nobody reads while stdout is being read. raw=True: (bytes, whether they were cut at `limit`). `config`: settings given to git through GIT_CONFIG_KEY_n, which takes a key
+    exactly as it is (`-c key=value` would split a subsection name that contains "=")."""
+    env = _env()
+    for i, key in enumerate(config):
+        env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, ""
+    if config:
+        env["GIT_CONFIG_COUNT"] = str(len(config))
+    with tempfile.TemporaryFile() as err:
+        try:
+            p = subprocess.Popen(GIT + list(args), cwd=cwd, env=env, start_new_session=True,
+                                 stdin=subprocess.PIPE if stdin else subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=err)
+        except OSError as e:
+            raise GitError(f"can't run git: {e}")
+
+        def kill():
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        timer = threading.Timer(TIMEOUT, kill)
+        timer.start()
+        try:
+            if stdin:
+                try:   # small inputs only (a few KB of names): written before reading, which can't deadlock
+                    p.stdin.write(stdin.encode())
+                    p.stdin.close()
+                except OSError:   # git exited early: its exit status says why
+                    pass
+            out = p.stdout.read(limit + 1)
+            cut = len(out) > limit
+            if cut:
+                kill()
+                out = out[:limit]
+            code = p.wait()
+            timed_out = not timer.is_alive() and not cut
+        finally:
+            timer.cancel()
+            p.stdout.close()
+        if timed_out:
+            raise GitError(f"git {args[0]} took longer than {TIMEOUT}s")
+        if code not in ok and not cut:
+            err.seek(0)
+            raise GitError(err.read(4096).decode("utf-8", "replace").strip()[:300] or f"git {args[0]} failed")
+    return (out, cut) if raw else out.decode("utf-8", "replace")
 
 
 def refs(cwd):
-    """{full ref name: {name, kind, hash, upstream?, track?}} for branches, remote branches and tags (peeled)."""
-    out = git(cwd, "for-each-ref", "--format=" + US.join(
-        ["%(refname)", "%(objectname)", "%(*objectname)", "%(upstream:short)", "%(upstream:track,nobracket)"]),
-        "refs/heads", "refs/remotes", "refs/tags")
+    """{full ref name: {name, kind, hash, upstream?}} for branches, remote branches and tags (peeled).
+    No ahead/behind here: that walks history for every branch with an upstream (see track())."""
+    out = git(cwd, "for-each-ref", "--format=" + US.join(["%(refname)", "%(objectname)", "%(*objectname)",
+                                                          "%(upstream:short)"]), "refs/heads", "refs/remotes", "refs/tags")
     found = {}
-    for line in out.splitlines():
+    for line in out.split("\n"):   # not splitlines(): it also splits on \x1c-\x1e and \x85
         parts = line.split(US)
-        if len(parts) != 5:
+        if len(parts) != 4:
             continue
-        full, obj, peeled, up, track = parts
+        full, obj, peeled, up = parts
         for prefix, kind in REF_KINDS:
             if full.startswith(prefix):
                 name = full[len(prefix):]
@@ -98,10 +132,15 @@ def refs(cwd):
                     break
                 r = {"name": name, "kind": kind, "hash": peeled or obj}
                 if up:
-                    r["upstream"], r["track"] = up, track
+                    r["upstream"] = up
                 found[full] = r
                 break
     return found
+
+
+def track(cwd, full):
+    """"ahead 1, behind 2" (or "") for one local branch against its upstream."""
+    return git(cwd, "for-each-ref", "--format=%(upstream:track,nobracket)", "--end-of-options", full).strip()
 
 
 def head(cwd):
@@ -126,16 +165,17 @@ def commits_of(cwd, hexes):
 
 
 SCP_RE = re.compile(r"(?:[\w.-]+@)?([A-Za-z0-9][\w.-]*):(?!//)([^\s?#]+)")       # user@host:path (scp style)
-URL_RE = re.compile(r"(https?|ssh|git)://(?:[^@/\s]*@)?([A-Za-z0-9][\w.-]*)(?::\d+)?/([^\s?#]+)")
+URL_RE = re.compile(r"(https?|ssh|git)://(?:[^@/\s]*@)?([A-Za-z0-9][\w.-]*)(:\d{1,5})?/([^\s?#]+)", re.I)
 HOST_RE = re.compile(r"[A-Za-z0-9][\w.-]*\.[A-Za-z]{2,}")   # a dotted name: "localhost" or a bare alias has no web page
 
 
 def web_url(url):
     """The web page of a remote, or None: https://HOST/PATH for ssh, scp-style and git:// remotes, the same scheme for
     http(s) ones, without the user name or password and without ".git". Local paths and file:// give None."""
-    m = URL_RE.fullmatch(url.strip())
+    m, port = URL_RE.fullmatch(url.strip()), ""
     if m:
-        scheme, host, path = m.group(1), m.group(2), m.group(3)
+        scheme, host, path = m.group(1).lower(), m.group(2), m.group(4)
+        port = m.group(3) or "" if scheme.startswith("http") else ""   # an ssh port says nothing about the web one
     else:
         m = SCP_RE.fullmatch(url.strip())
         if not m or "/" in m.group(1):
@@ -145,44 +185,56 @@ def web_url(url):
     path = path[:-4] if path.endswith(".git") else path
     if not HOST_RE.fullmatch(host) or not path or ".." in path.split("/"):
         return None
-    return f"{'http' if scheme == 'http' else 'https'}://{host}/{path}"
+    return f"{'http' if scheme == 'http' else 'https'}://{host}{port}/{path}"
 
 
 def remote(cwd, branch):
     """(name, web page) of the remote the current branch tracks, else of origin, else of the only remote; or None."""
     try:
-        urls = dict(line.split(" ", 1) for line in git(cwd, "config", "--get-regexp", r"^remote\..*\.url$",
-                                                      ok=(0, 1)).splitlines() if " " in line)
+        names = [n for n in git(cwd, "remote").split("\n") if n]
         tracked = git(cwd, "config", "--get", f"branch.{branch}.remote", ok=(0, 1)).strip() if branch else ""
+        name = next((n for n in (tracked, "origin") if n in names), None) or (names[0] if len(names) == 1 else None)
+        # get-url applies url.<base>.insteadOf
+        page = web_url(git(cwd, "remote", "get-url", "--", name).strip()) if name else None
     except GitError:
         return None
-    urls = {k[len("remote."):-len(".url")]: v for k, v in urls.items()}
-    name = next((n for n in (tracked, "origin") if n in urls), None) or (next(iter(urls)) if len(urls) == 1 else None)
-    page = web_url(urls[name]) if name else None
     return {"name": name, "url": page} if page else None
 
 
 def changes(cwd):
-    """Files changed in the working tree (untracked included), or None if git status fails or is too slow."""
+    """Files changed in the working tree (untracked included), or None if git status fails or is too slow.
+    git status runs the clean filter of files whose attributes name one. A filter the repository's own config defines
+    (local or worktree scope: what a cloned or unpacked .git/ can bring) is switched off for it; the user's global
+    ones, such as git-lfs, stay. Submodules are not looked into (their configs would bring theirs)."""
     try:
-        out = git(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=normal")
+        scoped = git(cwd, "config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|process|smudge)$", ok=(0, 1))
+        off = [parts[1] for parts in (line.split(None, 2) for line in scoped.splitlines())
+               if len(parts) >= 2 and parts[0] in ("local", "worktree", "command")]
+        out = git(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=all",
+                  config=off)
     except GitError:
         return None
-    return sum(1 for e in out.split("\0") if len(e) > 3 and e[2] == " ")
+    # -z: a rename or copy (R or C) is followed by its old path as an entry of its own
+    entries, n, i = out.split("\0"), 0, 0
+    while i < len(entries):
+        e = entries[i]
+        i += 1
+        if len(e) > 3 and e[2] == " ":
+            n += 1
+            if e[0] in "RC" or e[1] in "RC":
+                i += 1
+    return n
 
 
-LOG_FORMAT = "--format=" + US.join(["%H", "%P", "%an", "%at", "%s"]) + RS
+# With -z, commits are separated by NUL too: the output is 5 NUL-separated fields per commit, and NUL is the one byte
+# no commit message, name or ref can contain.
+LOG_FORMAT = "--format=%H%x00%P%x00%an%x00%at%x00%s"
 
 
 def parse_log(out):
-    rows = []
-    for rec in out.split(RS):
-        parts = rec.strip("\n").split(US)
-        if len(parts) != 5:
-            continue
-        h, p, a, t, s = parts
-        rows.append({"h": h, "p": p.split(), "a": a, "t": int(t) if t.isdigit() else 0, "s": s})
-    return rows
+    f = out.split("\0")
+    return [{"h": h, "p": p.split(), "a": a, "t": int(t) if t.isdigit() else 0, "s": s}
+            for h, p, a, t, s in (f[i:i + 5] for i in range(0, len(f) - 4, 5)) if HEX_RE.fullmatch(h)]
 
 
 def numstat(out):
@@ -212,29 +264,40 @@ def setup(grovy):
         if not d:
             raise LookupError
         cwd = (d.get("session") or {}).get("cwd")
-        if not cwd or not os.path.isdir(cwd):
+        if not cwd:
+            raise Unknown
+        if not os.path.isabs(cwd) or not os.path.isdir(cwd):
             return None
-        try:
-            inside = git(cwd, "rev-parse", "--is-inside-work-tree", ok=(0, 128)).strip()
-        except GitError:
-            return None
-        return cwd if inside == "true" else None
+        # exit 128 (or "false", inside .git): not a work tree. Any other failure (a timeout, no git) is an error for
+        # the page to show, not "no repository".
+        return cwd if git(cwd, "rev-parse", "--is-inside-work-tree", ok=(0, 128)).strip() == "true" else None
 
-    def answer(fn):
+    # The graph and a commit can take seconds each on a big repo, and every route holds one of the daemon's 8 plugin
+    # route slots (shared by all plugins) until it ends, even after the page has given up on it. At most BUSY_MAX of
+    # them run at once, so repeated taps can't take every slot from resolve and the user's own plugins.
+    busy = threading.BoundedSemaphore(BUSY_MAX)
+
+    def answer(fn, heavy=False):
         def run(request):
             args = request.body if request.method == "POST" else request.query
             if not isinstance(args, dict):
                 return 400, {"error": "expected a JSON object"}
+            if heavy and not busy.acquire(blocking=False):
+                return 503, {"error": f"git: {BUSY_MAX} git views are still being read: try again in a moment"}
             try:
                 cwd = repo(args.get("session"))
+                if cwd is None:
+                    return {"repo": False}
+                return dict(fn(cwd, args), repo=True)
+            except Unknown:   # no hook has said where it works yet: unknown, not "no repository"
+                return {"repo": None}
             except LookupError:
                 return 404, {"error": "no such session"}
-            if cwd is None:
-                return {"repo": False}
-            try:
-                return dict(fn(cwd, args), repo=True)
             except GitError as e:
                 return e.status, {"error": f"git: {e}"}
+            finally:
+                if heavy:
+                    busy.release()
         return run
 
     @grovy.route("POST", "resolve")
@@ -256,8 +319,9 @@ def setup(grovy):
         return {"found": found}
 
     @grovy.route("GET", "graph")
-    @answer
+    @lambda fn: answer(fn, heavy=True)
     def graph(cwd, args):
+        started = time.monotonic()
         try:
             limit = max(1, min(LIMIT_MAX, int(args.get("limit") or 80)))
         except ValueError:
@@ -274,7 +338,8 @@ def setup(grovy):
             # --end-of-options can't come before --branches & co, so they come first and only `ref` after it
             pre = what if not ref else []
             post = ["--end-of-options", ref] if ref else []
-            commits = parse_log(git(cwd, "log", "--topo-order", f"--max-count={limit}", LOG_FORMAT, *pre, *post, "--"))
+            commits = parse_log(git(cwd, "log", "-z", "--topo-order", f"--max-count={limit}", LOG_FORMAT, *pre, *post,
+                                    "--"))
         labels = {}
         for full, r in all_refs.items():
             labels.setdefault(r["hash"], []).append({"name": r["name"], "kind": r["kind"], "ref": full})
@@ -285,25 +350,31 @@ def setup(grovy):
                 "branches": sorted({r["name"]: {"name": r["name"], "kind": r["kind"], "ref": f}
                                     for f, r in all_refs.items() if r["kind"] != "tag"}.values(),
                                    key=lambda r: (r["kind"] != "branch", r["name"])),
-                "upstream": local.get("upstream") if local else None, "track": local.get("track") if local else None,
-                "changes": changes(cwd), "remote": remote(cwd, branch)}
+                "upstream": local.get("upstream") if local else None,
+                "track": track(cwd, f"refs/heads/{branch}") if local and local.get("upstream") else None,
+                # status is the slowest part on a big tree: skipped when the rest took long (the route has 30s)
+                "changes": changes(cwd) if time.monotonic() - started < TIMEOUT else None,
+                "remote": remote(cwd, branch)}
 
     @grovy.route("GET", "commit")
-    @answer
+    @lambda fn: answer(fn, heavy=True)
     def commit(cwd, args):
         x = args.get("hash") or ""
         full = commits_of(cwd, [x]).get(x) if HEX_RE.fullmatch(x) else None
         if not full:
             raise NotFound(f"no such commit: {x[:40]}")
-        meta = git(cwd, "show", "--no-patch", "--format=" + US.join(["%H", "%P", "%an", "%at", "%s", "%b"]),
-                   "--end-of-options", full).rstrip("\n").split(US)
+        meta = git(cwd, "show", "--no-patch", "--format=%H%x00%P%x00%an%x00%at%x00%s%x00%b",
+                   "--end-of-options", full).rstrip("\n").split("\0", 5)
         if len(meta) != 6:
             raise GitError("unexpected output from git show")
         diff_opts = ["--no-ext-diff", "--no-textconv", "--diff-merges=first-parent", "-M", "--format="]
         files = numstat(git(cwd, "show", "--numstat", "-z", *diff_opts, "--end-of-options", full))
-        diff = git(cwd, "show", "--patch", *diff_opts, "--end-of-options", full, limit=DIFF_MAX + 1)
+        diff, cut = git(cwd, "show", "--patch", *diff_opts, "--end-of-options", full, limit=DIFF_MAX, raw=True)
+        diff = diff.decode("utf-8", "replace")
+        if cut:   # don't end on half a character
+            diff = diff.rstrip("\ufffd")
         labels = [{"name": r["name"], "kind": r["kind"], "ref": f} for f, r in refs(cwd).items() if r["hash"] == full]
         return {"h": meta[0], "p": meta[1].split(), "a": meta[2], "t": int(meta[3]) if meta[3].isdigit() else 0,
                 "s": meta[4], "body": meta[5].strip(),
                 "refs": labels, "files": files[:FILES_MAX], "more_files": max(0, len(files) - FILES_MAX),
-                "diff": diff[:DIFF_MAX], "truncated": len(diff) > DIFF_MAX}
+                "diff": diff, "truncated": cut}

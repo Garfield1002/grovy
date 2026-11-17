@@ -76,7 +76,7 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 | `GROVY_DEBUG` | unset | log HTTP requests |
 | `GROVY_WIDGETS` | `1` | `0` = don't tell Claude sessions about widgets and pages (applies to sessions started afterwards) |
 | `GROVY_OOM_AVOID` | `1` | `0` = don't move sessions out of systemd-oomd's way (see "Out of memory") |
-| `GROVY_PLUGINS` | `1` | `0` = don't load `~/.config/grovy/plugins/` (see "Making it yours") |
+| `GROVY_PLUGINS` | `1` | `0` = load no plugins: neither `~/.config/grovy/plugins/` nor the built-in ones (see "Making it yours") |
 | `GROVY_SUBAGENT_HOOKS` | `0` | `1` = forward every hook of subagents (normally only permission requests, notifications, start/stop and tool calls, which feed the background list) |
 
 ## Notifications (Telegram or anything else)
@@ -132,7 +132,9 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
 * **`plugins/*.py`** run inside the daemon, loaded once it is serving (restart it to reload; `GROVY_PLUGINS=0` loads
   none, built-in ones included; events in the first moments after a start may not reach them). grovy's own built-in
   plugins (`plugins/*.py` in the grovy folder, such as `git.py`, see "Git") load first, the same way and with the same
-  `Api`. A user plugin with the same file name replaces the built-in one. Each defines `setup(grovy)` and uses the `Api`
+  `Api`. A user plugin with the same file name (or the same module name: `a-b.py` for `a_b.py`) replaces the
+  built-in one. Until plugins have loaded, `/api/x/...` answers 503 "still loading" (404 only with `GROVY_PLUGINS=0`),
+  so a page asking just after a restart can tell "not yet" from "no such plugin". Each defines `setup(grovy)` and uses the `Api`
   it is given (`grovylib/plugins.py`, example in `examples/plugin.py`):
   * `on("event" | "state" | "notify", fn)`.
   * `route("GET" | "POST", path, fn)` for `/api/x/PLUGIN/PATH`. It sits behind the token. POST is checked like the
@@ -372,21 +374,46 @@ The built-in extension `extensions/git.js` uses it:
 * Inline `code` in a message whose text is a branch, remote branch, tag or commit hash (7–40 hex digits, not all
   digits) of that repository becomes a link, with a small icon for its type (commit, branch, tag): a commit opens it, a ref opens the graph on it. Names are looked up in
   batches (`POST /api/x/git/resolve`) after a message is drawn, and remembered per session; a miss is retried after a
-  minute, and a session's answers are forgotten when its turn ends, since Claude may have made or moved a branch.
-  Code blocks are left alone.
+  minute, and a session's answers are forgotten when its turn ends, since Claude may have made or moved a branch. A
+  reply that ends a turn (Stop) is always looked up afresh: it is drawn before the update that ends the turn, and it
+  is the message most likely to name what Claude just made. Code blocks are left alone.
 
-Safety: git runs only in the session's own folder (`cwd` from the registry; never a path from the request), as an
-argument array with `GIT_*` variables removed from its environment. A ref from the request is used only if it is
-exactly one of the repo's own full ref names, a hash only if it is hexadecimal and names a commit
-(`cat-file --batch-check`), both after `--end-of-options`; so no revision expression or option can be passed in.
-`--no-optional-locks` keeps `git status` from writing the index while Claude may be committing. External diff and
-textconv drivers are off. Each git command has a 10s deadline and its output is capped.
+Which folder: the one Claude last reported working in (the `cwd` of its latest hook event, as the session list
+shows), so it follows Claude into a subfolder or another repo it `cd`s into. Before the first hook event it is unknown,
+and the plugin answers `{"repo": null}` (the page says so), never "not a repository".
 
-Limitations: the graph keeps a lane's column for its whole length (no compaction), so a repo with many long-lived
-branches draws a wide graph. The session's folder is where it started: if Claude works in another repo (`cd`, a
-worktree elsewhere), the links and graph are still about the first one. Hashes in other forms (`abc1234^`, a URL) are
-not linked. Without the plugin (`GROVY_PLUGINS=0`, or a daemon started before it existed) there are no links, and
-⋯ → Git says so.
+Safety: git runs only in that folder (never a path from the request), as an argument array, with `GIT_*` variables
+removed from its environment. A ref from the request is used only if it is exactly one of the repo's own full ref
+names, a hash only if it is hexadecimal and names a commit (`cat-file --batch-check`), both after `--end-of-options`;
+so no revision expression or option can be passed in. That folder may hold a hostile repository (unpacked from an
+archive, or with a `.git/config` a prompt-injected Claude edited), and the daemon must not run what it says, outside
+Claude's permission prompts:
+* No pager, fsmonitor, external diff or textconv driver; no signature checks (`log.showSignature=false`, which would
+  run `gpg.program`); no lazy fetch in a partial clone (`GIT_NO_LAZY_FETCH`, which would run the remote's
+  `uploadpack` or `sshCommand`, and needs the network).
+* `git status` (the changed-file count) runs clean filters. Those the repository's own config defines (local or
+  worktree scope) are switched off for it through `GIT_CONFIG_KEY_n`, which takes a key as it is (`-c key=` would
+  split a filter name containing `=`). The user's global ones, such as git-lfs, stay. Submodules aren't looked into
+  (`--ignore-submodules=all`: their configs would bring their own).
+* `--no-optional-locks` keeps `git status` from writing the index while Claude may be committing.
+
+Each git command runs in a process group of its own with a 10s deadline that kills the whole group (a child holding
+the output pipe would otherwise outlive it, and a route could hang for good, holding one of the 8 plugin route
+slots). stderr goes to a file, so a flood of warnings (thousands of broken refs) can't fill a pipe nobody reads.
+Output is capped (4 MB per command, 200 KB of diff, cut on bytes, never inside a character). Records are separated by
+NUL, the one byte no commit message or name can contain. Ahead/behind is computed for the current branch only: for
+every branch it would walk the history once per branch with an upstream, on every lookup. At most 3 graphs and
+commits are read at once (503 past that): every route holds one of the daemon's 8 plugin route slots, shared by all
+plugins, until it ends, even once the page has given up on it. The changed-file count is skipped when the rest of the
+graph already took 10s. A git that fails or times out is an error (502), never "not a repository". On the page, a
+lookup that failed is tried again twice, 5s apart, since a message is drawn only once.
+
+Limitations: the graph keeps a lane's column for its whole length (no compaction); with many lanes they are drawn
+closer together, so the graph stays under about 180px. `--topo-order` walks the whole history unless the repo has a
+commit-graph file (`git maintenance` and `gc` write one): on a very large repo without one, the graph can hit the 10s
+deadline. Hashes in other forms (`abc1234^`, a URL) are not linked. A short hash that is also a branch or tag name
+is taken as that ref. Without the plugin (`GROVY_PLUGINS=0`, or a daemon started before it existed) there are no
+links, and ⋯ → Git says so (asked again after a minute: plugins load just after the server starts).
 
 **Desktop.** At 1000px wide or more, a conversation gets a sidebar with all sessions (state dot, pending-request
 badge, last activity) and all pages, refreshed on any session's event at most every 400ms and only fetched while it's

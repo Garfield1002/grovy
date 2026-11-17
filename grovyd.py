@@ -210,6 +210,10 @@ def load_index():
 
 
 REQ_ID_RE = re.compile(r"[A-Za-z0-9-]{16,64}")
+def plugins_on():
+    return core.env("PLUGINS", "1") != "0"
+
+
 PLUGIN_PATH = re.compile(r"/api/x/([a-z0-9][a-z0-9_-]{0,31})/(.+)")   # a plugin's own routes (grovylib/plugins.py)
 
 
@@ -394,6 +398,8 @@ class Http(http.server.BaseHTTPRequestHandler):
         if path == "/api/pages":
             return self._send(200, {"pages": store.list_pages()})
         m = PLUGIN_PATH.fullmatch(path)
+        if m and store.plugins is None and plugins_on():
+            return self._err(503, "plugins are still loading: try again in a moment")
         if m and store.plugins:
             if self.headers.get("X-Grovy") != "1":   # only fetch() can add it: a tapped link or a navigation can't
                 return self._err(403, "plugin routes are for grovy.api() (X-Grovy header missing)")
@@ -520,6 +526,8 @@ class Http(http.server.BaseHTTPRequestHandler):
         if m and core.ID_RE.match(m.group(1)):
             return wrap(*store.delete_page(m.group(1)))
         m = PLUGIN_PATH.fullmatch(path)
+        if m and store.plugins is None and plugins_on():
+            return 503, {"error": "plugins are still loading: try again in a moment"}
         if m and store.plugins:
             return store.plugins.handle("POST", m.group(1), m.group(2), {}, body)
         m = re.fullmatch(r"/api/prompts/([^/]+)/cancel", path)

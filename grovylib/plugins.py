@@ -112,6 +112,10 @@ class Api:
         log(f"plugin {self.name}: {msg}")
 
 
+def _modname(f):
+    return f"grovy_plugin_{f[:-3].replace('-', '_')}"
+
+
 def _scripts(folder):
     """{file name: path} of the plugins in a folder (files starting with _ are left out)."""
     try:
@@ -145,11 +149,12 @@ class Plugins:
         mine = _scripts(self.folder)
         # built-in ones first (unless replaced by one of the user's), then the user's, each in file-name order
         builtin = _scripts(self.builtin) if self.builtin else {}
-        files = sorted((f, p) for f, p in builtin.items() if f not in mine) + sorted(mine.items())
+        taken = {_modname(f) for f in mine}   # a user's a-b.py also replaces a built-in a_b.py (same module name)
+        files = sorted((f, p) for f, p in builtin.items() if _modname(f) not in taken) + sorted(mine.items())
         modules = {}
         for f, path in files:
             name = f[:-3]
-            modname = f"grovy_plugin_{name.replace('-', '_')}"
+            modname = _modname(f)
             why = ("file name must be lowercase letters, digits, _ or - (max 32)" if not NAME_RE.fullmatch(name)
                    else f"same module name as {modules[modname]}.py" if modname in modules else None)
             if why:

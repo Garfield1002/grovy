@@ -10,7 +10,8 @@ grovy.extension("git", grovy => {
   const ROW = 46, LANE = 14, PAD = 9;   // graph geometry, px
   grovy.css(`
 code.gitref { cursor:pointer; text-decoration:underline dotted; text-underline-offset:3px; color:var(--acc);
-  white-space:nowrap; }
+  overflow-wrap:anywhere; }
+code.gitref .gstart { white-space:nowrap; }
 code.gitref svg.gi { width:.95em; height:.95em; vertical-align:-.12em; margin-right:.25em; fill:none; stroke:currentColor;
   stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 .gg-head { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; margin:2px 0 10px; font-size:13px; color:var(--mut); }
@@ -19,21 +20,23 @@ code.gitref svg.gi { width:.95em; height:.95em; vertical-align:-.12em; margin-ri
   padding:4px 6px; max-width:100%; }
 .gg-head a.gg-remote { color:var(--acc); text-decoration:none; overflow-wrap:anywhere; }
 .gg { position:relative; }
-.gg svg { position:absolute; left:0; top:0; overflow:visible; }
+.gg svg { position:absolute; left:0; top:0; overflow:visible; pointer-events:none; }
 .gg-row { display:block; width:100%; height:${ROW}px; padding:5px 4px 5px 0; border:0; background:none; text-align:left;
   color:inherit; font:inherit; cursor:pointer; border-radius:8px; overflow:hidden; }
 .gg-row:hover, .gg-row:focus-visible { background:var(--code); }
-.gg-row .s { display:flex; gap:5px; align-items:center; white-space:nowrap; overflow:hidden; font-size:14px; line-height:19px; }
-.gg-row .s > span:last-child { overflow:hidden; text-overflow:ellipsis; }
+.gg-row .s { display:flex; gap:5px; align-items:center; white-space:nowrap; overflow:hidden; font-size:14px; line-height:19px;
+  height:19px; }
+.gg-row .s > span:last-child { overflow:hidden; text-overflow:ellipsis; min-width:30%; }
+.gg-row .more { flex:none; font-size:11px; color:var(--mut); }
 .gg-row .m { font-size:12px; color:var(--mut); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:17px; }
 .gg-row .m code { font-size:11.5px; }
-.gref { flex:none; font-size:11px; line-height:16px; padding:0 6px; border-radius:99px; border:1px solid var(--line);
+.gref { flex:none; box-sizing:border-box; height:17px; font-size:11px; line-height:15px; padding:0 6px; border-radius:99px; border:1px solid var(--line);
   font-family:ui-monospace,monospace; max-width:46%; overflow:hidden; text-overflow:ellipsis; }
 .gref.branch { border-color:var(--ok); color:var(--ok); } .gref.head { background:var(--ok); color:var(--card); }
 .gref.tag { border-color:var(--warn); color:var(--warn); }
 button.gref { cursor:pointer; background:none; }
 .gc-meta { font-size:13px; color:var(--mut); margin:4px 0 10px; display:flex; flex-wrap:wrap; gap:4px 8px; align-items:center; }
-.gc-meta code { cursor:pointer; }
+.gc-meta code.gitref { cursor:pointer; }
 .gc-body { font-size:14px; margin:0 0 12px; overflow-wrap:anywhere; }
 .gc-files { font-size:13px; margin:0 0 12px; }
 .gc-files div { display:flex; gap:8px; padding:3px 0; border-top:1px solid var(--line); }
@@ -46,11 +49,11 @@ button.gref { cursor:pointer; background:none; }
 .gg-note { color:var(--mut); font-size:13px; margin:10px 0; }`);
 
   // ---- data
-  let plugin = true;   // false once the daemon says the git plugin isn't there: stop asking
+  let pluginOff = 0;   // the daemon said the git plugin isn't there: don't ask again before this time (it may be loading)
   const enc = encodeURIComponent;
   async function call(path, body) {
     try { return await grovy.api("/api/x/git/" + path, body); }
-    catch (e) { if (/not found/i.test(e.message) && !/no such/i.test(e.message)) plugin = false; throw e; }
+    catch (e) { if (/not found/i.test(e.message) && !/no such/i.test(e.message)) pluginOff = Date.now() + 60000; throw e; }
   }
   const short = x => String(x).slice(0, 8);
   function age(t) {
@@ -67,15 +70,18 @@ button.gref { cursor:pointer; background:none; }
   let waiting = new Map(), timer = 0;   // session -> Map(name -> [code elements])
   const NAME = /^[A-Za-z0-9][\w./+-]{0,99}$/;
   const MISS_TTL = 60000;
-  grovy.on("render", node => {
+  // A reply that ends a turn (Stop) is drawn before the update that ends it, and is about what Claude just did
+  // (made, moved or deleted a branch): it is always looked up afresh.
+  grovy.on("render", (node, e) => {
     const s = grovy.session;
-    if (!plugin || !s) return;
+    if (!s || Date.now() < pluginOff) return;
+    const fresh = e && e.type === "Stop";
     for (const c of node.querySelectorAll("code")) {
       if (c.closest("pre, a, button, .gitref") || c.children.length) continue;
       const name = c.textContent.trim();
       if (!NAME.test(name) || /^\d+$/.test(name) || name.includes("..")) continue;
       const hit = known.get(s) && known.get(s).get(name);
-      if (hit && (hit.info || Date.now() - hit.at < MISS_TTL)) { if (hit.info) link(c, s, name, hit.info); continue; }
+      if (hit && !fresh && (hit.info || Date.now() - hit.at < MISS_TTL)) { if (hit.info) link(c, s, name, hit.info); continue; }
       if (!waiting.has(s)) waiting.set(s, new Map());
       const w = waiting.get(s);
       if (!w.has(name)) w.set(name, []);
@@ -87,10 +93,11 @@ button.gref { cursor:pointer; background:none; }
     timer = 0;
     const batch = waiting;
     waiting = new Map();
-    for (const [s, names] of batch) {
-      const list = [...names.keys()].slice(0, 200);
+    for (const [s, names] of batch) for (let i = 0; i < names.size; i += 200) {
+      const list = [...names.keys()].slice(i, i + 200);
       let res;
-      try { res = await call("resolve", {session: s, names: list}); } catch (e) { continue; }
+      try { res = await call("resolve", {session: s, names: list}); }
+      catch (e) { retry(s, list, names); continue; }
       if (!known.has(s)) known.set(s, new Map());
       const k = known.get(s), found = res.found || {};
       for (const n of list) {
@@ -112,9 +119,23 @@ button.gref { cursor:pointer; background:none; }
     for (const [tag, attrs] of ICONS[kind] || ICONS.commit) g.append(svg(tag, attrs));
     return g;
   }
+  // A lookup that failed (the daemon restarting, plugins still loading, git busy) is tried again twice, 5s apart:
+  // a message is drawn once, so its links would otherwise never come.
+  const tries = new Map();   // session + name -> failed lookups
+  function retry(s, list, names) {
+    const again = list.filter(n => { const k = s + "\0" + n, t = (tries.get(k) || 0) + 1; tries.set(k, t); return t <= 2; });
+    if (!again.length) return;
+    setTimeout(() => {
+      if (!waiting.has(s)) waiting.set(s, new Map());
+      const w = waiting.get(s);
+      for (const n of again) w.set(n, [...(w.get(n) || []), ...names.get(n).filter(c => c.isConnected)]);
+      if (!timer) timer = setTimeout(flush, 40);
+    }, 5000);
+  }
   function link(c, session, name, info) {
     c.classList.add("gitref");
-    c.prepend(icon(info.kind));
+    const text = c.textContent;   // the icon and the first characters can't be split across lines
+    c.replaceChildren(h("span", {class: "gstart"}, icon(info.kind), text.slice(0, 4)), text.slice(4));
     c.setAttribute("role", "link");
     c.setAttribute("tabindex", "0");
     c.title = info.kind === "commit" ? "Commit " + short(info.hash) : `${info.kind === "tag" ? "Tag" : "Branch"} ${name}`;
@@ -169,7 +190,8 @@ button.gref { cursor:pointer; background:none; }
   }
   const laneColor = i => `var(--c${i % 6 + 1})`;
   function drawGraph({rows, width}) {
-    const x = i => PAD + i * LANE, w = PAD * 2 + (width - 1) * LANE;
+    const lane = width > 1 ? Math.max(4, Math.min(LANE, 160 / (width - 1))) : LANE;   // many lanes: closer together
+    const x = i => PAD + i * lane, w = PAD * 2 + (width - 1) * lane;
     const g = svg("svg", {width: w, height: rows.length * ROW, "aria-hidden": "true"});
     const line = (x1, y1, x2, y2, color) => g.append(svg("path", {fill: "none", stroke: color, "stroke-width": 2,
       d: x1 === x2 ? `M${x1} ${y1}V${y2}` : `M${x1} ${y1}C${x1} ${(y1 + y2) / 2} ${x2} ${(y1 + y2) / 2} ${x2} ${y2}`}));
@@ -192,6 +214,14 @@ button.gref { cursor:pointer; background:none; }
       : h("span", {class: cls, title: r.name}, r.name);
   }
 
+  function chips(refs, head) {   // at most two (the current branch first), then "+N": the subject must stay visible
+    const sorted = refs.slice().sort((a, b) => (b.kind === "branch" && b.name === head) - (a.kind === "branch" && a.name === head));
+    return [...sorted.slice(0, 2).map(r => refChip(r, head)), sorted.length > 2 ? h("span", {class: "more"}, "+" + (sorted.length - 2)) : null];
+  }
+
+  const noRepo = d => d.repo === null ? "Claude hasn't said which folder it works in yet: try again once it has replied."
+    : "The folder Claude works in isn't in a git repository.";
+
   async function showGraph(session, ref = "", limit = 80) {
     if (!session) return grovy.say("Open a session first: Git shows the repository it works in.");
     const loading = h("p", {class: "gg-note"}, "Loading…");
@@ -200,18 +230,20 @@ button.gref { cursor:pointer; background:none; }
     try { d = await call(`graph?session=${enc(session)}&limit=${limit}${ref ? "&ref=" + enc(ref) : ""}`); }
     catch (e) {
       if (!loading.isConnected) return;
-      return grovy.sheet(h("h2", {}, "Git"), h("p", {class: "gg-note"}, plugin ? "Couldn't read the repository: " + e.message
+      return grovy.sheet(h("h2", {}, "Git"), h("p", {class: "gg-note"}, Date.now() >= pluginOff ? "Couldn't read the repository: " + e.message
         : "The git plugin isn't running. Restart grovy (systemctl --user restart grovy), and check GROVY_PLUGINS isn't 0."));
     }
     if (grovy.session !== session || !loading.isConnected) return;   // moved on, or closed it, while it loaded
-    if (!d.repo) return grovy.sheet(h("h2", {}, "Git"), h("p", {class: "gg-note"}, "This session's folder isn't in a git repository."));
+    if (!d.repo) return grovy.sheet(h("h2", {}, "Git"), h("p", {class: "gg-note"}, noRepo(d)));
     const pick = h("select", {"aria-label": "Show", onchange: () => showGraph(session, pick.value, limit)},
       h("option", {value: ""}, "All branches"),
       ...d.branches.map(b => {
         const o = h("option", {value: b.ref}, b.name);
         if (b.ref === d.ref) o.selected = true;
         return o;
-      }));
+      }),
+      d.ref && !d.branches.some(b => b.ref === d.ref)
+        ? h("option", {value: d.ref, selected: ""}, d.ref.replace(/^refs\/(tags\/|heads\/|remotes\/)/, (m, k) => k === "tags/" ? "Tag " : "")) : null);
     const head = h("div", {class: "gg-head"},
       d.branch ? h("span", {}, "On ", h("b", {}, d.branch)) : d.head ? h("span", {}, "Detached at ", h("b", {}, short(d.head))) : null,
       d.upstream ? h("span", {}, d.track ? `${d.track} ${d.upstream}` : `up to date with ${d.upstream}`) : null,
@@ -223,8 +255,8 @@ button.gref { cursor:pointer; background:none; }
     const lay = layout(d.commits), g = drawGraph(lay);
     const rows = lay.rows.map(({c}) => h("button", {class: "gg-row", style: `padding-left:${g.width + 4}px`,
       onclick: () => showCommit(session, c.h, () => showGraph(session, ref, limit))},
-      h("div", {class: "s"}, ...(d.refs[c.h] || []).map(r => refChip(r, d.branch)), h("span", {}, c.s)),
-      h("div", {class: "m"}, h("code", {}, short(c.h)), " · ", c.a, " · ", age(c.t))));
+      h("div", {class: "s"}, ...chips(d.refs[c.h] || [], d.branch), h("span", {}, c.s)),
+      h("div", {class: "m"}, h("code", {}, short(c.h)), " · ", age(c.t), " · ", c.a)));
     const more = d.commits.length >= d.limit && limit < 400
       ? h("button", {class: "chip", style: "margin-top:10px", onclick: () => showGraph(session, ref, limit * 2)}, "Show more") : null;
     grovy.sheet(h("h2", {}, "Git"), head, h("div", {class: "gg"}, g.node, ...rows), more);
@@ -233,8 +265,10 @@ button.gref { cursor:pointer; background:none; }
   // ---- one commit
   function diffNode(text) {
     const pre = h("pre", {class: "gc-diff"});
+    let header = false;   // between "diff --git" and the first "@@": where "--- a/x" and "+++ b/x" name files
     for (const l of text.split("\n")) {
-      const cls = /^(diff --git|\+\+\+ |--- )/.test(l) ? "f" : l.startsWith("@@") ? "h" : l.startsWith("+") ? "a" : l.startsWith("-") ? "d" : null;
+      if (l.startsWith("diff --git")) header = true; else if (l.startsWith("@@")) header = false;
+      const cls = l.startsWith("diff --git") || (header && /^(\+\+\+|---) /.test(l)) ? "f" : l.startsWith("@@") ? "h" : l.startsWith("+") ? "a" : l.startsWith("-") ? "d" : null;
       pre.append(cls ? h("span", {class: cls}, l) : l, "\n");
     }
     return pre;
@@ -244,16 +278,23 @@ button.gref { cursor:pointer; background:none; }
   // ("Co-Authored-By: ...") on lines of their own.
   function reflow(text) {
     const out = [];
-    let fence = false;
-    const own = l => /^\s*([-*+]|\d+[.)])\s|^\s*(```|#|>)|^[A-Z][\w-]*: \S/.test(l);
+    let fence = null, mode = null;   // mode: what the last line can be continued as ("prose", "item") or null
+    // lines of their own: indented (pasted output), heading, quote, table row, rule, trailer ("Signed-off-by: x")
+    const own = l => /^\s|^(#|>|\||---|\*\*\*|___)|\|.*\||^[A-Z][\w-]*: \S/.test(l);
+    const item = l => /^\s*([-*+]|\d+[.)])\s/.test(l);
     for (const l of text.split("\n")) {
-      const prev = out.length ? out[out.length - 1] : "";
-      if (/^\s*```/.test(l)) fence = !fence;
-      else if (!fence && l.trim() && prev.trim() && !own(l) && !/^\s*(```|#)/.test(prev)) {
-        out[out.length - 1] = prev.replace(/\s+$/, "") + " " + l.trim();
+      const f = /^\s*(```|~~~)/.exec(l);
+      if (f || fence) {
+        if (f && (!fence || f[1] === fence)) fence = fence ? null : f[1];
+        out.push(l); mode = null; continue;
+      }
+      const isItem = item(l);
+      if (l.trim() && !isItem && (mode === "prose" ? !own(l) : mode === "item" && (/^\s/.test(l) || !own(l)))) {
+        out[out.length - 1] = out[out.length - 1].replace(/\s+$/, "") + " " + l.trim();
         continue;
       }
       out.push(l);
+      mode = !l.trim() ? null : isItem ? "item" : own(l) ? null : "prose";
     }
     return out.join("\n");
   }
@@ -265,7 +306,7 @@ button.gref { cursor:pointer; background:none; }
     try { c = await call(`commit?session=${enc(session)}&hash=${enc(hash)}`); }
     catch (e) { return loading.isConnected && grovy.sheet(top, h("h2", {}, "Commit " + short(hash)), h("p", {class: "gg-note"}, e.message)); }
     if (grovy.session !== session || !loading.isConnected) return;
-    if (!c.repo) return grovy.sheet(top, h("p", {class: "gg-note"}, "This session's folder isn't in a git repository."));
+    if (!c.repo) return grovy.sheet(top, h("p", {class: "gg-note"}, noRepo(c)));
     const parent = p => h("code", {class: "gitref", role: "link", tabindex: "0", onclick: () => showCommit(session, p, back),
       onkeydown: e => { if (e.key === "Enter") showCommit(session, p, back); }}, icon("commit"), short(p));
     const files = c.files.length ? h("div", {class: "gc-files"}, ...c.files.map(f => h("div", {},
