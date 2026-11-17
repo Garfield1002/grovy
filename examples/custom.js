@@ -28,6 +28,10 @@
      grovy.on("send", text)             return new text to send instead, or false to keep it from being sent
                                         (answer at once: an async hook stops the send)
      grovy.extension(name, setup)       a named extension: setup(grovy) runs at start-up
+     grovy.view(name, open)             a full-screen view of your own: open(panel, arg) draws into panel.body (fresh
+                                        each time), and may call panel.title(text), panel.actions(...buttons),
+                                        panel.close(); panel.onclose = fn runs when it closes (back button, Esc, ✕)
+     grovy.open(name, arg)              show that view; arg is passed to open()
      grovy.disable(name)                turn off a built-in extension, e.g. grovy.disable("context-bar")
      grovy.extensions                   the named extensions, and whether each is on
 
@@ -61,6 +65,16 @@ grovy.on("render", (node, e) => {
   node.append(grovy.h("button", {class: "chip", onclick: () => speechSynthesis.speak(new SpeechSynthesisUtterance(text))},
     "Read aloud"));
 });
+*/
+
+
+/* A full-screen view, opened from the ⋯ menu:
+
+grovy.view("notes", panel => {
+  panel.title("Notes");
+  panel.body.append(grovy.md("Anything you like, drawn with **grovy.h** and **grovy.md**."));
+});
+grovy.menu("Notes", () => grovy.open("notes"));
 */
 
 

@@ -121,6 +121,11 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
     * `send`: may rewrite the text, or return `false` (or blank text) to keep it from being sent. It runs before the
       check that attachments don't go with a `/` or `!` command. An `async` hook stops the
       send, since its answer would come too late.
+  * `view(name, open)` and `open(name, arg)`: a full-screen view the extension draws. `open(panel, arg)` gets
+    `panel.body` (a fresh element each time it opens), `panel.title(text)`, `panel.actions(...nodes)` (header buttons),
+    `panel.close()`, `panel.closed` and `panel.onclose`. Like the page viewer, the phone's back button and Esc close it,
+    and so does opening another session or the home screen. Sheets (`ask`, `say`, `sheet`) open above it. A view has
+    no URL of its own: it is opened from the page (a menu item, a tap on a chip).
   * `extension`, `disable`, `extensions`.
 
   Start-up waits for `DOMContentLoaded`, so everything the extensions register is there for the first paint. A callback

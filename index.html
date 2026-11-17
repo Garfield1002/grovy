@@ -284,16 +284,19 @@ textarea:focus { border-color:var(--mut); }
 .cmd b { font:600 14px ui-monospace, SFMono-Regular, Menlo, monospace; } .cmd span { display:block; font-size:12.5px; color:var(--mut); }
 #send svg { width:20px; height:20px; }
 /* pages: Claude-made HTML, shown full-screen in a sandboxed frame */
-#viewer { position:fixed; inset:0; z-index:30; display:flex; flex-direction:column; background:var(--bg); }
-#viewer .vh { display:flex; align-items:center; gap:10px; padding:8px 12px; padding-top:calc(8px + env(safe-area-inset-top));
+#viewer, #xview { position:fixed; inset:0; z-index:30; display:flex; flex-direction:column; background:var(--bg); }
+#viewer .vh, #xview .vh { display:flex; align-items:center; gap:10px; padding:8px 12px; padding-top:calc(8px + env(safe-area-inset-top));
   border-bottom:1px solid var(--line); min-height:52px; }
-#viewer .vh b { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-#vclose { border:0; background:none; font-size:20px; min-width:44px; min-height:44px; margin-left:-8px; }
+#viewer .vh b, #xview .vh b { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#vclose, #xclose { border:0; background:none; font-size:20px; min-width:44px; min-height:44px; margin-left:-8px; }
 #vver { font-size:13px; color:var(--mut); } #vtab { font-size:14px; color:var(--acc); white-space:nowrap; }
 #vshare { border:0; background:none; font-size:14px; color:var(--acc); padding:8px 2px; white-space:nowrap; }
 #vshare.on { color:var(--ok); font-weight:650; }
 .link { font:13px/1.4 ui-monospace, monospace; background:var(--code); border-radius:8px; padding:10px; overflow-wrap:anywhere; margin:0 0 10px; }
 #vframe { flex:1; width:100%; border:0; background:#fff; }
+/* extension views (grovy.view): full-screen, drawn by the extension */
+#xbody { flex:1; overflow:auto; padding:12px 16px calc(16px + env(safe-area-inset-bottom)); outline:none; }
+#xacts { display:flex; gap:8px; align-items:center; }
 .pagecard { display:flex; align-items:center; gap:12px; margin:6px 0 12px; padding:12px; border:1px solid var(--line);
   border-radius:12px; background:var(--card); text-align:left; width:100%; }
 .pagecard .pi { width:36px; height:36px; border-radius:8px; background:var(--code); display:grid; place-items:center; flex:none; color:var(--mut); }
@@ -452,6 +455,8 @@ textarea:focus-visible, input:focus-visible { outline:none; }
 <div id="viewer" class="hidden"><div class="vh"><button id="vclose" aria-label="Close">✕</button><b id="vtitle"></b>
   <span id="vver"></span><button id="vshare">Share</button><a id="vtab" target="_blank" rel="noopener">New tab</a></div><iframe id="vframe" title="page"
   sandbox="allow-scripts allow-forms allow-modals allow-downloads" referrerpolicy="no-referrer"></iframe></div>
+<div id="xview" class="hidden" role="dialog" aria-labelledby="xtitle"><div class="vh"><button id="xclose" aria-label="Close">✕</button>
+  <b id="xtitle"></b><span id="xacts"></span></div><div id="xbody" tabindex="-1"></div></div>
 <div id="sheet" class="hidden"><div class="panel"><div class="grab"></div><div id="sheetbody"></div></div></div>
 <script>
 "use strict";
@@ -464,6 +469,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
 //   composer     the message box: send / steer / stop, slash commands, attachments, quoting a selection
 //   sheets       dialogs and menus: ask(), say(), the ⋯ menu, rename, search, new session
 //   pages        the full-screen page viewer and sharing
+//   views        full-screen views extensions draw (grovy.view / grovy.open)
 //   sidebar      wide screens: sessions and pages beside the conversation
 //   keyboard     shortcuts and focus
 //   routing      #/ and #/s/NAME, errors, live updates (EventSource)
@@ -1991,7 +1997,7 @@ input.addEventListener("keydown", e => {
     return;
   }
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (!$("send").disabled) sendNow(); return; }
-  if (e.key === "Escape" && !sheetOpen() && !viewing) {
+  if (e.key === "Escape" && !sheetOpen() && !overlayOpen()) {
     if ($("picker").childElementCount) $("picker").replaceChildren(); else input.blur();
   }
 });
@@ -2003,6 +2009,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     if (sheetOpen()) { e.preventDefault(); return closeSheet(); }
     if (viewing) { e.preventDefault(); return $("vclose").click(); }
+    if (xviewing) { e.preventDefault(); return closeView(); }
     return;
   }
   if (sheetOpen() && e.key === "Tab") {   // keep Tab inside the open sheet
@@ -2017,11 +2024,11 @@ document.addEventListener("keydown", e => {
   if ((e.key === "Enter" || e.key === " ") && a && a.getAttribute("role") === "button" && a.tagName !== "BUTTON") {
     e.preventDefault(); a.click(); return;
   }
-  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && !sheetOpen() && !viewing) {
+  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && !sheetOpen() && !overlayOpen()) {
     e.preventDefault(); stepSession(e.key === "ArrowDown" ? 1 : -1); return;
   }
   // typing with nothing focused goes to the message box
-  if (view && !sheetOpen() && !viewing && (!a || a === document.body) && e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.metaKey && !e.altKey
+  if (view && !sheetOpen() && !overlayOpen() && (!a || a === document.body) && e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.metaKey && !e.altKey
       && !$("composer").classList.contains("hidden") && !document.querySelector("#composer .cr").classList.contains("hidden")) {
     input.focus();   // the key itself then lands in the box
   }
@@ -2033,12 +2040,46 @@ function focusSheet() {
   }
 }
 
+// ---------------------------------------------------------------- views
+// A full-screen view an extension draws itself (grovy.view registers it, grovy.open shows it). Like the page viewer,
+// the phone's back button closes it; so does opening another session or the home screen. Each opening gets a fresh
+// body, so a late async update from a closed one lands nowhere visible.
+const views = {};
+let xviewing = null;   // the open view: {name, arg, panel}
+const overlayOpen = () => !!viewing || !!xviewing;
+function openView(name, arg) {
+  const make = views[name];
+  if (!make) throw new Error(`grovy.open: no view named "${name}"`);
+  closeSheet();
+  if (xviewing) endView(); else history.pushState({xview: 1}, "");
+  const body = h("div", {id: "xbody", tabindex: "-1"});
+  $("xbody").replaceWith(body);
+  const panel = {body, arg, closed: false, onclose: null,
+    title: t => { if (xviewing && xviewing.panel === panel) $("xtitle").textContent = String(t); },
+    actions: (...nodes) => { if (xviewing && xviewing.panel === panel) $("xacts").replaceChildren(...nodes.flat().filter(n => n != null && n !== false)); },
+    close: () => { if (xviewing && xviewing.panel === panel) $("xclose").click(); }};
+  xviewing = {name, arg, panel};
+  $("xtitle").textContent = name; $("xacts").replaceChildren();
+  $("xview").classList.remove("hidden");
+  if (runExt("view " + name, make, panel, arg) === FAILED) return closeView();
+  body.focus({preventScroll: true});
+}
+function endView() {   // close it without touching history (the back button, or another view replacing it)
+  const v = xviewing; if (!v) return;
+  xviewing = null; v.panel.closed = true;
+  $("xview").classList.add("hidden"); $("xbody").replaceChildren(); $("xacts").replaceChildren();
+  if (typeof v.panel.onclose === "function") runExt("view " + v.name + " onclose", v.panel.onclose);
+}
+function closeView() { if (history.state && history.state.xview) history.back(); else endView(); }
+$("xclose").onclick = closeView;
+addEventListener("popstate", () => { if (xviewing) endView(); });
+
 // ---------------------------------------------------------------- routing + live updates
 function go(hash) { location.hash = hash; }
 function route() {
   const m = location.hash.match(/^#\/s\/([A-Za-z0-9_-]+)$/);
   view = m ? m[1] : null; lastEventId = 0; cur = null; first = true; lastTool = ""; cache.clear();
-  older = []; noMore = false; closeSheet(); $("quick").replaceChildren(); canStop = false;
+  older = []; noMore = false; closeSheet(); endView(); $("quick").replaceChildren(); canStop = false;
   $("add").classList.toggle("hidden", !!view); $("menu").classList.remove("hidden");
   $("title").classList.toggle("tap", !!view); $("resume").classList.add("hidden");
   $("back").classList.toggle("hidden", !view);
@@ -2212,6 +2253,11 @@ window.grovy = Object.freeze({
     if (booted) throw new Error("grovy.extension: only before start-up (from extensions/ or custom.js)");
     ext.named.push({name: String(name), setup: fnArg(setup, "grovy.extension")});
   },
+  view(name, open) {   // a full-screen view: open(panel, arg) draws into panel.body (see examples/custom.js)
+    if (!/^[a-z][a-z0-9-]{0,30}$/.test(name)) throw new Error(`grovy.view: bad name "${name}"`);
+    views[name] = fnArg(open, "grovy.view");
+  },
+  open(name, arg) { openView(String(name), arg); },   // show a view registered with grovy.view
   disable(name) { ext.off.add(String(name)); },   // e.g. grovy.disable("context-bar"), from custom.js
   get extensions() { return ext.named.map(x => ({name: x.name, on: !ext.off.has(x.name)})); },
 });
