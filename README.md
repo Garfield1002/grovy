@@ -49,6 +49,7 @@ in a terminal. grovy listens to Claude's hooks and shows everything on a phone-f
   without waiting or interrupting (the button turns blue). With the box empty, the same button is ■ to stop Claude.
 - **Quote and copy:** each reply has Copy and Quote buttons; or select part of it and tap Quote selection. Tap a quote
   to jump back to where it came from. "Worked for 2m · 14 tool calls" under a reply lists what Claude ran.
+- **Long messages:** once a message outgrows the box, it takes the whole screen; the ⤢ / ⤡ button in its corner switches by hand.
 - **Attachments:** tap the paperclip in the empty message box to send photos or files; Claude gets them as files it can open (kept for 7 days). Photos
   show in your message.
 - **Live progress:** when Claude runs something long (a build, training, a batch job), its script can show a progress
