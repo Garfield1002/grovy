@@ -363,7 +363,9 @@ their next start.
 The built-in extension `extensions/git.js` uses it:
 * ⋯ → Git: a graph of recent commits (all branches, or one), with the current branch, its upstream (ahead/behind) and
   the number of changed files. Tap a commit for its message, files and diff (capped at 200 KB, shown at once when
-  short), with its parents and refs as links. "Ask Claude about it" puts the commit in the message box.
+  short), with its parents and refs as links. The message's hand-wrapped lines are joined back into paragraphs
+  (list items, code blocks, headings and trailers such as `Co-Authored-By:` keep their own lines), since markdown
+  here keeps line breaks and a phone would break each line twice. "Ask Claude about it" puts the commit in the message box.
 * Inline `code` in a message whose text is a branch, remote branch, tag or commit hash (7–40 hex digits, not all
   digits) of that repository becomes a link: a commit opens it, a ref opens the graph on it. Names are looked up in
   batches (`POST /api/x/git/resolve`) after a message is drawn, and remembered per session; a miss is retried after a

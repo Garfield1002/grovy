@@ -219,6 +219,24 @@ button.gref { cursor:pointer; background:none; }
     }
     return pre;
   }
+  // Commit messages are wrapped by hand at ~72 columns, and grovy.md keeps line breaks: on a phone every line would
+  // break twice. Rejoin each paragraph's lines, but keep list items, code blocks, headings and trailers
+  // ("Co-Authored-By: ...") on lines of their own.
+  function reflow(text) {
+    const out = [];
+    let fence = false;
+    const own = l => /^\s*([-*+]|\d+[.)])\s|^\s*(```|#|>)|^[A-Z][\w-]*: \S/.test(l);
+    for (const l of text.split("\n")) {
+      const prev = out.length ? out[out.length - 1] : "";
+      if (/^\s*```/.test(l)) fence = !fence;
+      else if (!fence && l.trim() && prev.trim() && !own(l) && !/^\s*(```|#)/.test(prev)) {
+        out[out.length - 1] = prev.replace(/\s+$/, "") + " " + l.trim();
+        continue;
+      }
+      out.push(l);
+    }
+    return out.join("\n");
+  }
   async function showCommit(session, hash, back) {
     const top = back ? h("button", {class: "chip", style: "margin-bottom:8px", onclick: back}, "‹ Graph") : null;
     const loading = h("p", {class: "gg-note"}, "Loading…");
@@ -242,7 +260,7 @@ button.gref { cursor:pointer; background:none; }
       h("div", {class: "gc-meta"}, ...c.refs.map(r => refChip(r, null, session)), h("code", {title: c.h}, short(c.h)),
         h("span", {}, c.a), h("span", {}, new Date(c.t * 1000).toLocaleString()),
         c.p.length ? h("span", {}, c.p.length > 1 ? "parents" : "parent", " ", ...c.p.flatMap((p, i) => i ? [" ", parent(p)] : [parent(p)])) : null),
-      c.body ? h("div", {class: "gc-body"}, grovy.md(c.body)) : null, files, c.diff ? diff : null,
+      c.body ? h("div", {class: "gc-body"}, grovy.md(reflow(c.body))) : null, files, c.diff ? diff : null,
       h("button", {class: "chip", style: "margin-top:12px", onclick: () => { grovy.closeSheet(); grovy.draft(`Commit ${short(c.h)} (${c.s}): `); }},
         "Ask Claude about it"));
   }
