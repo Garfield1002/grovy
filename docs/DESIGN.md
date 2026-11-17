@@ -399,6 +399,21 @@ when closed. With a mouse (`pointer: fine`), opening a session focuses the messa
 pop the keyboard), and permission cards are never focused automatically, so a stray Enter can't answer one. Live
 re-renders keep keyboard focus on the same control (`paint()`, matching rebuilt rows by `data-fk`).
 
+**Spec mode.** A built-in plugin (`plugins/spec.py`) and extension (`extensions/spec.js`); its own design, decisions
+and roadmap are the first spec, `specs/spec-mode/`. A spec is a folder of the session's git repo whose `index.md`
+header has `spec: 1`, plus the files its `parts:` lists. grovy only reads specs (from git-tracked and untracked,
+not ignored, `.md` files, rescanned at most every 5s); Claude writes them, and the page's actions only draft messages.
+* SessionStart (`grovy.context`): the conventions (`FORMAT`), a line per spec (counts, items in progress, problems),
+  and the index of each `active` spec (at most two, 6000 characters each). Parts are read on demand.
+* After an edit to a `.md` file (`grovy.after_edit`, glob `*.md`): if it is a spec's index or part, the spec is
+  parsed and checked, and its problems go back to Claude at once. Checks: format version, duplicate IDs, a `next`
+  counter behind the highest ID or missing a prefix, an item without an ID, `doing` without a claim, a decision
+  without a date, a missing part. IDs in code spans and fenced blocks are examples, not IDs.
+* Routes `GET /api/x/spec/list?session=` and `spec?session=&rel=`: the spec is chosen among those found in that
+  session's repo, so no path from the page is ever opened. ⋯ → Specs opens the view: overall and per-section
+  progress (an ID left in prose counts as done), items in progress with their claim, problems, decisions (superseded
+  ones greyed), glossary, and each file rendered. It reloads at most every 5s while the session reports updates.
+
 **Widgets.** Claude's reply can contain ` ```widget ` blocks holding one JSON object: `chart` (bar, line, pie),
 `stats`, `progress`, `checklist`, `choices`, `form`, `diagram` or `image`. The page draws them itself with DOM and SVG;
 nothing from Claude is run or parsed as HTML. Invalid JSON or an unknown type shows "Widget not shown: <reason>"

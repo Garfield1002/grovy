@@ -45,6 +45,9 @@ in a terminal. grovy listens to Claude's hooks and shows everything on a phone-f
 - **Widgets and pages:** Claude can answer with charts, checklists, diagrams, images or buttons to pick from, and
   publish full HTML pages (reports, dashboards) that open full-screen. A page can be shared on your network
   with a link.
+- **Specs:** a project can keep a spec: its roadmap, how things work, and the decisions behind them, in markdown
+  files of its own repo that Claude keeps up to date as you decide things and as work gets done. ⋯ → Specs shows its
+  progress; tap an item to ask Claude to work on it. Just ask Claude to start one.
 - **Steering:** a message you send while Claude is working reaches it at its next step, so you can correct course
   without waiting or interrupting (the button turns blue). With the box empty, the same button is ■ to stop Claude.
 - **Quote and copy:** each reply has Copy and Quote buttons; or select part of it and tap Quote selection. Tap a quote

@@ -48,9 +48,9 @@ The plugin must be built only on public APIs (D10), so these come first.
 
 ### Phase 3: the spec view
 
-- [ ] List the project's specs from the session's ⋯ menu; open one in the full-screen view {#R10}
-- [ ] Sections with progress bars, items with their state and claim, superseded decisions greyed {#R11}
-- [ ] Item actions only draft messages to Claude ("work on R6", "drop R6", "explain D5"); grovy never writes the
+- [x] List the project's specs from the session's ⋯ menu; open one in the full-screen view {#R10}
+- [x] Sections with progress bars, items with their state and claim, superseded decisions greyed {#R11}
+- [x] Item actions only draft messages to Claude ("work on R6", "drop R6", "explain D5"); grovy never writes the
       repo {#R12}
 
 ### Phase 4: dogfood

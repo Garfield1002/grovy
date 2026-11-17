@@ -2985,6 +2985,30 @@ class TestSpecPlugin(unittest.TestCase):
         subprocess.run(["git", "init", "-q", empty], check=True)
         self.assertIsNone(self.sp.context_for(empty))                                 # a repo without specs
 
+    def test_routes(self):
+        """The page asks by session; only a spec found in that session's repo is ever read."""
+        routes = {}
+        class FakeApi:
+            def __init__(s, cwd): s.cwd = cwd
+            context = staticmethod(lambda fn: fn)
+            def after_edit(s, fn=None, glob="*"): return (lambda f: f) if fn is None else fn
+            def route(s, method, path, fn=None):
+                def add(f): routes[path] = f; return f
+                return add if fn is None else add(fn)
+            def session(s, name): return {"session": {"cwd": s.cwd}} if name == "t1" else None
+        self.sp.setup(FakeApi(self.folder))
+        req = lambda **q: type("R", (), {"query": q})()
+        listed = routes["list"](req(session="t1"))
+        self.assertEqual([(x["rel"], x["summary"]["done"]) for x in listed["specs"]], [("specs/demo", 2)])
+        one = routes["spec"](req(session="t1", rel="specs/demo"))
+        self.assertEqual([(x["path"][-1], x["done"], x["total"], x["items"]) for x in one["sections"]],
+                         [("Done so far", 1, 1, []), ("Roadmap", 1, 3, ["R2", "R3", "R4", "R5"])])
+        self.assertIn("Plain checkboxes", one["texts"]["decisions.md"])
+        for bad in ("../..", "specs", "/etc", ""):
+            self.assertEqual(routes["spec"](req(session="t1", rel=bad))[0], 404)
+        self.assertEqual(routes["spec"](req(session="nobody", rel="specs/demo"))[0], 404)
+        self.assertEqual(routes["list"](req()), {"root": None, "specs": []})
+
     def test_header(self):
         meta, n = self.sp.parse_header("---\nspec: 1\nparts:\n  - a.md\n  - b.md\nnext: {R: 3}  # c\n---\nbody")
         self.assertEqual((meta, n), ({"spec": 1, "parts": ["a.md", "b.md"], "next": {"R": 3}}, 7))

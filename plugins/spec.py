@@ -380,8 +380,72 @@ def note_for(path):
             + (f"\n(and {more} more)" if more else ""))
 
 
+def sections(spec):
+    """The roadmap by section, in reading order: done/total and the item IDs (written-up anchors count as done)."""
+    out, by = [], {}
+    def sec(path, file):
+        key = (file, tuple(path))
+        if key not in by:
+            by[key] = {"file": file, "path": path, "done": 0, "total": 0, "items": []}
+            out.append(by[key])
+        return by[key]
+    item_ids = {it["id"] for it in spec["items"] if it["id"]}
+    prefixes = {re.match(r"[A-Z][A-Za-z]*", i).group(0) for i in item_ids} or {"R"}
+    events = [(x["file"], x["line"], "item", x) for x in spec["items"]] + \
+             [(a["file"], a["line"], "anchor", a) for a in spec["anchors"]
+              if re.match(r"[A-Z][A-Za-z]*", a["id"]).group(0) in prefixes and a["id"] not in item_ids]
+    order = {f: n for n, f in enumerate(spec["files"])}
+    for file, line, kind, x in sorted(events, key=lambda e: (order.get(e[0], 99), e[1])):
+        s = sec(x["section"], file)
+        if kind == "anchor":
+            s["done"] += 1
+            s["total"] += 1
+        elif x["state"] != "dropped":
+            s["total"] += 1
+            s["done"] += x["state"] == "done"
+        if kind == "item":
+            s["items"].append(x["id"])
+    return out
+
+
+def public(spec, root):
+    """What the page gets: the parsed spec, its files' text, counts; paths relative to the repo."""
+    texts = {}
+    for rel in spec["files"]:
+        texts[rel] = read(os.path.normpath(os.path.join(spec["folder"], rel))) or ""
+    return {"rel": spec["rel"], "title": spec["title"], "status": spec["status"], "files": spec["files"],
+            "texts": texts, "items": spec["items"], "decisions": spec["decisions"], "terms": spec["terms"],
+            "headings": spec["headings"], "problems": spec["problems"], "summary": summary(spec),
+            "sections": sections(spec), "root": root}
+
+
 # ---------------------------------------------------------------- the plugin
 def setup(grovy):
+    def repo_of(request):
+        name = request.query.get("session")
+        detail = grovy.session(name) if isinstance(name, str) and name else None
+        return git_root(detail["session"].get("cwd")) if detail else None
+
+    @grovy.route("GET", "list")
+    def list_specs(request):   # the specs of the session's repo, with their counts
+        root = repo_of(request)
+        out = []
+        for index in find_specs(root) if root else []:
+            spec = load(index, root)
+            out.append({"rel": spec["rel"], "title": spec["title"], "status": spec["status"],
+                        "summary": summary(spec), "problems": len(spec["problems"])})
+        return {"root": root, "specs": out}
+
+    @grovy.route("GET", "spec")
+    def one_spec(request):   # one of them, whole: chosen among those found, so no path from the page is ever opened
+        root = repo_of(request)
+        rel = request.query.get("rel")
+        index = next((i for i in find_specs(root) if os.path.relpath(os.path.dirname(i), root) == rel), None) \
+            if root else None
+        if not index:
+            return 404, {"error": "no such spec in this session's repo"}
+        return public(load(index, root), root)
+
     @grovy.context
     def context(session, info):
         return context_for(info.get("cwd"))
