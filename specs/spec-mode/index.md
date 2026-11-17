@@ -26,7 +26,7 @@ Nothing yet: design settled on 2026-11-17, see [decisions.md](decisions.md).
 
 The plugin must be built only on public APIs (D10), so these come first.
 
-- [ ] Built-in daemon plugins: a repo `plugins/` folder loaded like `~/.config/grovy/plugins/`, on by default,
+- [x] Built-in daemon plugins: a repo `plugins/` folder loaded like `~/.config/grovy/plugins/`, on by default,
       each one can be turned off {#R1}
 - [ ] Plugin API: add text to a session's SessionStart context (like `WIDGET_GUIDE`), per project {#R2}
 - [ ] Plugin API: a plugin may add a note to the `additionalContext` the `PostToolUse` hook already waits for

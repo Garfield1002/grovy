@@ -17,7 +17,8 @@ A plugin runs inside the daemon. It defines setup(grovy) and uses only `grovy`:
 
 The on() callbacks run one at a time on a thread of their own; each route call on a thread of its own. on() and route()
 only work inside setup(). If setup() fails or takes over 10s, the plugin is skipped; if a callback fails, the error is
-logged and grovy carries on. GROVY_PLUGINS=0 turns plugins off.
+logged and grovy carries on. GROVY_PLUGINS=0 turns plugins off. grovy's built-in plugins (plugins/ in the grovy
+folder) work the same way: a file of yours with the same name replaces one, and an empty NAME.off turns it off.
 
 To show the totals on the phone, add to ~/.config/grovy/custom.js:
 

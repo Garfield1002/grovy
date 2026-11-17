@@ -1,10 +1,12 @@
-"""The user's daemon plugins: ~/.config/grovy/plugins/*.py, loaded once when grovyd starts (restart it to reload).
+"""Daemon plugins: grovy's built-in ones (plugins/*.py in the grovy folder) and the user's own
+(~/.config/grovy/plugins/*.py), loaded once when grovyd starts (restart it to reload). A user's NAME.py replaces the
+built-in of that name (copy it and edit); an empty NAME.off there turns the built-in off.
 
 Each plugin file defines setup(grovy) and uses only the Api object it is given (examples/plugin.py shows it all).
 A plugin runs inside the daemon with the daemon's rights, like the rest of grovy: it is the user's own code.
 What grovy guarantees in return: callbacks run one at a time on a worker thread of their own, never while Store's
 lock is held, so a slow or failing plugin can't stall hooks, permissions or the page. Errors are logged and skipped.
-GROVY_PLUGINS=0 loads none (to rule them out when something misbehaves).
+GROVY_PLUGINS=0 loads none, built-in ones included (to rule them out when something misbehaves).
 """
 import copy
 import importlib.util
@@ -26,6 +28,7 @@ SETUP_TIMEOUT = 10        # seconds for one plugin's setup(); past that it is sk
 ROUTE_TIMEOUT = 30        # seconds a route may take before the request gets 504 (its thread is left to finish)
 ROUTES_RUNNING = 8        # routes running at once (hung ones included); more get 503, so they can't use up the server
 ANSWER_MAX = 4 * 1024 * 1024
+BUILTIN_DIR = os.path.join(core.HERE, "plugins")
 
 
 def log(msg):
@@ -115,9 +118,10 @@ class Request:
 
 
 class Plugins:
-    def __init__(self, store, folder=None):
+    def __init__(self, store, folder=None, builtin=None):
         self.store = store
         self.folder = folder or os.path.join(core.config_dir(), "plugins")
+        self.builtin = builtin or BUILTIN_DIR
         self.handlers = {e: [] for e in EVENTS}
         self.routes = {}
         self.loaded, self.failed = [], {}
@@ -130,12 +134,19 @@ class Plugins:
     def load(self):
         if core.env("PLUGINS", "1") == "0":
             return self
-        try:
-            files = sorted(f for f in os.listdir(self.folder) if f.endswith(".py") and not f.startswith("_"))
-        except OSError:
-            return self
+
+        def listing(folder):
+            try:
+                return set(os.listdir(folder))
+            except OSError:
+                return set()
+        mine, ours = listing(self.folder), listing(self.builtin)
+        files = {f: self.builtin for f in ours if f.endswith(".py") and f[:-3] + ".off" not in mine}
+        files.update({f: self.folder for f in mine if f.endswith(".py")})   # yours replaces a built-in of that name
         modules = {}
-        for f in files:
+        for f, folder in sorted(files.items()):
+            if f.startswith("_"):
+                continue
             name = f[:-3]
             modname = f"grovy_plugin_{name.replace('-', '_')}"
             why = ("file name must be lowercase letters, digits, _ or - (max 32)" if not NAME_RE.fullmatch(name)
@@ -145,7 +156,7 @@ class Plugins:
                 log(f"plugin {f} skipped: {why}")
                 continue
             modules[modname] = name
-            err = self._setup(name, modname, os.path.join(self.folder, f))
+            err = self._setup(name, modname, os.path.join(folder, f))
             if err:
                 self.failed[name] = err
                 log(f"plugin {name} failed to load: {err}")

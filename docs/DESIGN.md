@@ -76,7 +76,7 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 | `GROVY_DEBUG` | unset | log HTTP requests |
 | `GROVY_WIDGETS` | `1` | `0` = don't tell Claude sessions about widgets and pages (applies to sessions started afterwards) |
 | `GROVY_OOM_AVOID` | `1` | `0` = don't move sessions out of systemd-oomd's way (see "Out of memory") |
-| `GROVY_PLUGINS` | `1` | `0` = don't load `~/.config/grovy/plugins/` (see "Making it yours") |
+| `GROVY_PLUGINS` | `1` | `0` = load no daemon plugins, built-in ones included (see "Making it yours") |
 | `GROVY_SUBAGENT_HOOKS` | `0` | `1` = forward every hook of subagents (normally only permission requests, notifications, start/stop and tool calls, which feed the background list) |
 
 ## Notifications (Telegram or anything else)
@@ -130,7 +130,9 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   and even with `GROVY_WIDGETS=0`: for example how to use a widget type `custom.js` adds. It is read at each start,
   resume, `/clear` and `/compact`.
 * **`plugins/*.py`** run inside the daemon, loaded once it is serving (restart it to reload; `GROVY_PLUGINS=0` loads
-  none; events in the first moments after a start may not reach them). Each defines `setup(grovy)` and uses the `Api`
+  none; events in the first moments after a start may not reach them). grovy's own features built this way live in
+  `plugins/` in the grovy folder and load the same way, together with yours in name order: your `NAME.py` replaces
+  the built-in of that name (copy it and edit), and an empty `NAME.off` beside yours turns it off. Each defines `setup(grovy)` and uses the `Api`
   it is given (`grovylib/plugins.py`, example in `examples/plugin.py`):
   * `on("event" | "state" | "notify", fn)`.
   * `route("GET" | "POST", path, fn)` for `/api/x/PLUGIN/PATH`. It sits behind the token. POST is checked like the

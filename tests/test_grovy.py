@@ -1037,12 +1037,14 @@ def setup(grovy):
 
 
 class TestPlugins(StoreCase):
-    def load(self, files, env=None):
-        folder = tempfile.mkdtemp(dir=TMP)
+    def load(self, files, env=None, builtin=None):
+        folder, ours = tempfile.mkdtemp(dir=TMP), tempfile.mkdtemp(dir=TMP)
         for name, code in files.items():
             write_plugin(folder, name, code)
+        for name, code in (builtin or {}).items():
+            write_plugin(ours, name, code)
         with mock.patch.dict(os.environ, env or {}), mock.patch("sys.stderr", io.StringIO()) as err:
-            host = plugins.Plugins(self.store, folder).load()
+            host = plugins.Plugins(self.store, folder, builtin=ours).load()
         self.store.plugins = host
         return host, err.getvalue()
 
@@ -1063,8 +1065,20 @@ class TestPlugins(StoreCase):
         # what a failing plugin registered before failing is gone: only good's handlers remain
         self.assertEqual({n for e in host.handlers.values() for n, _ in e}, {"good"})
         self.assertIn("failed to load", log)
-        host, _ = self.load({"good.py": GOOD_PLUGIN}, env={"GROVY_PLUGINS": "0"})
+        host, _ = self.load({"good.py": GOOD_PLUGIN}, env={"GROVY_PLUGINS": "0"}, builtin={"ours.py": GOOD_PLUGIN})
         self.assertEqual((host.loaded, host.thread), ([], None))
+
+    def test_builtin_plugins(self):
+        """grovy's own plugins load like the user's; the user's file of the same name replaces one, NAME.off drops it."""
+        mark = "def setup(grovy):\n    grovy.route('GET', 'who', lambda r: %r)\n"
+        host, _ = self.load({"mine.py": mark % "mine", "swap.py": mark % "user's", "gone.off": ""},
+                            builtin={"keep.py": mark % "built-in", "swap.py": mark % "built-in", "gone.py": mark % "x",
+                                     "_skip.py": "raise SystemExit"})
+        self.assertEqual(host.loaded, ["keep", "mine", "swap"])
+        self.assertEqual(host.handle("GET", "swap", "who", {}, None)[0], 200)
+        self.assertIn(b"user's", host.handle("GET", "swap", "who", {}, None)[1])
+        self.assertIn(b"built-in", host.handle("GET", "keep", "who", {}, None)[1])
+        self.assertEqual(host.failed, {})
 
     def test_events_reach_plugins_as_copies_off_the_lock(self):
         host, _ = self.load({"good.py": GOOD_PLUGIN})
@@ -1208,7 +1222,7 @@ class TestPluginRoutes(unittest.TestCase):
         folder = tempfile.mkdtemp(dir=TMP)
         write_plugin(folder, "good.py", GOOD_PLUGIN)
         with mock.patch("sys.stderr", io.StringIO()):
-            cls.store.plugins = plugins.Plugins(cls.store, folder).load()
+            cls.store.plugins = plugins.Plugins(cls.store, folder, builtin=tempfile.mkdtemp(dir=TMP)).load()
         cls.httpd = grovyd.HttpServer(("127.0.0.1", 0), grovyd.Http)
         cls.httpd.store, cls.httpd.token = cls.store, "t" * 32
         cls.httpd.page = grovyd.load_index()
