@@ -68,6 +68,7 @@ The plugin must be built only on public APIs (D10), so these come first.
 - [x] Session start gets a pointer (specs, counts, claims, the commands), not the index; `grovy spec guide` holds the conventions (D33) {#R19}
 - [x] After-edit notes: only the problems the edit introduced, plus a count of older ones (D34) {#R20}
 - [x] Check: index or part over 8 KB; parts must stay inside the repo; specs are index.md files with a numeric `spec:` {#R21}
+- [ ] Subagents get the spec conventions only from a note after a broken hand edit: find a way to tell them up front (check whether a SubagentStart hook can add context; it isn't verified) (third review) {#R22}
 
 ## Glossary
 

@@ -409,15 +409,24 @@ elsewhere. Everything is designed to keep Claude's context small (an adversarial
 * SessionStart (`grovy.context`): only a pointer, under 600 characters: one line per spec (counts, items in
   progress with their claim) and the commands. The conventions (`GUIDE`) are read on demand with `grovy spec guide`,
   like a skill; parts and the index are never injected.
-* Reading: `grovy spec status` (open items, one line each) and `grovy spec show R7` (one item, decision or term, where
-  it is, and the live decisions that mention it) instead of reading files.
+* Reading: `grovy spec status` (items in progress, then at most 5 todo per section with a count of the rest; `--all`)
+  and `grovy spec show R7` or `show spec-mode#R7` (one item, decision or term, where it is, and up to 8 live
+  decisions that mention it outside code spans) instead of reading files.
 * Writing: `grovy spec add|claim|tick|todo|drop|decide|term` assign IDs (the highest in use plus one: no counter to
-  keep), change the line in place under a lock on the index, and print one line plus any problem they caused. Claude
-  never has to read a file before writing to it (Claude Code's Edit needs a Read first, which made one decision cost
-  ~3k tokens). `claim` takes `$GROVY_SESSION` and refuses an item someone else claimed. Editing by hand stays allowed.
+  keep) and change the line in place, and print one line plus any problem they caused. Claude never has to read a
+  file before writing to it (Claude Code's Edit needs a Read first, which made one decision cost ~3k tokens). Each
+  write holds a lock (a file in the temp dir named after the spec, since the spec's own files get replaced) and
+  reloads the spec inside it, so parallel subagents get distinct IDs and never change a line that moved. Headings
+  (`--under`) match exactly first, else only when one heading contains the words, across all the spec's files; the
+  first item of a spec goes under a new `## Roadmap`, never into the header. `decide` goes right after the last
+  decision. `claim` takes `$GROVY_SESSION` (a subagent: `--as SESSION/ROLE`) and refuses an item claimed by anyone
+  else, another subagent of the same session included. Editing by hand stays allowed.
 * After a hand edit to a `.md` file (`grovy.after_edit`, glob `*.md`): if it belongs to a spec, the spec is checked and
-  only the problems that weren't there before (compared without line numbers) go back to Claude, with a count of
-  older ones; nothing when nothing new. A subagent (which gets no SessionStart) is also pointed at `grovy spec guide`.
+  only the problems that weren't there before (compared without line numbers or sizes) go back to Claude, with a
+  count of older ones; nothing when nothing new. The baseline is taken at session start; without one (the daemon
+  restarted since) a note gives only the number of problems. A subagent (which gets no SessionStart) is also pointed
+  at `grovy spec guide`, but only by such a note: one that only reads a spec, or edits it cleanly, never hears of the
+  commands (R22).
   Checks: format version, duplicate IDs, an item without an ID, `doing` without a claim, a decision without a date, a
   missing or outside part, a file over 8 KB (each Read of it costs that much). IDs in code spans, fenced blocks and
   HTML comments are examples, not IDs; quoted and numbered list items count like others; only `D` IDs make decisions.

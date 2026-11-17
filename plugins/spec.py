@@ -443,6 +443,7 @@ def pointer(cwd, grovy_bin="grovy"):
     lines = ["This repo keeps specs (living roadmap, documentation and decisions) under grovy spec mode:"]
     for index in indexes:
         spec = load(index, root)
+        seen_problems(index, spec)
         s = summary(spec)
         doing = [f"{it['id']} @{it['claim']}" for it in spec["items"] if it["state"] == "doing" and it["id"]]
         lines.append(f"- {spec['rel']}: {spec['title']} [{spec['status']}], {s['done']}/{s['total']} done"
@@ -460,7 +461,14 @@ _last_lock = threading.Lock()
 
 
 def problem_key(p):
-    return re.sub(r"^([^:]+):\d+:", r"\1:", p)
+    """A problem without what moves when lines are added (line numbers, sizes): the same problem stays the same."""
+    return re.sub(r"\d+ KB", "N KB", re.sub(r":\d+\b", "", p))
+
+
+def seen_problems(index, spec):
+    """Take a spec's current problems as the baseline (a session starting knows nothing of them yet)."""
+    with _last_lock:
+        _last.setdefault(index, {problem_key(p) for p in spec["problems"]})
 
 
 def note_for(path, subagent=False, grovy_bin="grovy"):
@@ -473,7 +481,10 @@ def note_for(path, subagent=False, grovy_bin="grovy"):
     with _last_lock:
         before = _last.get(index)
         _last[index] = set(now)
-    new = [p for k, p in now.items() if before is None or k not in before]
+    if before is None:   # no baseline (the daemon restarted): which are this edit's is unknown, so just a count
+        return (f"grovy spec check ({spec['rel']}): {len(now)} problem(s) in this spec: `{grovy_bin} spec check`"
+                + (f"\nSpec conventions: `{grovy_bin} spec guide`." if subagent else "")) if now else None
+    new = [p for k, p in now.items() if k not in before]
     if not new:
         return None
     old = len(now) - len(new)
@@ -555,6 +566,10 @@ class Fail(Exception):
     pass
 
 
+WHO_RE = re.compile(r"[A-Za-z0-9_.-]{1,40}(/[A-Za-z0-9_.-]{1,40})?")
+STATUS_TODO = 5   # todo items `status` lists per section (the rest is counted)
+
+
 def pick(root, name=None, id_=None):
     """The spec a command is about: --spec NAME, else the one holding the ID, else the only (or only active) one."""
     specs = [load(i, root) for i in find_specs(root)]
@@ -578,6 +593,14 @@ def pick(root, name=None, id_=None):
     raise Fail(f"several specs here ({', '.join(s['name'] for s in specs)}): add --spec NAME")
 
 
+def split_ref(ref, name):
+    """`spec-mode#R7` -> ("spec-mode", "R7"); a bare ID keeps --spec."""
+    if "#" in ref:
+        spec, _, id_ = ref.partition("#")
+        return spec or name, id_
+    return name, ref
+
+
 def find(spec, id_):
     for i, kind, x in all_ids(spec):
         if i == id_ and kind != "headings":
@@ -588,71 +611,135 @@ def find(spec, id_):
     return None, None
 
 
-def edit(spec, rel, change):
-    """Change one file of the spec in place: change(lines) edits the list. Locked against other commands."""
+class Locked:
+    """Every write to a spec holds this, and reloads the spec inside it: two subagents writing at once can't take
+    the same ID or change a line that moved. The lock file sits outside the repo (the spec's files get replaced)."""
+
+    def __init__(self, index, root):
+        import hashlib
+        import tempfile
+        key = hashlib.sha256(os.path.realpath(index).encode()).hexdigest()[:16]
+        self.path = os.path.join(tempfile.gettempdir(), f"grovy-spec-{os.getuid()}-{key}.lock")
+        self.index, self.root = index, root
+
+    def __enter__(self):
+        self.f = open(self.path, "a")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return load(self.index, self.root)
+
+    def __exit__(self, *exc):
+        self.f.close()   # releases the lock
+
+
+def write(spec, rel, change):
+    """Change one file of the spec in place: change(lines) edits the list of lines. Call it holding Locked."""
     path = spec["paths"][rel]
-    with open(spec["index"]) as lockf:
-        fcntl.flock(lockf, fcntl.LOCK_EX)
-        with open(path, encoding="utf-8", newline="") as f:
-            raw = f.read()
-        crlf = "\r\n" in raw
-        lines = raw.replace("\r\n", "\n").split("\n")
-        change(lines)
-        out = "\n".join(lines)
-        tmp = f"{path}.grovy-{os.getpid()}"
+    with open(path, encoding="utf-8", newline="") as f:
+        raw = f.read()
+    crlf = "\r\n" in raw
+    lines = raw.replace("\r\n", "\n").split("\n")
+    change(lines)
+    out = "\n".join(lines)
+    tmp = f"{path}.grovy-{os.getpid()}"
+    try:
         with open(tmp, "w", encoding="utf-8", newline="") as f:
             f.write(out.replace("\n", "\r\n") if crlf else out)
         os.chmod(tmp, os.stat(path).st_mode & 0o7777)
         os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
-def append_under(lines, heading, new):
-    """Insert `new` lines after the last list line of the section titled `heading` (or at the end of the file)."""
-    start = None
-    if heading:
-        for n, line in enumerate(lines):
-            h = HEADING_RE.match(line)
-            if h and heading.lower() in ID_RE.sub("", h.group(2)).lower():
-                start, level = n, len(h.group(1))
-        if start is None:
-            raise Fail(f"no heading matching {heading!r}")
-        end = len(lines)
-        for n in range(start + 1, len(lines)):
-            h = HEADING_RE.match(lines[n])
-            if h and len(h.group(1)) <= level:
-                end = n
-                break
-    else:
-        start, end = 0, len(lines)
-    last, fence = None, False
-    for n in range(start, end):
+def heading_at(lines, heading, body_from=0):
+    """The line of the heading named `heading`: an exact match (case and IDs aside), else the only one containing
+    it. None if none; Fail if several could be meant."""
+    norm = lambda t: " ".join(ID_RE.sub("", t).split()).lower()
+    want = norm(heading)
+    found, fence = [], False
+    for n in range(body_from, len(lines)):
         if FENCE_RE.match(lines[n]):
             fence = not fence
             continue
-        if fence:
-            continue
-        if re.match(r"^\s*" + LIST + r" ", lines[n]) or (last == n - 1 and lines[n].startswith("  ") and lines[n].strip()):
-            last = n
-    at = last + 1 if last is not None else end
-    while at == end and at > 0 and not lines[at - 1].strip():
+        h = None if fence else HEADING_RE.match(lines[n])
+        if h:
+            found.append((n, norm(h.group(2))))
+    exact = [n for n, t in found if t == want]
+    if exact:
+        return exact[-1]
+    loose = [n for n, t in found if want in t]
+    if len(loose) > 1:
+        raise Fail(f"several headings match {heading!r}: give more of it")
+    return loose[0] if loose else None
+
+
+def section_end(lines, start):
+    level = len(HEADING_RE.match(lines[start]).group(1))
+    fence = False
+    for n in range(start + 1, len(lines)):
+        if FENCE_RE.match(lines[n]):
+            fence = not fence
+        elif not fence and (h := HEADING_RE.match(lines[n])) and len(h.group(1)) <= level:
+            return n
+    return len(lines)
+
+
+def body_start(lines):
+    _, skip = parse_header("\n".join(lines))
+    return skip
+
+
+def item_end(lines, n):
+    """The last line of the list entry starting at line n (its continuation lines are indented deeper)."""
+    indent = len(QUOTE_RE.sub("", lines[n])) - len(QUOTE_RE.sub("", lines[n]).lstrip())
+    end = n
+    while end + 1 < len(lines):
+        nxt = QUOTE_RE.sub("", lines[end + 1])
+        if not nxt.strip() or len(nxt) - len(nxt.lstrip()) <= indent:
+            break
+        end += 1
+    return end
+
+
+def append_under(lines, heading, new):
+    """Insert `new` after the last list entry of the section `heading` (or of the body), never in a fence or the
+    YAML header; at the section's end when it has no list yet."""
+    first = body_start(lines)
+    if heading:
+        start = heading_at(lines, heading, first)
+        if start is None:
+            raise Fail(f"no heading {heading!r}")
+        end = section_end(lines, start)
+    else:
+        start, end = first, len(lines)
+    last, fence, n = None, False, start
+    while n < end:
+        if FENCE_RE.match(lines[n]):
+            fence = not fence
+        elif not fence and re.match(r"^\s*(?:>\s*)*" + LIST + r" ", lines[n]):
+            last = n = item_end(lines, n)
+        n += 1
+    if last is not None:
+        lines[last + 1:last + 1] = new
+        return
+    at = end
+    while at > start + 1 and not lines[at - 1].strip():
         at -= 1
-    if last is None and at > 0 and lines[at - 1].strip():
-        new = [""] + new
-    lines[at:at] = new
+    lines[at:at] = ([""] if lines[at - 1].strip() else []) + new + ([""] if at < len(lines) and lines[at].strip() else [])
 
 
 def ensure_section(lines, title):
-    if not any((h := HEADING_RE.match(l)) and h.group(2).strip().lower() == title.lower() for l in lines):
+    if heading_at(lines, title, body_start(lines)) is None:
         while lines and not lines[-1].strip():
             lines.pop()
-        lines += ["", f"## {title}", "", ""]
+        lines += ["", f"## {title}", ""]
 
 
 def report(before, after):
     """The problems a command's change introduced (normally none)."""
     old = {problem_key(p) for p in before["problems"]}
     new = [p for p in after["problems"] if problem_key(p) not in old]
-    return "\n".join("problem: " + p for p in new)
+    return "".join("\nproblem: " + p for p in new)
 
 
 def cmd(argv):
@@ -661,9 +748,10 @@ def cmd(argv):
     p.add_argument("--spec", help="which spec (its folder name), when the repo has several")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("guide", help="the conventions")
-    sub.add_parser("status", help="each spec's open items, one line each")
+    s = sub.add_parser("status", help="each spec's open items, one line each")
+    s.add_argument("--all", action="store_true", help="every todo item, not the first few per section")
     sub.add_parser("check", help="all of a spec's problems")
-    s = sub.add_parser("show", help="one item, decision or term, with what relates to it")
+    s = sub.add_parser("show", help="one item, decision or term (R7 or SPEC#R7), with what relates to it")
     s.add_argument("id")
     s = sub.add_parser("add", help="add a roadmap item; prints its ID")
     s.add_argument("text"), s.add_argument("--under", help="the heading to put it under (default: the last item's)")
@@ -672,7 +760,7 @@ def cmd(argv):
                                        "todo": "back to todo"}[name])
         s.add_argument("id")
         if name == "claim":
-            s.add_argument("--as", dest="who", help="who works on it (default: $GROVY_SESSION)")
+            s.add_argument("--as", dest="who", help="who works on it (default: $GROVY_SESSION; a subagent: SESSION/ROLE)")
     s = sub.add_parser("drop", help="drop an item, saying why")
     s.add_argument("id"), s.add_argument("why")
     s = sub.add_parser("decide", help="record a decision; prints its ID")
@@ -686,20 +774,30 @@ def cmd(argv):
     root = git_root(os.getcwd())
     if not root:
         raise Fail("not in a git repository (specs live in git repos)")
+    if hasattr(a, "id"):
+        a.spec, a.id = split_ref(a.id, a.spec)
     if a.cmd == "status":
-        specs = [load(i, root) for i in find_specs(root)]
-        if a.spec:
-            specs = [pick(root, a.spec)]
+        specs = [pick(root, a.spec)] if a.spec else [load(i, root) for i in find_specs(root)]
         if not specs:
             raise Fail("this repo has no spec yet (`grovy spec guide`)")
         for spec in specs:
             s = summary(spec)
             print(f"{spec['rel']}: {spec['title']} [{spec['status']}], {s['done']}/{s['total']} done"
                   + (f", {len(spec['problems'])} problem(s): `grovy spec check`" if spec["problems"] else ""))
-            for it in sorted((it for it in spec["items"] if it["state"] in ("doing", "todo")),
-                             key=lambda it: it["state"] != "doing"):
-                mark = f"@{it['claim']}" if it["state"] == "doing" else "todo"
-                print(f"  {it['id'] or '(no id)'} {mark}: {it['text'][:110]}" + ("…" if len(it["text"]) > 110 else ""))
+            line = lambda it, mark: print(f"  {it['id'] or '(no id)'} {mark}: {it['text'][:110]}"
+                                          + ("…" if len(it["text"]) > 110 else ""))
+            for it in spec["items"]:
+                if it["state"] == "doing":
+                    line(it, f"@{it['claim']}")
+            by = {}
+            for it in spec["items"]:
+                if it["state"] == "todo":
+                    by.setdefault((it["file"], tuple(it["section"])), []).append(it)
+            for (_, sec), todo in by.items():
+                for it in todo if a.all else todo[:STATUS_TODO]:
+                    line(it, "todo")
+                if not a.all and len(todo) > STATUS_TODO:
+                    print(f"  … {len(todo) - STATUS_TODO} more todo under {sec[-1] if sec else '(top)'} (--all)")
         return 0
     if a.cmd == "check":
         spec = pick(root, a.spec)
@@ -726,12 +824,22 @@ def cmd(argv):
                    and pat.search(CODE_RE.sub("", d["text"]))]   # `show R7` in backticks is an example
         for d in related[:8]:
             print(f"- {d['id']} {d['date'] or ''}: {d['text'][:300]}")
+        if len(related) > 8:
+            print(f"… {len(related) - 8} more decisions mention it")
         if kind == "decisions" and x.get("supersedes"):
             print("supersedes: " + ", ".join(x["supersedes"]))
         return 0
-    # writes
+    # writes: choose the spec, then lock it and work on a fresh load
+    chosen = pick(root, a.spec, getattr(a, "id", None) if a.cmd in ("claim", "tick", "todo", "drop") else None)
+    with Locked(chosen["index"], root) as spec:
+        out = write_cmd(a, spec)
+        after = load(spec["index"], root)
+    print(out + report(spec, after))
+    return 0
+
+
+def write_cmd(a, spec):
     if a.cmd in ("claim", "tick", "todo", "drop"):
-        spec = pick(root, a.spec, a.id)
         kind, x = find(spec, a.id)
         if kind != "items":
             raise Fail(f"{a.id} is not a roadmap item in {spec['rel']}" + (f" (it's a {kind[:-1]})" if kind else ""))
@@ -741,46 +849,53 @@ def cmd(argv):
             who = a.who or os.environ.get("GROVY_SESSION") or os.environ.get("CCS_SESSION")
             if not who:
                 raise Fail("say who works on it: --as NAME")
-            if x["claim"] and x["claim"] != who and x["claim"].split("/")[0] != who.split("/")[0]:
+            if not WHO_RE.fullmatch(who):
+                raise Fail(f"--as {who!r}: letters, digits, _ . - and at most one / (SESSION/ROLE)")
+            if x["claim"] and x["claim"] != who:
                 raise Fail(f"{a.id} is claimed by @{x['claim']}: leave it, or ask the user")
 
         def change(lines):
             n = x["line"] - 1
             m = MARK_RE.match(lines[n])
-            if not m:
+            if not m or ids_in(" ".join(lines[n:item_end(lines, n) + 1]))[-1:] != [a.id]:
                 raise Fail(f"can't find {a.id}'s checkbox at {x['file']}:{x['line']}")
-            rest = lines[n][m.end():]
-            lines[n] = m.group(1) + MARKS[state] + m.group(3) + (f"@{who} " if who else "") + rest
+            lines[n] = m.group(1) + MARKS[state] + m.group(3) + (f"@{who} " if who else "") + lines[n][m.end():]
             if a.cmd == "drop":
-                at = n
-                while at + 1 < len(lines) and lines[at + 1].strip() and lines[at + 1][:1] in " \t" \
-                        and not ITEM_RE.match(QUOTE_RE.sub("", lines[at + 1])):
-                    at += 1
-                lines[at] = re.sub(r"(\s*\{#" + re.escape(a.id) + r"\})?\s*$",
-                                   lambda m: f" (dropped: {a.why.strip()})" + (m.group(1) or ""), lines[at], count=1)
-        edit(spec, x["file"], change)
-        after = load(spec["index"], root)
-        print(f"{a.id} {state}" + (f" @{who}" if who else "") + (("\n" + report(spec, after)) if report(spec, after) else ""))
-        return 0
+                end = item_end(lines, n)
+                why = " ".join(a.why.split())
+                lines[end] = re.sub(r"(\s*\{#" + re.escape(a.id) + r"\})?\s*$",
+                                    lambda m: f" (dropped: {why})" + (m.group(1) or ""), lines[end], count=1)
+        write(spec, x["file"], change)
+        return f"{a.id} {state}" + (f" @{who}" if who else "")
     if a.cmd == "add":
-        spec = pick(root, a.spec)
-        pre = sorted(item_prefixes(spec))[0]
-        new = next_id(spec, pre)
+        new = next_id(spec, sorted(item_prefixes(spec))[0])
         text = " ".join(a.text.split())
-        under = a.under
-        rel = "index.md"
-        if not under and spec["items"]:
+        under, rel = a.under, "index.md"
+        if under:   # the same rule as heading_at, across all the spec's files
+            norm = lambda t: " ".join(t.split()).lower()
+            hits = [h for h in spec["headings"] if norm(h["title"]) == norm(under)]
+            if not hits:
+                hits = [h for h in spec["headings"] if norm(under) in norm(h["title"])]
+                if len(hits) > 1:
+                    raise Fail(f"several headings match {under!r} ({', '.join(h['title'] for h in hits[:5])}): "
+                               "give more of it")
+            if not hits:
+                raise Fail(f"no heading {under!r} in {spec['rel']}")
+            rel, under = hits[-1]["file"], hits[-1]["title"]
+        elif spec["items"]:
             last = spec["items"][-1]
             rel, under = last["file"], (last["section"][-1] if last["section"] else None)
-        elif under:
-            rel = next((h["file"] for h in spec["headings"] if under.lower() in h["title"].lower()), "index.md")
-        edit(spec, rel, lambda lines: append_under(lines, under, [f"- [ ] {text} {{#{new}}}"]))
-        after = load(spec["index"], root)
-        r = report(spec, after)
-        print(f"added {new} to {spec['rel']}" + (f" under {under}" if under else "") + (f"\n{r}" if r else ""))
-        return 0
+        else:
+            under = "Roadmap"
+        line = f"- [ ] {text} {{#{new}}}"
+
+        def change(lines):
+            if under == "Roadmap" and not spec["items"]:
+                ensure_section(lines, "Roadmap")
+            append_under(lines, under, [line])
+        write(spec, rel, change)
+        return f"added {new} to {spec['rel']}" + (f" under {under}" if under else "")
     if a.cmd == "decide":
-        spec = pick(root, a.spec)
         new = next_id(spec, "D")
         sup = [s.strip().upper() for s in (a.supersedes or "").split(",") if s.strip()]
         known = {d["id"] for d in spec["decisions"]}
@@ -793,30 +908,39 @@ def cmd(argv):
             text += " Supersedes " + ", ".join(sup) + "."
         line = f"- {{#{new}}} {datetime.date.today().isoformat()}: {text}"
         if spec["decisions"]:
-            rel = spec["decisions"][-1]["file"]
-            edit(spec, rel, lambda lines: append_under(lines, None, [line]))
-        elif "decisions.md" in spec["files"]:
-            rel = "decisions.md"
-            edit(spec, rel, lambda lines: append_under(lines, None, [line]))
+            last = max((d for d in spec["decisions"] if d["file"] == spec["decisions"][-1]["file"]),
+                       key=lambda d: d["line"])
+            rel = last["file"]
+
+            def change(lines):   # right after the last decision (and its continuation lines)
+                end = item_end(lines, last["line"] - 1)
+                lines[end + 1:end + 1] = [line]
         else:
-            rel = "index.md"
-            edit(spec, rel, lambda lines: (ensure_section(lines, "Decisions"), append_under(lines, "Decisions", [line])))
-        after = load(spec["index"], root)
-        r = report(spec, after)
-        print(f"recorded {new} in {spec['rel']}/{rel}" + (f"\n{r}" if r else ""))
-        return 0
+            rel = "decisions.md" if "decisions.md" in spec["files"] else "index.md"
+
+            def change(lines):
+                if rel == "index.md" or heading_at(lines, "Decisions", body_start(lines)) is not None:
+                    ensure_section(lines, "Decisions")
+                    append_under(lines, "Decisions", [line])
+                else:
+                    append_under(lines, None, [line])
+        write(spec, rel, change)
+        return f"recorded {new} in {spec['rel']}/{rel}"
     if a.cmd == "term":
-        spec = pick(root, a.spec)
         new = next_id(spec, "G")
         line = f"**{' '.join(a.term.split())}** {{#{new}}}: {' '.join(a.definition.split())}"
 
         def change(lines):
             ensure_section(lines, "Glossary")
-            append_under(lines, "Glossary", [line])
-        edit(spec, "index.md", change)
-        print(f"added {new} ({a.term}) to {spec['rel']}")
-        return 0
-    return 2
+            start = heading_at(lines, "Glossary", body_start(lines))
+            end = section_end(lines, start)
+            at = end
+            while at > start + 1 and not lines[at - 1].strip():
+                at -= 1
+            lines[at:at] = ([""] if lines[at - 1].strip() else []) + [line] + ([""] if at < len(lines) and lines[at].strip() else [])
+        write(spec, "index.md", change)
+        return f"added {new} ({a.term}) to {spec['rel']}"
+    return ""
 
 
 if __name__ == "__main__":

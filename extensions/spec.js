@@ -70,7 +70,7 @@ grovy.extension("spec", grovy => {
   // chips opening the spec there. Messages are drawn once: those drawn before the IDs arrive are linked after.
   const REF = /\b(?:([a-z0-9][a-z0-9_.-]*)#)?([A-Z][A-Za-z]{0,3}\d{1,5})\b/g;
   const HAS_REF = new RegExp(REF.source);   // without /g: test() keeps no position between texts
-  let ids = null, idsFor = null, waiting = [], fetched = 0, fetching = false;
+  let ids = null, idsFor = null, waiting = [], fetched = 0, fetching = false, later = null;
   function fetchIds() {   // on opening a session, and again (at most every 15s) when a reply names an unknown ID
     const session = idsFor;
     if (!session || fetching) return;
@@ -82,11 +82,15 @@ grovy.extension("spec", grovy => {
       for (const n of w) if (n.isConnected) link(n);
     }).catch(() => {}).finally(() => { fetching = false; });
   }
-  grovy.on("route", session => { ids = null; idsFor = session; waiting = []; fetchIds(); });
+  grovy.on("route", session => { ids = null; idsFor = session; waiting = []; clearTimeout(later); later = null; fetchIds(); });
   grovy.on("render", node => {
     if (!idsFor) return;
     if (!ids) { waiting.push(node); return; }
-    if (link(node) && Date.now() - fetched > 15000) { waiting.push(node); fetchIds(); }
+    if (!link(node)) return;
+    waiting.push(node);   // it names an ID not known yet: link it once the IDs are fetched again (at most every 15s)
+    const wait = 15000 - (Date.now() - fetched);
+    if (wait <= 0) fetchIds();
+    else if (!later) later = setTimeout(() => { later = null; fetchIds(); }, wait);
   });
 
   function link(node) {   // true if it saw an ID-like word it doesn't know (Claude may just have added it)
@@ -122,10 +126,11 @@ grovy.extension("spec", grovy => {
   async function load(shout) {
     const o = open; if (!o) return;
     o.loaded = Date.now();
+    const seq = o.seq = (o.seq || 0) + 1;   // only the latest load may draw: an older one can finish last
     let s;
     try { s = await get("spec", {session: o.session, rel: o.rel, ...(o.stamp && !shout ? {if: o.stamp} : {})}); }
     catch (e) { if (shout && !o.panel.closed) o.panel.body.replaceChildren(h("div", {class: "sys"}, e.message)); return; }
-    if (o.panel.closed || s.same) return;   // unchanged since it was drawn: leave it as you were reading it
+    if (o.panel.closed || seq !== o.seq || s.same) return;   // unchanged since drawn: leave it as you were reading it
     o.stamp = s.stamp;
     const opened = new Set([...o.panel.body.querySelectorAll("details[open] > summary")].map(x => x.dataset.k));
     o.panel.title(s.title);

@@ -3081,6 +3081,80 @@ class TestSpecPlugin(unittest.TestCase):
         self.assertEqual(self.sp.load(self.index, self.repo)["problems"], [])
         self.assertEqual(self.run_cmd("tick", "D1")[0], 1)               # not an item
 
+    def test_no_baseline_gives_a_count(self):
+        """Third review: the first edit after a daemon restart was blamed for every existing problem."""
+        self.write("index.md", SPEC_INDEX.replace("- [ ] Write the parser {#R2}", "- [ ] a\n- [ ] b"))
+        self.assertEqual(self.sp.note_for(self.index), "grovy spec check (specs/demo): 2 problem(s) in this spec: "
+                                                       "`grovy spec check`")
+        self.sp._last.clear()
+        self.sp.seen_problems(self.index, self.sp.load(self.index, self.repo))   # what a session start does
+        self.assertIsNone(self.sp.note_for(self.index))
+
+    def test_problems_keep_their_key_when_lines_move(self):
+        """Third review: line numbers and sizes inside a problem made old problems look new after any edit."""
+        self.write("decisions.md", SPEC_DECISIONS + "- {#D2} 2026-11-19: Reused.\n")
+        self.sp.note_for(self.index)
+        self.write("decisions.md", "\n\n" + SPEC_DECISIONS + "- {#D2} 2026-11-19: Reused.\n")
+        self.assertIsNone(self.sp.note_for(self.index))
+        self.assertEqual(self.sp.problem_key("a.md:3: R1 is already used at b.md:40"), "a.md: R1 is already used at b.md")
+        self.assertEqual(self.sp.problem_key("a.md: 9 KB; split"), self.sp.problem_key("a.md: 12 KB; split"))
+
+    def test_parallel_writes(self):
+        """Third review: parallel adds took the same ID, and a tick could hit an item that had moved."""
+        procs = [subprocess.Popen([sys.executable, os.path.join(ROOT, "plugins", "spec.py"), "add", f"item {n}"],
+                                  cwd=self.folder, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                 for n in range(16)]
+        outs = [p.communicate(timeout=30)[0] for p in procs]
+        self.sp._scans.clear()
+        spec = self.sp.load(self.index, self.repo)
+        self.assertEqual(spec["problems"], [], outs)
+        self.assertEqual(sorted(int(i["id"][1:]) for i in spec["items"]), list(range(2, 22)))
+        self.run_cmd("add", "moves things", "--under", "Done so far")   # lines shift above the roadmap
+        self.assertEqual(self.run_cmd("tick", "R2")[1].strip(), "R2 done")
+        self.assertIn("- [x] Write the parser {#R2}", self.text())
+
+    def test_add_into_a_fresh_spec(self):
+        """Third review: the first add of a spec without items went into the YAML header's block list."""
+        self.write("index.md", "---\nspec: 1\nparts:\n  - decisions.md\n---\n\n# Fresh\n")
+        rc, out = self.run_cmd("add", "first")
+        self.assertEqual((rc, out.strip()), (0, "added R1 to specs/demo under Roadmap"))
+        self.assertEqual(self.text(), "---\nspec: 1\nparts:\n  - decisions.md\n---\n\n# Fresh\n\n## Roadmap\n\n"
+                                      "- [ ] first {#R1}\n")
+        self.assertEqual(self.sp.load(self.index, self.repo)["files"], ["index.md", "decisions.md"])
+
+    def test_headings_match_exactly_first(self):
+        """Third review: --under Now went under "Known issues"; decide went under a later list."""
+        self.write("index.md", SPEC_INDEX.replace("## Roadmap", "## Known issues\n\n- none\n\n## Now\n\n## Roadmap"))
+        self.run_cmd("add", "urgent", "--under", "now")
+        self.assertIn("## Now\n\n- [ ] urgent {#R6}\n\n## Roadmap", self.text())
+        self.assertEqual(self.run_cmd("add", "x", "--under", "o")[0], 1)   # several match: say which
+        self.write("decisions.md", SPEC_DECISIONS + "\n## Superseded notes\n\n- old stuff\n")
+        self.run_cmd("decide", "Third")
+        self.assertIn("  says. Supersedes D1.\n- {#D3}", self.text("decisions.md"))
+        self.assertTrue(self.text("decisions.md").endswith("- old stuff\n"))
+
+    def test_claims_and_refs(self):
+        self.assertEqual(self.run_cmd("claim", "R2", "--as", "me x")[0], 1)            # validated
+        self.assertEqual(self.run_cmd("claim", "R2", "--as", "s1/writer")[0], 0)
+        rc, out = self.run_cmd("claim", "R2", "--as", "s1/reviewer")                  # another subagent: refused
+        self.assertEqual(rc, 1, out)
+        rc, out = self.run_cmd("show", "demo#D1")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("(superseded by D2)", out)
+
+    def test_drop_a_nested_item(self):
+        self.write("index.md", SPEC_INDEX.replace("- [x] Lint {#R4}", "- [x] Lint {#R4}\n  - [ ] Nested {#R6}\n  next line"))
+        self.run_cmd("drop", "R6", "nope")
+        self.assertIn("  - [-] Nested (dropped: nope) {#R6}\n  next line", self.text())
+
+    def test_status_is_capped(self):
+        self.write("index.md", SPEC_INDEX.replace("- [ ] Write the parser {#R2}",
+                                                  "\n".join(f"- [ ] t{n} {{#R{n}}}" for n in range(10, 30))))
+        out = self.run_cmd("status")[1]
+        self.assertIn("… 15 more todo under Roadmap (--all)", out)
+        self.assertEqual(out.count(" todo: "), 5)
+        self.assertEqual(self.run_cmd("status", "--all")[1].count(" todo: "), 20)
+
     def test_routes(self):
         """The page asks by session; only a spec found in that session's repo is ever read."""
         routes = {}
@@ -3128,6 +3202,7 @@ class TestSpecPlugin(unittest.TestCase):
         meta, n = self.sp.parse_header("---\nspec: 1\nparts:\n  - a.md\n  - b.md\nnext: {R: 3}  # c\n---\nbody")
         self.assertEqual((meta, n), ({"spec": 1, "parts": ["a.md", "b.md"], "next": {"R": 3}}, 7))
         self.assertEqual(self.sp.parse_header("no header"), (None, 0))
+        self.assertIsNone(self.sp.note_for(self.index))   # the baseline: no problems
         self.write("index.md", SPEC_INDEX.replace("spec: 1", "spec: 2"))
         self.assertIn("this grovy reads format 1", self.sp.note_for(self.index))
 
