@@ -140,6 +140,13 @@ class Api:
     def log(self, msg):
         log(f"plugin {self.name}: {msg}")
 
+    def data_dir(self):
+        """A folder of this plugin's own, private to you (mode 0700), kept across restarts: $STATE/plugins/NAME/."""
+        self._alive("data_dir")
+        d = os.path.join(core.state_dir(), "plugins", self.name)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        return d
+
 
 def _modname(f):
     return f"grovy_plugin_{f[:-3].replace('-', '_')}"

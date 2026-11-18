@@ -3,6 +3,8 @@
 No API key needed: integration tests use a fake `claude` (a shell loop) inside real tmux,
 on a private tmux server socket (-L) so your own tmux sessions are never touched.
 """
+import base64
+import collections
 import io
 import ipaddress
 import json
@@ -18,6 +20,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import redirect_stdout
@@ -1379,6 +1382,217 @@ class TestBuiltinPlugins(StoreCase):
 
 
 @unittest.skipUnless(shutil.which("git"), "git not installed")
+def load_push_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("grovy_push_test", os.path.join(ROOT, "plugins", "push.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@unittest.skipUnless(shutil.which("openssl"), "needs the openssl command")
+class TestPushPlugin(unittest.TestCase):
+    """plugins/push.py: empty Web Push, the text fetched from grovy by the service worker."""
+
+    def setUp(self):
+        self.mod = load_push_module()
+        self.dir = tempfile.mkdtemp(dir=TMP)
+        self.sent, self.answer, self.done = [], None, threading.Event()
+        test = self
+
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n=-1): return b""
+
+        def opener(req, timeout):
+            test.sent.append(req)
+            try:
+                if test.answer:
+                    raise urllib.error.HTTPError(req.full_url, test.answer, "gone", {}, io.BytesIO(b"bye"))
+                return Resp()
+            finally:
+                test.done.set()
+        self.logs = []
+        self.grovy = type("G", (), {"log": lambda _, m: self.logs.append(m)})()
+        self.push = self.mod.Push(self.grovy, self.dir, "mailto:t@example.invalid", opener=opener)
+        self.ep = "https://push.example.invalid/sub/abc"
+
+    def wait(self, n):
+        for _ in range(100):
+            if len(self.sent) >= n:
+                return
+            time.sleep(0.02)
+        self.fail(f"expected {n} pushes, got {len(self.sent)}")
+
+    def test_vapid_token_is_a_valid_es256_jwt(self):
+        auth = self.push.vapid.header(self.ep)
+        m = re.fullmatch(r"vapid t=([^,]+), k=(\S+)", auth)
+        tok, k = m.groups()
+        head, claims, sig = tok.split(".")
+        pad = lambda x: x + "=" * (-len(x) % 4)
+        self.assertEqual(json.loads(base64.urlsafe_b64decode(pad(head))), {"typ": "JWT", "alg": "ES256"})
+        c = json.loads(base64.urlsafe_b64decode(pad(claims)))
+        self.assertEqual(c["aud"], "https://push.example.invalid")
+        self.assertEqual(c["sub"], "mailto:t@example.invalid")
+        self.assertLess(c["exp"] - time.time(), 24 * 3600 + 1)          # push services refuse longer
+        raw = base64.urlsafe_b64decode(pad(sig))
+        self.assertEqual(len(raw), 64)
+        self.assertEqual(base64.urlsafe_b64decode(pad(k)), self.push.vapid.public)
+        # verify with openssl: r||s back to DER, against the public key
+        def der_int(b):
+            b = b.lstrip(b"\0") or b"\0"
+            b = b"\0" + b if b[0] & 0x80 else b
+            return b"\x02" + bytes([len(b)]) + b
+        body = der_int(raw[:32]) + der_int(raw[32:])
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "sig"), "wb") as f:
+            f.write(b"\x30" + bytes([len(body)]) + body)
+        with open(os.path.join(d, "msg"), "wb") as f:
+            f.write(f"{head}.{claims}".encode())
+        subprocess.run(["openssl", "ec", "-in", self.push.vapid.key, "-pubout", "-out", os.path.join(d, "pub")],
+                       capture_output=True, check=True)
+        r = subprocess.run(["openssl", "dgst", "-sha256", "-verify", "pub", "-signature", "sig", "msg"], cwd=d,
+                           capture_output=True, text=True)
+        self.assertIn("Verified OK", r.stdout)
+        self.assertEqual(self.push.vapid.header(self.ep), auth)        # reused, not signed again
+        self.assertEqual(os.stat(self.push.vapid.key).st_mode & 0o777, 0o600)
+
+    def test_push_is_empty_and_the_text_is_fetched(self):
+        self.push.subscribe(self.ep)
+        self.push.notify("api", "input", "permission: Bash rm -rf build")
+        self.wait(1)
+        req = self.sent[0]
+        self.assertEqual((req.full_url, req.get_method(), req.data), (self.ep, "POST", b""))   # nothing in the push
+        self.assertTrue(req.get_header("Authorization").startswith("vapid t="))
+        self.assertEqual(req.get_header("Urgency"), "high")
+        self.assertEqual(req.get_header("Content-type"), "application/octet-stream")
+        self.assertRegex(req.get_header("Topic"), r"^[A-Za-z0-9_-]{22}$")   # RFC 8030: at most 32 base64url characters
+        got = self.push.take(self.ep)
+        self.assertEqual([(m["session"], m["kind"], m["text"]) for m in got["messages"]],
+                         [("api", "input", "permission: Bash rm -rf build")])
+        again = self.push.take(self.ep)
+        self.assertEqual(again["messages"], [])                         # taken once...
+        self.assertEqual(again["latest"]["text"], "permission: Bash rm -rf build")   # ...but a late push can re-show it
+        self.assertIsNone(self.push.take("https://push.example.invalid/other"))      # only subscribed devices
+        self.push.notify("api", "input", "again")
+        self.push.notify("api", "done", "finished")
+        self.wait(3)
+        topics = collections.Counter(r.get_header("Topic") for r in self.sent)   # (threads: any order)
+        self.assertEqual(sorted(topics.values()), [1, 2])              # same session and kind: replaces if undelivered
+
+    def test_subscriptions_persist_and_ended_ones_go(self):
+        self.push.subscribe(self.ep)
+        again = self.mod.Push(self.grovy, self.dir, "mailto:x@example.invalid")
+        self.assertTrue(again.known(self.ep))                           # kept across restarts
+        self.answer = 410
+        self.push.notify("api", "done", "finished")
+        self.wait(1)
+        for _ in range(100):
+            if not self.push.known(self.ep):
+                break
+            time.sleep(0.02)
+        self.assertFalse(self.push.known(self.ep))
+        self.assertFalse(self.mod.Push(self.grovy, self.dir, "mailto:x@example.invalid").known(self.ep))
+
+    def test_a_redirect_is_not_followed(self):
+        """A push service never redirects: following one would carry the signed token (and the POST) elsewhere."""
+        import http.server
+        hits = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                hits.append(self.path)
+                self.send_response(302)
+                self.send_header("Location", "/elsewhere")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            do_GET = do_POST
+            def log_message(self, *a): pass
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            p = self.mod.Push(self.grovy, self.dir, "mailto:t@example.invalid")   # the real opener
+            p._send(f"http://127.0.0.1:{srv.server_address[1]}/sub", False, "t")
+            self.assertEqual(hits, ["/sub"])
+            self.assertTrue(any("302" in m for m in self.logs))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_endpoints_must_be_https(self):
+        for bad in ("http://push.example/x", "https://user:pw@push.example/x", "file:///etc/passwd", "https:///x",
+                    None, 5, "https://x/" + "a" * 3000):
+            self.assertFalse(self.mod.valid_endpoint(bad), bad)
+        self.assertTrue(self.mod.valid_endpoint(self.ep))
+
+    def test_raw_signature(self):
+        r, s = (1).to_bytes(32, "big"), (b"\xff" * 32)
+        der = b"\x30\x45" + b"\x02\x20" + r + b"\x02\x21\x00" + s
+        self.assertEqual(self.mod.raw_signature(der), r + s)
+
+
+class TestPushRoutes(unittest.TestCase):
+    """The plugin loaded as grovy loads it, through the HTTP API."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which("openssl"):
+            raise unittest.SkipTest("needs the openssl command")
+        cls.reg = mock.patch.object(sessions, "registry", lambda: {})
+        cls.reg.start()
+        cls.store = store.Store(tempfile.mkdtemp(dir=TMP), tmux_live=lambda: {}, paste=lambda *a: None)
+        with mock.patch("sys.stderr", io.StringIO()):
+            cls.store.plugins = plugins.Plugins(cls.store, "/nonexistent", builtin=plugins.BUILTIN_DIR).load()
+        cls.httpd = grovyd.HttpServer(("127.0.0.1", 0), grovyd.Http)
+        cls.httpd.store, cls.httpd.token = cls.store, "t" * 32
+        cls.httpd.page = grovyd.load_index()
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.stopping = True
+        cls.httpd.shutdown()
+        cls.reg.stop()
+
+    def req(self, path, body=None, token=True):
+        h = {"X-Grovy": "1", **({"Cookie": "grovy_token=" + "t" * 32} if token else {})}
+        data = None
+        if body is not None:
+            data, h["Content-Type"] = json.dumps(body).encode(), "application/json"
+        r = urllib.request.Request(self.base + path, data=data, headers=h)
+        try:
+            with urllib.request.urlopen(r, timeout=5) as resp:
+                return resp.status, json.loads(resp.read() or b"null"), resp.headers
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"null"), e.headers
+
+    def test_routes(self):
+        self.assertIn("push", self.store.plugins.loaded)
+        self.assertEqual(self.req("/api/x/push/key", token=False)[0], 401)
+        code, got, _ = self.req("/api/x/push/key")
+        self.assertEqual(len(base64.urlsafe_b64decode(got["key"] + "=")), 65)
+        self.assertEqual(os.stat(os.path.join(core.state_dir(), "plugins", "push")).st_mode & 0o777, 0o700)
+        ep = {"endpoint": "https://push.example.invalid/routes"}
+        self.assertEqual(self.req("/api/x/push/pending", ep)[0], 404)                 # not subscribed
+        self.assertEqual(self.req("/api/x/push/subscribe", {"endpoint": "http://evil/"})[0], 400)
+        self.assertEqual(self.req("/api/x/push/subscribe", ep)[0], 200)
+        self.assertEqual(self.req("/api/x/push/pending", ep)[1], {"messages": [], "latest": None})
+        self.assertEqual(self.req("/api/x/push/unsubscribe", ep)[0], 200)
+        self.assertEqual(self.req("/api/x/push/pending", ep)[0], 404)
+
+    def test_service_worker_and_manifest(self):
+        r = urllib.request.urlopen(self.base + "/sw.js", timeout=5)        # public: the browser fetches it itself
+        self.assertEqual(r.headers["Content-Type"], "text/javascript; charset=utf-8")
+        self.assertIn(b"/api/x/push/pending", r.read())
+        self.assertEqual(r.headers["Cache-Control"], "no-cache")
+        man = json.loads(urllib.request.urlopen(self.base + "/manifest.webmanifest", timeout=5).read())
+        self.assertEqual((man["id"], man["scope"], man["start_url"]), ("/", "/", "/"))
+        r = urllib.request.Request(self.base + "/", headers={"Cookie": "grovy_token=" + "t" * 32})
+        self.assertIn("worker-src 'self'", urllib.request.urlopen(r, timeout=5).headers["Content-Security-Policy"])
+
+
 class TestGitPlugin(StoreCase):
     def git(self, *args, cwd=None):
         env = dict(os.environ, GIT_AUTHOR_NAME="Ada", GIT_AUTHOR_EMAIL="a@x", GIT_COMMITTER_NAME="Ada",
@@ -3644,6 +3858,32 @@ class TestHttps(unittest.TestCase):
         self.assertTrue(got[0].startswith("__Secure-grovy_token=tok;"))
         self.assertEqual(index("__Secure-grovy_token=tok"), (200, []))   # already swapped: nothing more
         self.assertEqual(self.get(base + "/grovy.crt")[0], 401)   # never served: it could be swapped on the way
+
+    def test_login_page_takes_a_pasted_link(self):
+        """The home-screen app on iPhone keeps cookies of its own and has no address bar: the login link must be
+        pasteable into the page itself."""
+        base = f"https://127.0.0.1:{self.port}"
+        code, body, h = self.get(base + "/")
+        self.assertEqual(code, 401)
+        self.assertIn(b"<form method=get action='/'", body)
+        self.assertIn("form-action 'self'", h["Content-Security-Policy"])
+        self.assertNotIn(b"didn't work", body)
+        link = urllib.parse.quote(f" https://box.lan:7333/?token=tok ")   # as pasted: the whole link, spaces and all
+        code, _, h = self.get(base + "/?token=" + link)
+        self.assertEqual(code, 303)
+        self.assertTrue(h["Set-Cookie"].startswith("__Secure-grovy_token=tok;"))
+        self.assertEqual(self.get(base + "/?token=%20tok%20")[0], 303)        # or just the token
+        code, body, _ = self.get(base + "/?token=" + urllib.parse.quote("https://box.lan/?token=nope"))
+        self.assertEqual(code, 401)
+        self.assertIn(b"didn't work", body)
+        self.assertNotIn(b"nope", body)
+
+    def test_token_never_in_the_log(self):
+        with mock.patch.dict(os.environ, {"GROVY_DEBUG": "1"}), mock.patch("sys.stderr", io.StringIO()) as err:
+            self.get(f"https://127.0.0.1:{self.port}/?token=tok&x=1")
+            time.sleep(0.2)
+        self.assertIn("GET /?token=…&x=1", err.getvalue())
+        self.assertNotIn("token=tok", err.getvalue())
 
     def test_plain_http_to_the_https_port_points_to_https(self):
         base = f"http://127.0.0.1:{self.port}"

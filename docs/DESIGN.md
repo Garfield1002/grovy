@@ -15,6 +15,8 @@ claude ──hooks──► grovy hook NAME ──unix socket──► grovyd �
 | `extensions/` | built-in extensions of the page, written against `window.grovy` like a user's `custom.js` (see "Making it yours") |
 | `grovylib/` | the rest, one file per topic (CLI, hook adapter, tmux, registry, and the daemon's `Store`, assembled from one class per feature); `grovylib/__init__.py` maps it |
 | `index.html` | the whole UI (vanilla JS, no innerHTML); a map of its parts opens its script |
+| `sw.js` | the service worker, served at `/sw.js`: shows push notifications and opens their session; caches nothing |
+| `plugins/` | built-in daemon plugins (`git.py`, `push.py`), written against the plugin `Api` like a user's own |
 | `tests/test_grovy.py`, `tests/test_peers.py` | unit + tmux integration tests (`python3 -m unittest discover -s tests`) |
 | `examples/` | systemd unit, Telegram notify script, the generated hook config |
 | `assets/` | icon sizes and the home-screen backdrop, from [grove](https://github.com/Garfield1002/grove); served without the token from an allowlist (`ASSETS` in `grovyd.py`) |
@@ -47,7 +49,9 @@ reach 127.0.0.1 too. It's generated once into `$STATE/token` (mode 0600). `GROVY
 cookie for a year. (Lax, not Strict: a standalone PWA launched from the phone's home screen is a top-level
 navigation the browser counts as cross-site, and Strict withholds the cookie there, so every cold launch landed
 back on the login page. CSRF is covered without Strict — actions are POST, guarded by the forced CORS preflight and
-the Origin check, and GET API routes need the `X-Grovy` header a navigation can't set.) Without it the page shows "login needed" and the API returns 401. To rotate the token, delete the
+the Origin check, and GET API routes need the `X-Grovy` header a navigation can't set.) Without it the page shows "login needed" and the API returns 401. That page also has a field to
+paste the login link (or the token) into, a plain GET form to `/?token=`, since grovy added to an iPhone's home screen
+keeps cookies of its own and has no address bar to open the link in. A token in a URL is never written to the log. To rotate the token, delete the
 file and restart the daemon. ⋯ → Login link (on the session list only, not inside a session) shows the same link for the address the page was opened
 on: the cookie is HttpOnly, so the page asks `POST /api/login-link`, which returns the token only to a logged-in,
 same-origin JSON request (a cross-site page can't send one). A script injected into the page could read the token
@@ -139,6 +143,31 @@ private. TLS reads that fail (a preconnect closed unused, a connection the deadl
 command output or the full prompt. It is rate-limited to one per session per kind per 60s, and runs
 in a background thread with a 15s timeout, so a failing bot never blocks hooks or Claude.
 `examples/notify-telegram.sh` posts to an existing bot (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`).
+
+**Push notifications on your devices (Web Push).** Needs HTTPS (see "HTTPS"): browsers allow service workers and
+push only on a secure page. ⋯ → Notifications (`extensions/push.js`) turns them on per device: it asks for permission
+right inside the tap (iPhone shows the prompt nowhere else), subscribes with grovy's VAPID key and registers the
+subscription's endpoint with the built-in plugin `plugins/push.py`, which sends a test. On iPhone it only works in
+grovy opened from the home screen. The plugin listens to the same moments as `GROVY_NOTIFY_CMD` (its `notify` event,
+not rate-limited; a notification per session replaces the previous one on the phone) and sends each subscribed
+device an **empty** push through its browser's push service (Apple, Google, Mozilla: the only way to wake a phone),
+which so learns that something happened and when, never what. The service worker (`sw.js`) then fetches the text
+from grovy (`POST /api/x/push/pending`, with the login cookie, over HTTPS) and shows it; tapping it opens the session.
+Hence no payload encryption, and no crypto code in grovy: the VAPID key (P-256, in the plugin's `data_dir()`, 0600) is
+made and used with the `openssl` command (ES256 tokens, one per push service, reused for 11h).
+* Every push shows a notification (browsers count silent ones against the site, and Safari drops the subscription):
+  one that finds no new message (an earlier one took it) re-shows the latest quietly, without a new alert; one that
+  can't reach grovy says "open grovy to see". A notification about the session you are looking at is shown and closed
+  at once. Pushes carry a `Topic` per session and kind, so a phone that was off gets one of each, not a burst.
+* On iPhone, `subscribe()` must run inside the tap itself: the extension fetches the key and the service worker
+  beforehand, and calls it first thing (it asks for permission itself). It never unsubscribes a device on its own.
+* Messages wait per device (at most 20, in memory: lost on a daemon restart) until its service worker takes them.
+* A push service answering 404/410 ends that subscription. A device re-registers its subscription on each start.
+* `GROVY_PUSH_CONTACT` (default: grovy's GitHub page) is the contact put in the tokens; Apple refuses placeholder
+  addresses. Redirects from a push service are not followed (they would carry the token elsewhere).
+* Untested against real push services from here: Apple's in particular (a home-screen app on an iPhone).
+* The service worker caches nothing and handles no page requests, so the app is never a stale copy; the page
+  registers it on every start, so an update reaches devices. `/sw.js` is public (nothing private in it).
 
 ## Making it yours
 

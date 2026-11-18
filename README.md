@@ -67,6 +67,10 @@ in a terminal. grovy listens to Claude's hooks and shows everything on a phone-f
   For a clone, you see first which of its files Claude would load (some can run commands) and say whether to trust it.
 - **Git:** ⋯ → Git shows the session's repository as a graph of branches and commits; tap a commit for its files
   and diff. Branch names and commit hashes in Claude's replies are links to them.
+- **Notifications (with HTTPS):** ⋯ → Notifications on each phone, to hear when a session needs you, finishes or
+  fails, even with grovy closed. The notification travels empty through your phone maker's push service; the phone
+  then fetches what happened from grovy itself. On iPhone, open grovy from the home screen first (Share → Add to
+  Home Screen).
 - **On a computer:** on a wide screen your sessions and pages stay in a sidebar. Ctrl+Enter sends, Alt+↑/↓ switches session,
   Esc closes, Tab reaches every button.
 
@@ -164,6 +168,7 @@ other limits are in `docs/DESIGN.md` ("Other machines").
 | a session stays "starting" | Claude is asking whether to trust the folder: `grovy attach NAME` and answer |
 | the link doesn't open on the phone | grovy listens only on the computer: rerun `grovy setup` and pick another address |
 | "grovy doesn't know the name …" | open it by IP address, or add the name to `GROVY_HOSTS` |
+| the home-screen app says "login needed" | it doesn't share the browser's login (iPhone): paste the login link into the field on that page (⋯ → Login link on a logged-in device copies it) |
 | "claude not found" when starting from the phone | rerun `grovy setup` from a terminal where `claude` works |
 | "killed by the out-of-memory killer" | the computer ran out of memory, usually because of a big job; Resume continues. Start heavy jobs with a cap, e.g. `systemd-run --user --scope -p MemoryMax=40G …` |
 | "state unknown" | Claude did something the page couldn't follow (e.g. you answered in the terminal); the next send asks first |

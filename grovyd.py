@@ -197,8 +197,10 @@ ASSETS = {"icon-64.png": "image/png", "icon-180.png": "image/png", "icon-192.png
           "icon-512.png": "image/png", "backdrop.svg": "image/svg+xml"}
 
 
+SW_PATH = os.path.join(core.HERE, "sw.js")
 MANIFEST = json.dumps({
-    "name": "grovy", "short_name": "grovy", "start_url": "/", "display": "standalone",
+    "id": "/", "scope": "/", "name": "grovy", "short_name": "grovy", "start_url": "/", "display": "standalone",
+    "description": "Your Claude Code sessions",
     "background_color": "#161615", "theme_color": "#161615",
     "icons": [{"src": "/assets/icon-192.png", "sizes": "192x192", "type": "image/png"},
               {"src": "/assets/icon-512.png", "sizes": "512x512", "type": "image/png"}]}).encode()
@@ -265,7 +267,8 @@ def load_index():
     # "<script>" in a comment would otherwise shift what gets hashed).
     hashes = " ".join("'sha256-%s'" % base64.b64encode(hashlib.sha256(s).digest()).decode() for s in scripts + added)
     csp = (f"default-src 'none'; script-src {hashes}; style-src 'unsafe-inline'; connect-src 'self'; "
-           "img-src 'self' data:; frame-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; "
+           "img-src 'self' data:; frame-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; "
+           "form-action 'none'; "
            "frame-ancestors 'none'")
     return html, csp
 
@@ -298,8 +301,17 @@ anyone on the network could swap it on its way.</p>"""
 
 LOGIN_PAGE = (b"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
               b"<title>grovy</title><body style='font:16px system-ui;padding:24px;max-width:30em'>"
-              b"<h2>grovy: login needed</h2><p>Open the link printed by <code>grovy url</code> on the machine "
-              b"(it ends in <code>?token=...</code>). Your browser remembers it for a year.</p>")
+              b"<h2>grovy: login needed</h2>{wrong}<p>Open the link printed by <code>grovy url</code> on the machine "
+              b"(it ends in <code>?token=...</code>). Your browser remembers it for a year.</p>"
+              # The home-screen app keeps cookies of its own (iPhone) and has no address bar to open the link in.
+              b"<p>In grovy added to the home screen, paste the link here instead. Copy it with "
+              b"&#8943; &rarr; Login link on a device that is logged in, or from <code>grovy url</code>.</p>"
+              b"<form method=get action='/' style='display:flex;gap:8px;flex-wrap:wrap'>"
+              b"<input name=token required autocomplete=off autocapitalize=off spellcheck=false "
+              b"placeholder='Login link or token' aria-label='Login link or token' "
+              b"style='flex:1 1 14em;font:inherit;padding:8px;border:1px solid #888;border-radius:8px'>"
+              b"<button style='font:inherit;padding:8px 16px;border-radius:8px'>Log in</button></form>")
+LOGIN_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
 
 
 def _res(code, res, key=None):
@@ -314,8 +326,9 @@ class Http(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
-        if core.env("DEBUG"):
-            super().log_message(fmt, *args)
+        if core.env("DEBUG"):   # never the login token in the log (it comes in the URL)
+            super().log_message(fmt, *(re.sub(r"token=[^&\s\"]*", "token=…", a) if isinstance(a, str) else a
+                                       for a in args))
 
     def _send(self, code, body, ctype="application/json", extra=(), frame="DENY"):
         if not isinstance(body, bytes):
@@ -549,12 +562,16 @@ class Http(http.server.BaseHTTPRequestHandler):
             return self._err(403, "unknown Host header (add the name to GROVY_HOSTS)")
         url = urlsplit(self.path)
         path = url.path
+        wrong = False
         if path == "/" and self.server.token:
-            q = parse_qs(url.query).get("token", [""])[0]
+            q = parse_qs(url.query).get("token", [""])[0].strip()
+            if "token=" in q:   # the whole login link, pasted into the login page's field
+                q = parse_qs(urlsplit(q).query).get("token", [""])[0].strip()
             if q and hmac.compare_digest(q.encode(), self.server.token.encode()):
                 return self._send(303, b"", "text/plain", [
                     ("Location", "/"),
                     *self._cookies(q)])
+            wrong = bool(q)
         if path.startswith("/assets/") and path[8:] in ASSETS:   # icons and backdrop: nothing private
             try:
                 with open(os.path.join(ASSETS_DIR, path[8:]), "rb") as f:
@@ -567,6 +584,14 @@ class Http(http.server.BaseHTTPRequestHandler):
                                if ctype == "image/svg+xml" else []))
         if path == "/manifest.webmanifest":
             return self._send(200, MANIFEST, "application/manifest+json")
+        if path == "/sw.js":   # the service worker (sw.js): at the root, so it may cover the whole app. Nothing private
+            try:
+                with open(SW_PATH, "rb") as f:
+                    sw = f.read()
+            except OSError:
+                return self._err(404, "not found")
+            return self._send(200, sw, "text/javascript", [("Cache-Control", "no-cache"),
+                              ("Content-Security-Policy", "default-src 'none'; connect-src 'self'; img-src 'self'")])
         m = re.fullmatch(r"/s/([0-9a-f]{32})", path)
         if m:   # a shared page: its link is the credential, and it grants nothing but this page
             got = self.server.store.shared_page_html(m.group(1))
@@ -579,7 +604,9 @@ class Http(http.server.BaseHTTPRequestHandler):
                 return self._peer_reply(got)
         if not self._authed():
             if path == "/":
-                return self._send(401, LOGIN_PAGE, "text/html")
+                return self._send(401, LOGIN_PAGE.replace(b"{wrong}", b"<p style='color:#c33'>That link or token "
+                                  b"didn't work: copy it again.</p>" if wrong else b""), "text/html",
+                                  [("Content-Security-Policy", LOGIN_CSP)])
             return self._err(401, "token required: open /?token=...")
         store = self.server.store
         if store.peers:   # a peer's session, id or file (pc:...): proxied to it (grovylib/peers.py)
