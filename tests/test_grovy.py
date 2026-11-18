@@ -1043,6 +1043,23 @@ class TestSetupAndCustomCss(unittest.TestCase):
             shutil.copyfile(os.path.join(ROOT, "examples", "custom.js"), js)      # what `grovy setup` installs
             self.assertIn(b"grovy.widget(type, render)", grovyd.load_index()[0])
 
+    def test_builtin_widgets_cover_the_guide(self):
+        # Every type Claude is told about is drawn by extensions/widgets.js, which the page loads.
+        with open(os.path.join(ROOT, "extensions", "widgets.js")) as f:
+            js = f.read()
+        self.assertIn(js.strip().encode(), grovyd.load_index()[0])
+        told = set(re.findall(r'^- (\w+): ', claude.WIDGET_GUIDE, re.M))
+        drawn = set(re.findall(r"^    (\w+)\(s(?:, live)?\) \{", js, re.M))
+        self.assertGreaterEqual(told, {"chart", "stats", "progress", "checklist", "choices", "form", "image", "diagram"})
+        self.assertLessEqual(told, drawn)
+
+    def test_log_widget_style_is_not_the_chart_legend(self):
+        # Both used the class "lg": the log's box (reversed column, background) also restyled every chart legend.
+        with open(os.path.join(ROOT, "extensions", "widgets.js")) as f:
+            js = f.read()
+        self.assertEqual(len(re.findall(r"^\.lg \{", js, re.M)), 1)
+        self.assertIn('h("div", {class: "wlog"}, h("pre"', js)
+
 
 def write_plugin(folder, name, code):
     os.makedirs(folder, exist_ok=True)

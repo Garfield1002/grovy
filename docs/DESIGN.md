@@ -95,7 +95,7 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
 
 * **Built-in extensions** are `extensions/*.js` in the grovy folder, loaded in file-name order right after grovy's own
   script. They are ordinary features written against `window.grovy` only: `context-bar.js` (the line above the message
-  box, see "Status info") and `git.js` (see "Git"). Each registers with `grovy.extension(name, setup)`; the setups run at start-up,
+  box, see "Status info"), `git.js` (see "Git") and `widgets.js` (the widget types, see "Widgets"). Each registers with `grovy.extension(name, setup)`; the setups run at start-up,
   after `custom.js`, so `grovy.disable(name)` there turns one off (or replace it: disable it and copy it under another
   name).
 * **`custom.css`** is added after the built-in styles (a later rule with the same selector wins).
@@ -434,7 +434,9 @@ pop the keyboard), and permission cards are never focused automatically, so a st
 re-renders keep keyboard focus on the same control (`paint()`, matching rebuilt rows by `data-fk`).
 
 **Widgets.** Claude's reply can contain ` ```widget ` blocks holding one JSON object: `chart` (bar, line, pie),
-`stats`, `progress`, `checklist`, `choices`, `form`, `diagram` or `image`. The page draws them itself with DOM and SVG;
+`stats`, `progress`, `note`, `log`, `checklist`, `choices`, `form`, `diagram` or `image`. The page draws them itself with DOM and SVG
+(the renderers are the built-in extension `extensions/widgets.js`, one `grovy.widget` per type: `custom.js` can replace one,
+or turn them all off with `grovy.disable("widgets")`, after which every block shows as not shown);
 nothing from Claude is run or parsed as HTML. Invalid JSON or an unknown type shows "Widget not shown: <reason>"
 followed by the raw block. `choices` and `form` only fill your message box (asking first if it already holds a draft);
 you send it like any message. Claude learns the format from grovy's `SessionStart` hook (`additionalContext`, the
