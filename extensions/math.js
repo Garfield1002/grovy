@@ -464,4 +464,4 @@ mtext.m-err { color:var(--bad); }
     return el("math", {display: display ? "block" : null}, body);
   }
   grovy.math(render);
-});
+}, {about: "LaTeX formulas in replies"});

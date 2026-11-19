@@ -191,6 +191,8 @@ body.home #backdrop { display:block; }
 .folders .item.sel { background:color-mix(in srgb, var(--busy) 12%, var(--bg)); font-weight:650; }
 .toggle { display:flex; align-items:center; gap:10px; margin:0 0 14px; font-size:15px; }
 .toggle input { width:22px; height:22px; }
+.toggle.ext { align-items:flex-start; } .toggle.ext input { flex:none; margin-top:1px; }
+.toggle.ext .sub { color:var(--mut); font-size:13px; }
 .hit { border:1px solid var(--line); background:var(--card); border-radius:12px; padding:10px 12px; margin:0 0 8px;
   width:100%; text-align:left; }
 .hit .w { font-size:12px; color:var(--mut); } .hit .s { overflow:hidden; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; }
@@ -1501,8 +1503,31 @@ async function loginSheet() {   // the link `grovy url` prints, for the address 
     h("p", {style: "color:var(--warn);font-size:13px"}, tok ? "Anyone with this link controls your Claude sessions: "
       + "only send it to yourself." : "This server has no token: anyone who can reach it can use grovy."));
 }
+const extensionsItem = () => h("button", {class: "item", onclick: extensionsSheet}, "Extensions",
+  h("div", {class: "sub"}, "Turn parts of grovy on or off"));
+function extensionsSheet() {   // the switches save at once (for every device); they apply when the page reloads
+  const reload = h("button", {class: "btn allow hidden", onclick: () => location.reload()}, "Reload to apply");
+  const pending = () => reload.classList.toggle("hidden",
+    ext.named.every(x => savedOff.has(x.name) === loadedOff.has(x.name)));
+  const rows = ext.named.map(x => {
+    const box = h("input", {type: "checkbox"}), inCode = ext.off.has(x.name);
+    box.checked = !inCode && !savedOff.has(x.name);
+    box.disabled = inCode;
+    box.onchange = async () => {
+      box.disabled = true;
+      try { savedOff = new Set((await api("/api/extensions", {name: x.name, on: box.checked})).off); }
+      catch (e) { box.checked = !box.checked; say("Couldn't change it: " + e.message); }
+      box.disabled = false; pending();
+    };
+    return h("label", {class: "toggle ext"}, box, h("div", {},
+      h("div", {}, x.name), h("div", {class: "sub"}, inCode ? "Off in custom.js" : x.about)));
+  });
+  openSheet(h("h2", {}, "Extensions"), ...(rows.length ? rows : [h("p", {}, "No extensions.")]),
+    h("div", {style: "display:flex;gap:10px"}, reload));
+  pending();
+}
 $("menu").onclick = () => view ? sessionMenu()
-  : openSheet(h("h2", {}, "grovy"), ...extItems("home").map(e => e.node), loginItem());
+  : openSheet(h("h2", {}, "grovy"), ...extItems("home").map(e => e.node), extensionsItem(), loginItem());
 async function updateSession(name) {   // the server decides whether it's safe; forcing is a separate, explicit tap
   if (!await ask(`Update "${name}"? Claude restarts with the latest grovy and resumes the same conversation.`, "Update")) return;
   const post = force => api(`/api/sessions/${encodeURIComponent(name)}/restart`, {force});
@@ -1909,6 +1934,13 @@ addEventListener("hashchange", route);
 const ext = {menu: [], keys: [], on: {render: [], update: [], route: [], send: []}, named: [], off: new Set()};
 let booted = false;
 const FAILED = Symbol("failed");
+// Turned off in ⋯ → Extensions (kept by grovyd for every device, sent with the page): skipped at start-up, like
+// grovy.disable() in custom.js. savedOff follows later changes, which apply on the next reload.
+const loadedOff = (() => {
+  try { return new Set(JSON.parse(document.querySelector('meta[name="grovy-off"]').content)); } catch (e) { return new Set(); }
+})();
+let savedOff = new Set(loadedOff);
+const extRuns = name => !ext.off.has(name) && !loadedOff.has(name);
 function runExt(what, fn, ...args) {
   try { return fn(...args); }
   catch (e) { showError(new Error(`extension (${what}): ${e && e.message || e}`), true); return FAILED; }
@@ -2048,12 +2080,14 @@ window.grovy = Object.freeze({
     if (!ext.on[name]) throw new Error(`grovy.on: unknown event "${name}" (${Object.keys(ext.on).join(", ")})`);
     ext.on[name].push(fnArg(fn, "grovy.on"));
   },
-  extension(name, setup) {   // a named extension: setup(grovy) runs at start-up unless grovy.disable(name) was called
+  // a named extension: setup(grovy) runs at start-up unless grovy.disable(name) was called or it is off in
+  // ⋯ → Extensions; about: one line for that list
+  extension(name, setup, {about = ""} = {}) {
     if (booted) throw new Error("grovy.extension: only before start-up (from extensions/ or custom.js)");
-    ext.named.push({name: String(name), setup: fnArg(setup, "grovy.extension")});
+    ext.named.push({name: String(name), setup: fnArg(setup, "grovy.extension"), about: String(about)});
   },
   disable(name) { ext.off.add(String(name)); },   // e.g. grovy.disable("context-bar"), from custom.js
-  get extensions() { return ext.named.map(x => ({name: x.name, on: !ext.off.has(x.name)})); },
+  get extensions() { return ext.named.map(x => ({name: x.name, on: extRuns(x.name), about: x.about})); },
 });
 
 // ---------------------------------------------------------------- start-up
@@ -2077,7 +2111,7 @@ setInterval(() => {
   if (document.visibilityState === "visible" && view && cur && /working|starting|needs_input/.test(cur.state)) refresh();
 }, 5000);
 document.addEventListener("DOMContentLoaded", () => {
-  for (const x of ext.named) if (!ext.off.has(x.name)) runExt("extension " + x.name, x.setup, window.grovy);
+  for (const x of ext.named) if (extRuns(x.name)) runExt("extension " + x.name, x.setup, window.grovy);
   booted = true; route(); connect();
 });
 </script>

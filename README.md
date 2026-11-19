@@ -84,6 +84,8 @@ grovy doctor                   # check that everything is in order
 
 ## Make it yours
 
+- **Extensions:** ⋯ → Extensions on the home screen switches built-in parts on or off (math, widgets, git, issues...)
+  for all your devices; reload to apply.
 - **Looks:** edit `~/.config/grovy/custom.css`. It starts with the colour names you can change (your message
   bubbles, accents, backgrounds, in light and dark mode). Reload the page to see it. It's outside the grovy
   folder, so updates never overwrite it.

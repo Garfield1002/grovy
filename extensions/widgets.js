@@ -324,4 +324,4 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
     },
   };
   for (const [type, render] of Object.entries(WIDGETS)) grovy.widget(type, render);
-});
+}, {about: "Charts, checklists and other widgets in replies"});

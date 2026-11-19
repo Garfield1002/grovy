@@ -1043,6 +1043,32 @@ class TestSetupAndCustomCss(unittest.TestCase):
             shutil.copyfile(os.path.join(ROOT, "examples", "custom.js"), js)      # what `grovy setup` installs
             self.assertIn(b"grovy.widget(type, render)", grovyd.load_index()[0])
 
+    def test_extensions_menu_switches_are_kept_and_sent_with_the_page(self):
+        """⋯ → Extensions: one list for every device, in the state dir, handed to the page before extensions start."""
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": tempfile.mkdtemp(dir=TMP)}):
+            self.assertIn(b'<meta name="grovy-off" content="[]">', grovyd.load_index()[0])
+            self.assertEqual(grovyd.set_extension("math", False), (200, {"off": ["math"]}))
+            self.assertEqual(grovyd.set_extension("git", False), (200, {"off": ["git", "math"]}))
+            self.assertEqual(grovyd.set_extension("git", True), (200, {"off": ["math"]}))
+            self.assertEqual(grovyd.set_extension("math", False), (200, {"off": ["math"]}))   # twice is once
+            html = grovyd.load_index()[0]
+            self.assertIn(b'<meta name="grovy-off" content="[&quot;math&quot;]">', html)
+            self.assertLess(html.index(b"grovy-off"), html.index(b"<script>"))
+            for bad in ("", "../x", "a b", '"><script>', "x" * 65, None, 3):
+                self.assertEqual(grovyd.set_extension(bad, False)[0], 400, bad)
+            self.assertEqual(grovyd.set_extension("math", "no")[0], 400)
+            with open(grovyd.extensions_off_path(), "w") as f:   # a hand-edited file can't put markup in the page
+                json.dump(["ok", '"><script>alert(1)</script>', 5], f)
+            self.assertEqual(grovyd.extensions_off(), ["ok"])
+            with open(grovyd.extensions_off_path(), "w") as f:
+                f.write("not json")
+            self.assertEqual(grovyd.extensions_off(), [])
+
+    def test_every_builtin_extension_says_what_it_is(self):
+        for f in grovyd.builtin_extensions():
+            with open(f, encoding="utf-8") as fh:
+                self.assertRegex(fh.read(), r'\}, \{about: "[^"]+"\}\);\s*$', f)
+
     def test_builtin_widgets_cover_the_guide(self):
         # Every type Claude is told about is drawn by extensions/widgets.js, which the page loads.
         with open(os.path.join(ROOT, "extensions", "widgets.js")) as f:

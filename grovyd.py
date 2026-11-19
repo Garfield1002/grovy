@@ -187,10 +187,54 @@ MANIFEST = json.dumps({
               {"src": "/assets/icon-512.png", "sizes": "512x512", "type": "image/png"}]}).encode()
 
 
+EXT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+ext_lock = threading.Lock()
+
+
+def extensions_off_path():
+    return os.path.join(core.state_dir(), "extensions-off.json")
+
+
+def extensions_off():
+    """The page extensions turned off in ⋯ → Extensions: one list for every device, kept in the state dir."""
+    try:
+        with open(extensions_off_path(), encoding="utf-8") as f:
+            names = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(names, list):
+        return []
+    return sorted({n for n in names if isinstance(n, str) and EXT_NAME.fullmatch(n)})[:200]
+
+
+def set_extension(name, on):
+    """⋯ → Extensions: turn one on or off. It applies when a page next loads (an extension can't be undone live)."""
+    if not isinstance(name, str) or not EXT_NAME.fullmatch(name):
+        return 400, {"error": "bad extension name"}
+    if not isinstance(on, bool):
+        return 400, {"error": "on must be true or false"}
+    with ext_lock:
+        off = set(extensions_off())
+        if on:
+            off.discard(name)
+        elif len(off) >= 200:
+            return 400, {"error": "too many extensions turned off"}
+        else:
+            off.add(name)
+        try:
+            core.atomic_write_json(extensions_off_path(), sorted(off))
+        except OSError as e:
+            return 500, {"error": f"couldn't save it: {e}"}
+    return 200, {"off": sorted(off)}
+
+
 def load_index():
     with open(INDEX_PATH, "rb") as f:   # LF, as the browser sees it (a CR LF checkout would break the hash)
         html = f.read().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     scripts = re.findall(rb"<script>(.*?)</script>", html, re.S)   # grovy's own script (taken before anything is added)
+    # what ⋯ → Extensions turned off, read by the page before its extensions start
+    off = html_escape(json.dumps(extensions_off())).encode()
+    html = html.replace(b"</head>", b'<meta name="grovy-off" content="' + off + b'">\n</head>', 1)
     css = custom_file("custom.css")
     if css:   # after the built-in styles, so the same selectors and tokens override them
         html = html.replace(b"</style>", b"</style>\n<style id=\"custom-css\">\n" + css + b"\n</style>", 1)
@@ -526,6 +570,8 @@ class Http(http.server.BaseHTTPRequestHandler):
         if path == "/api/sessions":
             return wrap(*store.create(body.get("name"), body.get("path"), body.get("ask"),
                                       body.get("resume"), body.get("fork")))
+        if path == "/api/extensions":   # ⋯ → Extensions
+            return set_extension(body.get("name"), body.get("on"))
         if path == "/api/projects/new":
             return _res(*store.new_project(body.get("kind"), body.get("name"), body.get("url")))
         if path == "/api/projects/start":
@@ -701,7 +747,7 @@ class HttpServer(http.server.ThreadingHTTPServer):
             m = [os.stat(INDEX_PATH).st_mtime_ns]
         except OSError:
             return
-        for path in [custom_path(name) for name in CUSTOM] + builtin_extensions():
+        for path in [custom_path(name) for name in CUSTOM] + builtin_extensions() + [extensions_off_path()]:
             try:
                 c = os.stat(path)
                 m.append((path, c.st_mtime_ns, c.st_size))

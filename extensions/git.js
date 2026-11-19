@@ -335,4 +335,4 @@ button.gref { cursor:pointer; background:none; }
       h("button", {class: "chip", style: "margin-top:12px", onclick: () => { grovy.closeSheet(); grovy.draft(`Commit ${short(c.h)} (${c.s}): `); }},
         "Ask Claude about it"));
   }
-});
+}, {about: "⋯ → Git, and links to branches and commits in replies"});

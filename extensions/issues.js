@@ -106,4 +106,4 @@ grovy.extension("issues", grovy => {
         "its worktree and branch. Nothing is pushed."),
       buttons(merge, discard, close));
   }, {where: "session", section: "Session", when: state => !!(state && state.issue)});
-});
+}, {about: "⋯ → New issue and Finish issue"});

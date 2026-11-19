@@ -32,9 +32,11 @@
      grovy.on("route", session)         another session (or the home screen) was opened
      grovy.on("send", text)             return new text to send instead, or false to keep it from being sent
                                         (answer at once: an async hook stops the send)
-     grovy.extension(name, setup)       a named extension: setup(grovy) runs at start-up
-     grovy.disable(name)                turn off a built-in extension, e.g. grovy.disable("context-bar")
-     grovy.extensions                   the named extensions, and whether each is on
+     grovy.extension(name, setup, {about})   a named extension: setup(grovy) runs at start-up; about is its
+                                        line in ⋯ → Extensions, where it can be switched off
+     grovy.disable(name)                turn off a built-in extension, e.g. grovy.disable("context-bar") (or switch
+                                        it off in ⋯ → Extensions, which needs no code)
+     grovy.extensions                   the named extensions, whether each is on, and their about lines
 
    Claude's words and tool inputs are untrusted: build with grovy.h / grovy.md, never innerHTML.
    An error in here shows up at the top of the page until you tap it; grovy itself keeps working. */

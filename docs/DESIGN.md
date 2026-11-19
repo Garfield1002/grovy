@@ -99,9 +99,17 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
 
 * **Built-in extensions** are `extensions/*.js` in the grovy folder, loaded in file-name order right after grovy's own
   script. They are ordinary features written against `window.grovy` only: `context-bar.js` (the line above the message
-  box, see "Status info"), `git.js` (see "Git"), `issues.js` (see "Issues"), `math.js` (see "Math") and `widgets.js` (the widget types, see "Widgets"). Each registers with `grovy.extension(name, setup)`; the setups run at start-up,
+  box, see "Status info"), `git.js` (see "Git"), `issues.js` (see "Issues"), `math.js` (see "Math") and `widgets.js` (the widget types, see "Widgets"). Each registers with `grovy.extension(name, setup, {about})`; the setups run at start-up,
   after `custom.js`, so `grovy.disable(name)` there turns one off (or replace it: disable it and copy it under another
   name).
+* **⋯ → Extensions** (home menu, `index.html`) lists every named extension with its `about` line and a switch. A switch
+  saves at once through `POST /api/extensions {name, on}` into `extensions-off.json` in the state dir (one list for
+  every device; names must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`, at most 200, and anything else in the file is
+  ignored). `load_index()` puts the list in a `<meta name="grovy-off">` tag, and the page skips those extensions at
+  start-up like `grovy.disable()`. The file is part of the page's reload check, so the next page load gets the change.
+  It applies on reload only ("Reload to apply" shows while the switches differ from what's running), since an
+  extension can't be undone live. One turned off in `custom.js` shows as such and can't be switched on here. Turning
+  off an extension whose daemon plugin stays on (git, push) only hides its page side.
 * **`custom.css`** is added after the built-in styles (a later rule with the same selector wins).
 * **`custom.js`** is added after the built-in extensions, as its own inline `<script>`. It is documented in
   `examples/custom.js`. `window.grovy` is a frozen object defined in the "extensions" part of `index.html`:

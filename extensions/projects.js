@@ -124,4 +124,4 @@ grovy.extension("projects", grovy => {
       if (!decided) discard();
     }, 500);
   }
-});
+}, {about: "⋯ → New project"});

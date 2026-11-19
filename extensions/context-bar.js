@@ -44,4 +44,4 @@ grovy.extension("context-bar", grovy => {
       h("div", {class: "note", style: "margin-top:10px;color:var(--mut);font-size:13px"},
         "Near 100% Claude compacts the conversation to free up context."));
   }
-});
+}, {about: "The context-use bar above the message box (tap it for the model)"});
