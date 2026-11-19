@@ -74,6 +74,7 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 | `GROVY_STATE_DIR` | `$XDG_STATE_HOME/grovy` → `~/.local/state/grovy` | all state, mode 0700 |
 | `GROVY_PERMISSION_TIMEOUT` | `600` | seconds a permission waits for the phone (fixed per session at `grovy new`) |
 | `GROVY_CLAUDE` | `claude` | claude executable |
+| `GROVY_PROJECTS_DIR` | `~/dev` | where ⋯ → New project makes projects |
 | `GROVY_NOTIFY_CMD` | unset | command run with a short message on stdin (see below) |
 | `GROVY_PUBLIC_URL` | unset | appended to notifications as a link |
 | `GROVY_DEBUG` | unset | log HTTP requests |
@@ -458,6 +459,45 @@ the `Issues` part of `Store`; the page side is the built-in extension `extension
   moves it, only from the commit it was checked against. Then the session is stopped and forgotten, and the worktree
   (`git worktree remove`, which refuses if anything changed since) and the branch (once checked to be in the base branch: `git branch -d` would check the branch your checkout has out) deleted.
   Nothing is pushed.
+
+**New projects.** ⋯ → New project (home screen) makes a project and starts a session in it (`grovylib/newproject.py`,
+the `NewProjects` part of `Store`; the page side is `extensions/projects.js`).
+* Always in the projects folder, `GROVY_PROJECTS_DIR` (default `~/dev`): `<dir>/<name>`, made only if nothing is there.
+  Names: letters, digits, `.`, `-`, `_`, starting with a letter or digit (max 64). The session is named after the
+  folder (other characters become `-`; `-2`, `-3`... when taken).
+* Blank: `mkdir` + `git init`. From a remote: `git clone -- URL`, only `https://` (no user or password in it), `ssh://`
+  or `user@host:path`, and only over https or ssh (`protocol.allow=never` with those two allowed: no `ext::`, which
+  runs a command, nor `file`; no submodules; a host always starts with a letter or digit). git never asks anything:
+  no credential prompt, and it runs in a new process session with no terminal, so ssh can't ask about a host key and a
+  repo you have no access to fails at once. After 5 minutes the whole process group is killed (git's helpers too).
+  Git LFS fetches nothing (`GIT_LFS_SKIP_SMUDGE`: the repo's `.lfsconfig` would choose where from). A failed one
+  leaves nothing. The clone runs outside `project_lock`, its folder reserved in `fresh` meanwhile.
+* **Workspace trust.** A new git repository is its own trust boundary, so Claude asks whether to trust it and holds
+  back every hook until it's answered. grovy answers it for you: blank projects at once (grovy just made them, empty);
+  a clone only after the phone has shown what Claude would load from it once trusted, and you tapped Trust (the
+  request must say `trust: true`). The list (`newproject.review`): `.mcp.json` and every `settings*.json` under a
+  `.claude/` first, with the commands they name (hooks, MCP servers, status line, key helpers, env, plugins and
+  marketplaces; 6 per file, then "… and N more"); then the rest of each `.claude/` and every `CLAUDE.md` (up to 4
+  folders deep). A symlink within the clone is reviewed as what it points to (a symlinked `.claude` is walked); one
+  leading out of it is flagged with the ones that run commands. At most 40 lines, then "… and N more". A settings
+  file that can't be read (over 1 MB, not JSON, nested too deep) says so and to not trust it unless you know it;
+  a review that fails altogether says the same, never stranding the clone. Each made project gets a random token that only the page that made it holds:
+  starting or deleting it needs it, so if another tab makes the same name again (which deletes the first, left
+  behind), the first tab's Trust is refused rather than trusting a clone it never saw. Closing that sheet, Delete
+  the clone, or a failed start after the sheet closed deletes the folder (only one grovy made and that never got a
+  session: `fresh`, in memory). Answering: the session is started as any other, then `newproject.accept_trust`
+  reads the visible screen (`capture-pane` without scrollback, the only screen reading grovy does) and presses Down
+  only while "No, exit" is the one highlighted line of that question, and Enter only while "Yes, I trust this
+  folder" is (wording verified with Claude Code 2.1.328, whose default is No); a key that changed nothing in 2s is
+  pressed again, 3 times at most, and only while the screen is exactly as it was when it was pressed (Claude's
+  dialogs drop keys for a moment after they open; a slow answer must not get a second Enter that lands on the next
+  dialog). It is done when `~/.claude.json` says the
+  folder is trusted: Claude writes that itself, grovy never does. Anything else on the screen and it stops, after
+  20s, having pressed nothing else: the session opens with a note to answer in the terminal, and the first message
+  is not queued (it is put in the message box).
+* If starting fails after the tmux session was made (a tmux timeout), it counts as started: the folder is never
+  deleted from under a Claude that may be running in it.
+* The first message is optional, and queued like an issue's (a `/` or `!` start is refused before anything is made).
 * Discard stops the session and deletes the worktree and branch with their commits and changes (`--force`, `-D`),
   after you confirm. An issue's session can't be removed from the list (⋯ → Remove): that would leave its worktree
   and branch with no way to finish or discard them. What a cleanup couldn't do (stop the session, remove the worktree
@@ -606,9 +646,11 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
   If a dialog that emits no hook is open (`/model`, `/config`, a rewind menu, the workspace-trust prompt…), the
   keystrokes go to that dialog. grovy only types in hook-confirmed idle states, and every typed prompt must be
   confirmed by `UserPromptSubmit`, but a non-zero window remains. Use the terminal for anything unusual.
-* **Workspace trust.** Claude holds back *all* hooks until a new folder's trust dialog is accepted. For a new
-  project (or any git repo you haven't opened in Claude before), `grovy attach` once and accept it. Until then the
-  session shows `starting`. The phone only offers folders that won't hit the dialog.
+* **Workspace trust.** Claude holds back *all* hooks until a new folder's trust dialog is accepted. ⋯ → New project
+  answers it for the projects it makes; for any other git repo you haven't opened in Claude before, `grovy attach`
+  once and accept it. Until then the session shows `starting`. The phone only offers folders that won't hit the
+  dialog. Answering it relies on the dialog's wording: if a Claude Code update changes it, grovy presses nothing and
+  says to answer in the terminal. A clone left on the trust sheet when the daemon restarts stays on disk.
 * **After answering a dialog in the terminal**, state can be `unknown` until Claude's next hook event
   (e.g. its `idle_prompt` notification); see the "type anyway?" confirmation above.
 * Not every dialog emits `PermissionRequest` (e.g. MCP elicitations, plan approval). Those show as

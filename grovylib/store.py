@@ -14,6 +14,7 @@ from .pages import Pages
 from .live import LiveCards
 from .uploads import Attachments
 from .issues import Issues
+from .newproject import NewProjects
 
 
 HISTORY = 300            # events kept in memory per session
@@ -39,7 +40,7 @@ def _owner(r):
     return r.get("session", r.get("ccs"))
 
 
-class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Attachments, Issues):
+class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Attachments, Issues, NewProjects):
     def __init__(self, sdir, tmux_live=tmuxctl.tmux_managed, paste=tmuxctl.paste_prompt, notifier=None,
                  key=tmuxctl.send_key, lifecycle=None, oom=None):
         self.dir = sdir
@@ -70,6 +71,8 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
         self.issues_path = os.path.join(sdir, "issues.json")
         self.issues = {}        # session name -> {root, base, branch, worktree, created} (issues.py)
         self.issue_lock = threading.Lock()
+        self.fresh = {}         # project folder new_project made -> kind, until its first session (newproject.py)
+        self.project_lock = threading.Lock()
         self._load()
 
     # ------------------------------------------------------------ persistence

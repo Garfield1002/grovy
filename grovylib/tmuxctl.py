@@ -68,6 +68,11 @@ def capture(name, lines=200):
     return tmux("capture-pane", "-p", "-J", "-S", f"-{int(lines)}", "-t", "=" + tmux_name(name) + ":").stdout
 
 
+def screen(name):
+    """What the session's pane shows right now: the visible screen only, no scrollback."""
+    return tmux("capture-pane", "-p", "-J", "-t", _own_pane(name)).stdout
+
+
 TYPE_MAX = 20000   # longer prompts are pasted (Claude then labels them as pasted content)
 TYPE_CHUNK = 64    # chars per send-keys; small bursts are not detected as a paste by Claude Code
 TYPE_PAUSE = 0.015

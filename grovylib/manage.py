@@ -1,7 +1,7 @@
 """Start, resume, rename, restart, stop and forget sessions; reconcile with tmux."""
 import sys
 
-from . import claude, core, projects, sessions, states
+from . import claude, core, newproject, projects, sessions, states
 
 
 CONFIRM_TIMEOUT = 30     # seconds for UserPromptSubmit to confirm an injected prompt
@@ -18,6 +18,10 @@ class Lifecycle:
     def start(name, path, extra):
         sessions.start_session(name, path, extra)
         sessions.check_started(name, path, extra)
+
+    @staticmethod
+    def accept_trust(name, path):
+        newproject.accept_trust(name, path)
 
     @staticmethod
     def resume(name):

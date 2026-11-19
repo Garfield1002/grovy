@@ -25,7 +25,7 @@ from collections import deque
 from html import escape as html_escape
 from urllib.parse import urlsplit, parse_qs, unquote
 
-from grovylib import claude, client, commands, core, notify, oom, pages, plugins
+from grovylib import claude, client, commands, core, newproject, notify, oom, pages, plugins
 from grovylib.store import Store
 
 
@@ -378,6 +378,8 @@ class Http(http.server.BaseHTTPRequestHandler):
             return self._sse()
         if path == "/api/projects":
             return self._send(200, {"projects": store.lifecycle.trusted_projects()})
+        if path == "/api/projects/new":   # where ⋯ → New project makes them
+            return self._send(200, {"dir": newproject.projects_dir()})
         if path == "/api/issues/projects":
             return self._send(*_res(*store.issue_projects(), key="projects"))
         m = re.fullmatch(r"/api/issues/([^/]+)", path)
@@ -524,6 +526,13 @@ class Http(http.server.BaseHTTPRequestHandler):
         if path == "/api/sessions":
             return wrap(*store.create(body.get("name"), body.get("path"), body.get("ask"),
                                       body.get("resume"), body.get("fork")))
+        if path == "/api/projects/new":
+            return _res(*store.new_project(body.get("kind"), body.get("name"), body.get("url")))
+        if path == "/api/projects/start":
+            return _res(*store.start_project(body.get("path"), body.get("token"), body.get("text") or "",
+                                             body.get("ask"), body.get("trust")))
+        if path == "/api/projects/discard":
+            return _res(*store.discard_project(body.get("path"), body.get("token")), key="message")
         if path == "/api/issues":
             return _res(*store.create_issue(body.get("path"), body.get("text"), body.get("ask")))
         m = re.fullmatch(r"/api/issues/([^/]+)/(finish|discard)", path)

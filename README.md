@@ -60,6 +60,8 @@ in a terminal. grovy listens to Claude's hooks and shows everything on a phone-f
 - **Issues:** ⋯ → New issue starts Claude on one small fix in a copy of the project of its own (a git worktree, on a
   new branch). When it has committed, ⋯ → Finish issue shows the commits; one tap merges them into your main branch
   and cleans everything up.
+- **New projects:** ⋯ → New project makes a blank repository or clones one into `~/dev` and starts Claude in it.
+  For a clone, you see first which of its files Claude would load (some can run commands) and say whether to trust it.
 - **Git:** ⋯ → Git shows the session's repository as a graph of branches and commits; tap a commit for its files
   and diff. Branch names and commit hashes in Claude's replies are links to them.
 - **On a computer:** on a wide screen your sessions and pages stay in a sidebar. Ctrl+Enter sends, Alt+↑/↓ switches session,
