@@ -1053,6 +1053,13 @@ class TestSetupAndCustomCss(unittest.TestCase):
         self.assertGreaterEqual(told, {"chart", "stats", "progress", "checklist", "choices", "form", "image", "diagram"})
         self.assertLessEqual(told, drawn)
 
+    def test_no_time_line_above_user_messages(self):
+        # The bubble shows when it was sent: a centred "10:53" above it said the same thing twice.
+        with open(os.path.join(ROOT, "index.html")) as f:
+            page = f.read()
+        self.assertNotIn('{class: "time"}', page)
+        self.assertIn('h("span", {class: "st in"}, sent(d.sent || e.ts)', page)
+
     def test_log_widget_style_is_not_the_chart_legend(self):
         # Both used the class "lg": the log's box (reversed column, background) also restyled every chart legend.
         with open(os.path.join(ROOT, "extensions", "widgets.js")) as f:
