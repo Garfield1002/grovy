@@ -182,6 +182,8 @@ body.home #backdrop { display:block; }
 .field { display:block; width:100%; font:inherit; font-size:16px; padding:11px 14px; border-radius:12px;
   border:1px solid var(--line); background:var(--card); color:var(--fg); margin:0 0 12px; }
 .lbl { font-size:13px; color:var(--mut); margin:0 0 6px; }
+.sect { font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--mut); font-weight:600; margin:16px 0 4px; padding:0 4px; }
+.sect.first { margin-top:4px; }
 .folders { max-height:38vh; overflow-y:auto; border:1px solid var(--line); border-radius:12px; margin-bottom:12px; }
 .folders .item { padding:10px 12px; min-height:48px; }
 .folders .item.sel { background:color-mix(in srgb, var(--busy) 12%, var(--bg)); font-weight:650; }
@@ -1440,22 +1442,26 @@ function sessionMenu() {
     catch (e) { say(e.message); }
     refresh();
   };
-  openSheet(h("h2", {}, name),
-    h("button", {class: "item", onclick: searchSheet}, "Search this conversation"),
-    Object.keys(pages).length ? h("button", {class: "item", onclick: () => pagesSheet(name)}, "Pages",
-      h("div", {class: "sub"}, Object.keys(pages).length + " published by Claude")) : null,
-    h("button", {class: "item", onclick: () => renameSheet(name)}, "Rename"),
-    s.state !== "exited" && s.outdated ? h("button", {class: "item", onclick: () => updateSession(name)}, "Update session",
-      h("div", {class: "sub"}, "Restart Claude with the latest grovy, same conversation")) : null,
-    s.state === "exited"
-      ? [h("button", {class: "item", onclick: () => act("resume")}, "Resume session"),
-         h("button", {class: "item danger", onclick: () => { closeSheet(); removeSessions([name]); }}, "Remove from list")]
-      : h("button", {class: "item danger", onclick: () => {
+  const C = "Conversation", S = "Session";   // Login link lives in the home menu only, not here
+  const entries = [
+    {section: C, node: h("button", {class: "item", onclick: searchSheet}, "Search this conversation")},
+    {section: C, node: Object.keys(pages).length ? h("button", {class: "item", onclick: () => pagesSheet(name)}, "Pages",
+      h("div", {class: "sub"}, Object.keys(pages).length + " published by Claude")) : null},
+    {section: S, node: h("button", {class: "item", onclick: () => renameSheet(name)}, "Rename")},
+    {section: S, node: s.state !== "exited" && s.outdated ? h("button", {class: "item", onclick: () => updateSession(name)},
+      "Update session", h("div", {class: "sub"}, "Restart Claude with the latest grovy, same conversation")) : null},
+    ...(s.state === "exited"
+      ? [{section: S, node: h("button", {class: "item", onclick: () => act("resume")}, "Resume session")},
+         {section: S, node: h("button", {class: "item danger", onclick: () => { closeSheet(); removeSessions([name]); }},
+           "Remove from list")}]
+      : [{section: S, node: h("button", {class: "item danger", onclick: () => {
           ask(`Stop session "${name}"? Claude exits; the conversation can be resumed later.`, "Stop", {danger: true})
             .then(yes => yes && act("kill"));
-        }}, "Stop session"),
-    extMenu("session"),
-    loginItem(),
+        }}, "Stop session")}]),
+    ...extItems("session"),
+  ];
+  openSheet(h("h2", {}, name),
+    ...grouped([C, S, "More"], "More", entries),
     h("div", {class: "sub", style: "padding:10px 4px;color:var(--mut);font-size:13px"}, s.cwd || ""));
 }
 const loginItem = () => h("button", {class: "item", onclick: loginSheet}, "Login link",
@@ -1472,7 +1478,8 @@ async function loginSheet() {   // the link `grovy url` prints, for the address 
     h("p", {style: "color:var(--warn);font-size:13px"}, tok ? "Anyone with this link controls your Claude sessions: "
       + "only send it to yourself." : "This server has no token: anyone who can reach it can use grovy."));
 }
-$("menu").onclick = () => view ? sessionMenu() : openSheet(h("h2", {}, "grovy"), extMenu("home"), loginItem());
+$("menu").onclick = () => view ? sessionMenu()
+  : openSheet(h("h2", {}, "grovy"), ...extItems("home").map(e => e.node), loginItem());
 async function updateSession(name) {   // the server decides whether it's safe; forcing is a separate, explicit tap
   if (!await ask(`Update "${name}"? Claude restarts with the latest grovy and resumes the same conversation.`, "Update")) return;
   const post = force => api(`/api/sessions/${encodeURIComponent(name)}/restart`, {force});
@@ -1888,11 +1895,24 @@ function extend(node, e) {   // a message was drawn: extensions may add to it (i
   if (node && ext.on.render.length) { const copy = structuredClone(e); for (const fn of ext.on.render) runExt("render", fn, node, copy); }
   return node;
 }
-function extMenu(where) {
+function extItems(where) {   // {section, node} for each extension ⋯ item that belongs here right now
   return ext.menu.filter(m => (m.where === where || m.where === "both") &&
                              (!m.when || runExt("menu " + m.label, m.when, cur ? structuredClone(cur) : null) === true)).map(m =>
-    h("button", {class: "item", onclick: () => { closeSheet(); runExt("menu " + m.label, m.run, view); }}, m.label,
-      m.sub ? h("div", {class: "sub"}, m.sub) : null));
+    ({section: m.section, node:
+      h("button", {class: "item", onclick: () => { closeSheet(); runExt("menu " + m.label, m.run, view); }}, m.label,
+        m.sub ? h("div", {class: "sub"}, m.sub) : null)}));
+}
+// render {section, node} entries grouped under headers: the named sections first in order, then any others as they
+// appear; a section with no items (after dropping null nodes) shows nothing. def is the section for items that name none.
+function grouped(order, def, entries) {
+  const items = entries.filter(e => e && e.node), sections = [...order];
+  for (const e of items) { const s = e.section || def; if (!sections.includes(s)) sections.push(s); }
+  const out = [];
+  for (const s of sections) {
+    const nodes = items.filter(e => (e.section || def) === s).map(e => e.node);
+    if (nodes.length) out.push(h("div", {class: "sect" + (out.length ? "" : " first")}, s), ...nodes);
+  }
+  return out;
 }
 function sendHooks(text) {   // the text to send, or null when an extension stopped it (or failed: better not to send)
   for (const fn of ext.on.send) {
@@ -1987,10 +2007,11 @@ window.grovy = Object.freeze({
     if (booted) { cache.clear(); refresh(); }   // registered later on: redraw the messages that use it
   },
   // a ⋯ menu item; where: "session", "home" or "both"; when(state): shown only when it returns true (state: the open
-  // session's, or null on the home screen)
-  menu(label, run, {where = "session", sub = "", when = null} = {}) {
+  // session's, or null on the home screen); section: a header to group it under in the session menu ("Conversation",
+  // "Session", or any name of your own; the home menu is a flat list and ignores it)
+  menu(label, run, {where = "session", sub = "", section = "", when = null} = {}) {
     if (!["session", "home", "both"].includes(where)) throw new Error(`grovy.menu: where must be "session", "home" or "both"`);
-    ext.menu.push({label: String(label), run: fnArg(run, "grovy.menu"), where, sub: String(sub),
+    ext.menu.push({label: String(label), run: fnArg(run, "grovy.menu"), where, sub: String(sub), section: String(section),
                    when: when == null ? null : fnArg(when, "grovy.menu when")});
   },
   key(combo, run) {   // a keyboard shortcut (see combosOf above)

@@ -156,7 +156,7 @@ button.gref { cursor:pointer; background:none; }
     lastState = s;
   });
 
-  grovy.menu("Git", () => showGraph(grovy.session), {sub: "Branches and recent commits"});
+  grovy.menu("Git", () => showGraph(grovy.session), {sub: "Branches and recent commits", section: "Conversation"});
 
   // ---- the graph
   // Lanes: each lane waits for one commit (the parent of the commit above). A commit takes the first lane waiting for

@@ -48,7 +48,7 @@ cookie for a year. (Lax, not Strict: a standalone PWA launched from the phone's 
 navigation the browser counts as cross-site, and Strict withholds the cookie there, so every cold launch landed
 back on the login page. CSRF is covered without Strict — actions are POST, guarded by the forced CORS preflight and
 the Origin check, and GET API routes need the `X-Grovy` header a navigation can't set.) Without it the page shows "login needed" and the API returns 401. To rotate the token, delete the
-file and restart the daemon. ⋯ → Login link (in the session list too) shows the same link for the address the page was opened
+file and restart the daemon. ⋯ → Login link (on the session list only, not inside a session) shows the same link for the address the page was opened
 on: the cookie is HttpOnly, so the page asks `POST /api/login-link`, which returns the token only to a logged-in,
 same-origin JSON request (a cross-site page can't send one). A script injected into the page could read the token
 that way; the strict script CSP is what prevents that. `GROVY_AUTH=off` temporarily accepts requests without a token while still setting the
@@ -110,8 +110,9 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   * The open session: `session`, and `state` as a copy.
   * `draft(text)`, and `send(text)`: the Send button's request, never forced, through the send hooks.
   * `widget(type, render)`: adds or replaces a widget renderer.
-  * `menu(label, run, {where, when})`: a ⋯ item; `when(state)` (the open session's state, null at home) shows it
-    only when it returns true (a throwing or non-true `when` hides it).
+  * `menu(label, run, {where, when, section})`: a ⋯ item; `when(state)` (the open session's state, null at home) shows it
+    only when it returns true (a throwing or non-true `when` hides it). `section` groups it under a header in the
+    session menu ("Conversation", "Session", or a name of its own, in that order then first-seen; the home menu is flat).
   * `key(combo, run)`: a shortcut.
     * It needs Ctrl or Alt (F-keys excepted), so it can't take typing.
     * Grovy's own Ctrl+Enter and Alt+↑/↓ are refused, and so are the browser's F5 and F12.
@@ -338,9 +339,11 @@ emits no hook, so grovy records the interrupt itself and sets the state to `unkn
   * If it's open in a plain terminal, only a fork is offered, so there's never a second writer. grovy detects that from
     Claude Code's own `~/.claude/sessions/<pid>.json` (undocumented; best effort, checked against `/proc` start
     times).
-* **Session page.** The ⋯ menu has *Search this conversation*, *Rename* and *Stop session* (or *Remove from list*
-  once it has ended; ended sessions also get a *Remove* button in the list). An exited session shows **Resume
-  session**. Tapping the title switches between sessions. *Load earlier* pages back through the event log. Yes / No /
+* **Session page.** The ⋯ menu is grouped under headers: *Conversation* (*Search this conversation*, *Pages* when
+  Claude has published any, and extensions such as *Git*) and *Session* (*Rename*, *Update session*, *Stop session*
+  — or *Resume session* and *Remove from list* once it has ended; ended sessions also get a *Remove* button in the
+  list — and *Finish issue* for an issue). Items from `grovy.menu` fall under their `section`, or a trailing *More*
+  if they name none. *Login link* is on the session-list menu only. Tapping the title switches between sessions. *Load earlier* pages back through the event log. Yes / No /
   Go ahead chips appear when Claude's last reply ends with a question; they fill the message box. Typing hides
   them but keeps their space until you send, so the conversation doesn't jump.
 * **Update session** (⋯ menu, shown only when the session is out of date) restarts Claude with the latest grovy and

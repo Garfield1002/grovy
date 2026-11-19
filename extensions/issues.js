@@ -105,5 +105,5 @@ grovy.extension("issues", grovy => {
       h("p", {class: "iss-meta"}, `Fast-forwards ${st.base} to these commits, then stops the session and deletes ` +
         "its worktree and branch. Nothing is pushed."),
       buttons(merge, discard, close));
-  }, {where: "session", when: state => !!(state && state.issue)});
+  }, {where: "session", section: "Session", when: state => !!(state && state.issue)});
 });
