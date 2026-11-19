@@ -337,7 +337,12 @@ class Http(http.server.BaseHTTPRequestHandler):
             if q and hmac.compare_digest(q.encode(), self.server.token.encode()):
                 return self._send(303, b"", "text/plain", [
                     ("Location", "/"),
-                    ("Set-Cookie", f"grovy_token={q}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")])
+                    # SameSite=Lax, not Strict: Strict withholds the cookie on top-level navigations the browser
+                    # treats as cross-site, which includes a standalone PWA launched from the Android home screen,
+                    # so every cold launch landed on the login page. Lax still blocks CSRF here (actions are POST,
+                    # guarded by the JSON/octet-stream content type's forced preflight and the Origin check; GET API
+                    # routes need the X-Grovy header a navigation can't set), and only sends on top-level GETs.
+                    ("Set-Cookie", f"grovy_token={q}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000")])
         if path.startswith("/assets/") and path[8:] in ASSETS:   # icons and backdrop: nothing private
             try:
                 with open(os.path.join(ASSETS_DIR, path[8:]), "rb") as f:

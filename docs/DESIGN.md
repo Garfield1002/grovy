@@ -43,8 +43,11 @@ grovy url                                   # prints http://ADDR:7333/?token=...
 ```
 
 **A token is always required, loopback included**, because other local users and DNS-rebinding web pages can
-reach 127.0.0.1 too. It's generated once into `$STATE/token` (mode 0600). `GROVY_TOKEN` overrides it. Opening the `grovy url` link sets an HttpOnly, SameSite=Strict
-cookie for a year. Without it the page shows "login needed" and the API returns 401. To rotate the token, delete the
+reach 127.0.0.1 too. It's generated once into `$STATE/token` (mode 0600). `GROVY_TOKEN` overrides it. Opening the `grovy url` link sets an HttpOnly, SameSite=Lax
+cookie for a year. (Lax, not Strict: a standalone PWA launched from the phone's home screen is a top-level
+navigation the browser counts as cross-site, and Strict withholds the cookie there, so every cold launch landed
+back on the login page. CSRF is covered without Strict — actions are POST, guarded by the forced CORS preflight and
+the Origin check, and GET API routes need the `X-Grovy` header a navigation can't set.) Without it the page shows "login needed" and the API returns 401. To rotate the token, delete the
 file and restart the daemon. ⋯ → Login link (in the session list too) shows the same link for the address the page was opened
 on: the cookie is HttpOnly, so the page asks `POST /api/login-link`, which returns the token only to a logged-in,
 same-origin JSON request (a cross-site page can't send one). A script injected into the page could read the token

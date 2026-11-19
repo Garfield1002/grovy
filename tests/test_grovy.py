@@ -3126,6 +3126,11 @@ class TestHttp(unittest.TestCase):
             self.assertEqual(r.status, 303)
             self.assertIn("grovy_token=s3cret", r.getheader("Set-Cookie"))
             self.assertIn("HttpOnly", r.getheader("Set-Cookie"))
+            # SameSite=Lax, not Strict: a standalone PWA launched from the Android home screen is a top-level
+            # navigation the browser treats as cross-site, and Strict withholds the cookie there, bouncing every
+            # cold launch to the login page.
+            self.assertIn("SameSite=Lax", r.getheader("Set-Cookie"))
+            self.assertNotIn("Strict", r.getheader("Set-Cookie"))
             conn.close()
         finally:
             self.httpd.token, self.httpd.enforce = "", True
