@@ -95,7 +95,7 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
 
 * **Built-in extensions** are `extensions/*.js` in the grovy folder, loaded in file-name order right after grovy's own
   script. They are ordinary features written against `window.grovy` only: `context-bar.js` (the line above the message
-  box, see "Status info"), `git.js` (see "Git") and `widgets.js` (the widget types, see "Widgets"). Each registers with `grovy.extension(name, setup)`; the setups run at start-up,
+  box, see "Status info"), `git.js` (see "Git"), `issues.js` (see "Issues") and `widgets.js` (the widget types, see "Widgets"). Each registers with `grovy.extension(name, setup)`; the setups run at start-up,
   after `custom.js`, so `grovy.disable(name)` there turns one off (or replace it: disable it and copy it under another
   name).
 * **`custom.css`** is added after the built-in styles (a later rule with the same selector wins).
@@ -107,7 +107,8 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   * The open session: `session`, and `state` as a copy.
   * `draft(text)`, and `send(text)`: the Send button's request, never forced, through the send hooks.
   * `widget(type, render)`: adds or replaces a widget renderer.
-  * `menu(label, run, {where})`: a ⋯ item.
+  * `menu(label, run, {where, when})`: a ⋯ item; `when(state)` (the open session's state, null at home) shows it
+    only when it returns true (a throwing or non-true `when` hides it).
   * `key(combo, run)`: a shortcut.
     * It needs Ctrl or Alt (F-keys excepted), so it can't take typing.
     * Grovy's own Ctrl+Enter and Alt+↑/↓ are refused, and so are the browser's F5 and F12.
@@ -421,6 +422,40 @@ deadline. Hashes in other forms (`abc1234^`, a URL) are not linked. A short hash
 is taken as that ref. Without the plugin (`GROVY_PLUGINS=0`, or a daemon started before it existed) there are no
 links, and ⋯ → Git says so (asked again after a minute: plugins load just after the server starts).
 
+**Issues.** One small change, in a session and a git worktree of its own, merged back in one tap (`grovylib/issues.py`,
+the `Issues` part of `Store`; the page side is the built-in extension `extensions/issues.js`).
+* ⋯ → New issue (home screen) lists the trusted projects that are git repositories (a main checkout, not a linked
+  worktree), each with its default branch: origin's HEAD if it has one locally, else `main`, else `master`. Always that
+  branch, whatever is checked out: an issue is a fix for the main line. Claude Code's own `--worktree` isn't used: it
+  branches from `origin`'s copy, which may be behind your local branch.
+* Starting one: the session's name is `issue-` plus the first words of the text (`-2`, `-3`... when taken; also never a
+  branch or folder that exists), the branch has the same name, and the worktree is `<repo>/.claude/worktrees/<name>`.
+  Being inside the trusted repo, Claude starts there without its trust dialog (verified with Claude Code 2.1.327).
+  `/.claude/worktrees/` is added to the repo's `.git/info/exclude` (local, never committed) so `git status` in your
+  checkout stays clean. The issue is saved (`$STATE/issues.json`) before Claude starts, so its SessionStart hook can
+  tell Claude: make the change, test it, commit it on this branch, don't merge, push or switch branches. The text is
+  then queued as the first message, typed once Claude is idle, like any other (a text starting with `/` or `!` is
+  refused before anything is made: Claude Code would take it as a command). If the session can't start, the
+  worktree and branch are removed again.
+* ⋯ → Finish issue (shown only in an issue's session, `grovy.menu(..., {when})`) shows the commits and merges them:
+  **a fast-forward done by grovy**, never by Claude, so nothing lands on the base branch without your tap. The page
+  sends the commit the sheet showed (`tip`), and only that is merged: if Claude committed again since, it's refused
+  and you look again. Refused,
+  changing nothing, while Claude is working or a request is pending, with uncommitted changes in the worktree, with no
+  commits, or when the base branch moved on (the sheet then offers to ask Claude to commit or to rebase, as a draft you
+  send). Where the base branch is checked out (your main checkout, usually), it is `git merge --ff-only` there, which
+  updates those files and refuses if your own uncommitted changes are in the way; where it isn't, `git update-ref`
+  moves it, only from the commit it was checked against. Then the session is stopped and forgotten, and the worktree
+  (`git worktree remove`, which refuses if anything changed since) and the branch (`git branch -d`, merged) deleted.
+  Nothing is pushed.
+* Discard stops the session and deletes the worktree and branch with their commits and changes (`--force`, `-D`),
+  after you confirm. An issue's session can't be removed from the list (⋯ → Remove): that would leave its worktree
+  and branch with no way to finish or discard them. What a cleanup couldn't do (stop the session, remove the worktree
+  or branch) is said, never hidden.
+* git runs with argument arrays, a 60s deadline and no credential prompt, in your own trusted repository: its hooks
+  (post-checkout, post-merge) run as they would for you. Issue actions take `issue_lock` (one at a time) and run git
+  outside `Store.lock`. Renaming an issue's session keeps the issue (the branch keeps its name).
+
 **Desktop.** At 1000px wide or more, a conversation gets a sidebar with all sessions (state dot, pending-request
 badge, last activity) and all pages, refreshed on any session's event at most every 400ms and only fetched while it's
 shown. There is then no header row: the pill and ⋯ float at the top right
@@ -554,6 +589,8 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
 
 ## Known limitations
 
+* **Issues merge into the default branch only**, by fast-forward: a branch that must be rebased needs Claude (or you)
+  first. An issue's conversation stays resumable from ＋ but its folder is gone once it's finished.
 * **Prompt injection is keystrokes into a TUI.** If you've half-typed something in the terminal input, the
   web prompt is appended to it. grovy can't see that without scraping the screen, which it deliberately doesn't do.
   If a dialog that emits no hook is open (`/model`, `/config`, a rewind menu, the workspace-trust prompt…), the

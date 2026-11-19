@@ -125,6 +125,9 @@ class SessionLifecycle:
                     if p["session"] == old:
                         p["session"] = new
                 self._save_pages()
+                if old in self.issues:
+                    self.issues[new] = self.issues.pop(old)
+                    self._save_issues()
                 self.aliases = {a: (new if n == old else n) for a, n in self.aliases.items()}
                 self.aliases[old] = new
                 self.aliases.pop(new, None)
@@ -168,6 +171,8 @@ class SessionLifecycle:
         """Remove an ended session from the list (its conversation stays resumable from ＋)."""
         if name in self.tmux_live():
             return 409, f"{name} is still running; stop it first"
+        if name in self.issues:   # its worktree and branch would be left with no way to finish or discard them
+            return 409, f"{name} is an issue: open it and use ⋯ → Finish issue (or Discard) instead"
         with sessions.registry_locked() as reg:
             if reg.pop(name, None) is None and name not in self.sessions:
                 return 404, "unknown session"

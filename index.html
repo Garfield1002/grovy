@@ -1869,7 +1869,8 @@ function extend(node, e) {   // a message was drawn: extensions may add to it (i
   return node;
 }
 function extMenu(where) {
-  return ext.menu.filter(m => m.where === where || m.where === "both").map(m =>
+  return ext.menu.filter(m => (m.where === where || m.where === "both") &&
+                             (!m.when || runExt("menu " + m.label, m.when, cur ? structuredClone(cur) : null) === true)).map(m =>
     h("button", {class: "item", onclick: () => { closeSheet(); runExt("menu " + m.label, m.run, view); }}, m.label,
       m.sub ? h("div", {class: "sub"}, m.sub) : null));
 }
@@ -1965,9 +1966,12 @@ window.grovy = Object.freeze({
     WIDGETS[type] = (spec, live) => render(spec, live);
     if (booted) { cache.clear(); refresh(); }   // registered later on: redraw the messages that use it
   },
-  menu(label, run, {where = "session", sub = ""} = {}) {   // a ⋯ menu item; where: "session", "home" or "both"
+  // a ⋯ menu item; where: "session", "home" or "both"; when(state): shown only when it returns true (state: the open
+  // session's, or null on the home screen)
+  menu(label, run, {where = "session", sub = "", when = null} = {}) {
     if (!["session", "home", "both"].includes(where)) throw new Error(`grovy.menu: where must be "session", "home" or "both"`);
-    ext.menu.push({label: String(label), run: fnArg(run, "grovy.menu"), where, sub: String(sub)});
+    ext.menu.push({label: String(label), run: fnArg(run, "grovy.menu"), where, sub: String(sub),
+                   when: when == null ? null : fnArg(when, "grovy.menu when")});
   },
   key(combo, run) {   // a keyboard shortcut (see combosOf above)
     ext.keys.push({combo: normCombo(combo), run: fnArg(run, "grovy.key")});

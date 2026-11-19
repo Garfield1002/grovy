@@ -33,7 +33,7 @@ for _k in ("GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
     os.environ.pop(_k, None)
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
-from grovylib import plugins, claude, client, commands, core, hook, install, live, manage, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tmuxctl, uploads  # noqa: E402
+from grovylib import plugins, claude, client, commands, core, hook, install, issues, live, manage, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tmuxctl, uploads  # noqa: E402
 
 
 def ev(name, **kw):
@@ -1634,6 +1634,233 @@ class TestPluginRoutes(unittest.TestCase):
         self.assertEqual(self.req("/api/x/good/notjson")[0], 500)
         self.assertEqual(self.req("/api/sessions")[0], 200)                          # the daemon is still fine
 
+
+def gitc(cwd, *args):
+    return subprocess.run(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.org", *args],
+                          check=True, capture_output=True, text=True).stdout
+
+
+class TestIssues(StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.repo = os.path.realpath(tempfile.mkdtemp(dir=TMP))
+        gitc(self.repo, "init", "-q", "-b", "main")
+        with open(os.path.join(self.repo, "f.txt"), "w") as f:
+            f.write("one\n")
+        gitc(self.repo, "add", "f.txt")
+        gitc(self.repo, "commit", "-q", "-m", "first")
+        self.started, self.killed = [], []
+        test = self
+
+        class Fake:
+            trusted_projects = staticmethod(lambda: [test.repo, "/not-a-repo"])
+
+            @staticmethod
+            def start(name, path, extra):
+                test.started.append((name, path, extra))
+                test.live[name] = "%9"
+
+            @staticmethod
+            def kill(name):
+                test.killed.append(name)
+                test.live.pop(name, None)
+
+        self.store.lifecycle = Fake()
+
+    def start_issue(self, text="Fix the time shown twice!"):
+        code, res = self.store.create_issue(self.repo, text)
+        self.assertEqual(code, 200, res)
+        return res["name"], self.store.issues[res["name"]]
+
+    def settle(self, name):
+        """Claude starts, gets the issue as its first message, and finishes that turn."""
+        self.store.ingest(name, ev("SessionStart", sid="S"))   # idle: the queued issue is typed
+        self.wait_pasted(1)
+        self.store.ingest(name, ev("UserPromptSubmit", sid="S", prompt=self.pasted[-1][1]))
+        self.store.ingest(name, ev("Stop", sid="S", last_assistant_message="committed"))
+        self.assertEqual(self.store.sessions[name]["state"], "idle")
+
+    def commit_in(self, wt, text="two\n", msg="fix"):
+        with open(os.path.join(wt, "f.txt"), "w") as f:
+            f.write(text)
+        gitc(wt, "commit", "-q", "-am", msg)
+
+    def finish(self, name):
+        """Finish as the page does: with the tip its status showed."""
+        code, st = self.store.issue_status(name)
+        return self.store.finish_issue(name, st["tip"] if code == 200 else None)
+
+    def test_finish_merges_only_what_was_seen(self):
+        name, issue = self.start_issue()
+        self.settle(name)
+        self.commit_in(issue["worktree"])
+        seen = self.store.issue_status(name)[1]["tip"]
+        self.commit_in(issue["worktree"], "three\n", "later")                     # after the user looked
+        main = self.head("main")
+        code, why = self.store.finish_issue(name, seen)
+        self.assertEqual(code, 409)
+        self.assertIn("new commits", why)
+        self.assertEqual(self.head("main"), main)
+        self.assertEqual(self.store.finish_issue(name, None)[0], 400)
+        self.assertEqual(self.store.finish_issue(name, "HEAD")[0], 400)
+        self.assertEqual(self.finish(name)[0], 200)
+
+    def test_text_that_would_be_a_command_is_refused(self):
+        for text in ("/clear", "  !rm -rf x"):
+            self.assertEqual(self.store.create_issue(self.repo, text)[0], 400)
+        self.assertEqual(self.started, [])
+        self.assertEqual(gitc(self.repo, "branch", "--list", "issue-*"), "")
+
+    def test_an_issue_cant_be_forgotten(self):
+        name, issue = self.start_issue()
+        self.live.pop(name)
+        self.store.reconcile()
+        code, why = self.store.forget(name)
+        self.assertEqual(code, 409)
+        self.assertIn("Finish issue", why)
+        self.assertIn(name, self.store.issues)
+        self.assertEqual(self.store.discard_issue(name)[0], 200)                      # an ended one still goes
+        self.assertFalse(os.path.exists(issue["worktree"]))
+
+    def head(self, ref):
+        return gitc(self.repo, "rev-parse", ref).strip()
+
+    def test_create(self):
+        name, issue = self.start_issue()
+        self.assertEqual(name, "issue-fix-the-time-shown")
+        wt = os.path.join(self.repo, ".claude", "worktrees", name)
+        self.assertEqual(issue["worktree"], wt)
+        self.assertEqual((issue["base"], issue["branch"]), ("main", name))
+        self.assertEqual(self.started, [(name, wt, [])])
+        self.assertEqual(gitc(wt, "branch", "--show-current").strip(), name)
+        self.assertEqual(gitc(self.repo, "status", "--porcelain"), "")       # the worktrees are excluded locally
+        with open(self.store.issues_path) as f:
+            self.assertIn(name, json.load(f))                                 # saved before Claude starts
+        self.assertEqual([p["text"] for p in self.store.prompts if p["session"] == name], ["Fix the time shown twice!"])
+        self.assertEqual(self.store.summary(name)["issue"], {"branch": name, "base": "main"})
+        self.assertIsNone(self.store.summary("a")["issue"])
+        self.assertEqual(self.start_issue()[0], name + "-2")                 # same words: a name of its own
+
+    def test_create_validation(self):
+        self.assertEqual(self.store.create_issue(self.repo, "  ")[0], 400)
+        self.assertEqual(self.store.create_issue("/etc", "x")[0], 400)               # not a trusted project
+        self.assertEqual(self.store.create_issue("/not-a-repo", "x")[0], 400)        # not a git repository
+        self.assertEqual(self.store.create_issue(self.repo, "x" * 5000)[0], 413)
+        name, issue = self.start_issue()
+        self.assertEqual(self.store.create_issue(issue["worktree"], "x")[0], 400)   # a worktree isn't a project
+        self.assertEqual(self.store.issue_projects(), (200, [{"path": self.repo, "base": "main"}]))
+
+    def test_failed_start_cleans_up(self):
+        def fail(*a):
+            raise ValueError("no claude")
+        self.store.lifecycle.start = staticmethod(fail)
+        self.assertEqual(self.store.create_issue(self.repo, "fix it"), (409, "no claude"))
+        self.assertEqual(self.store.issues, {})
+        self.assertEqual(gitc(self.repo, "branch", "--list", "issue-*"), "")
+        self.assertEqual(os.listdir(os.path.join(self.repo, ".claude", "worktrees")), [])
+
+    def test_finish_fast_forwards_and_cleans_up(self):
+        name, issue = self.start_issue()
+        self.settle(name)
+        self.commit_in(issue["worktree"])
+        tip = self.head(name)
+        code, res = self.finish(name)
+        self.assertEqual(code, 200, res)
+        self.assertEqual(self.head("main"), tip)
+        with open(os.path.join(self.repo, "f.txt")) as f:
+            self.assertEqual(f.read(), "two\n")                               # main's checkout updated too
+        self.assertFalse(os.path.exists(issue["worktree"]))
+        self.assertEqual(gitc(self.repo, "branch", "--list", name), "")
+        self.assertEqual(self.killed, [name])
+        self.assertNotIn(name, self.store.sessions)
+        self.assertNotIn(name, self.store.issues)
+        self.assertIn("1 commit", res["message"])
+
+    def test_finish_when_base_is_not_checked_out(self):
+        gitc(self.repo, "switch", "-q", "-c", "other")
+        name, issue = self.start_issue()
+        self.settle(name)
+        self.commit_in(issue["worktree"])
+        tip = self.head(name)
+        self.assertEqual(self.finish(name)[0], 200)
+        self.assertEqual(self.head("main"), tip)
+        self.assertEqual(gitc(self.repo, "log", "-1", "--format=%s", "main").strip(), "fix")
+        self.assertEqual(gitc(self.repo, "branch", "--show-current").strip(), "other")   # your checkout untouched
+
+    def test_finish_refusals_change_nothing(self):
+        name, issue = self.start_issue()
+        self.settle(name)
+        main = self.head("main")
+        code, why = self.finish(name)
+        self.assertEqual(code, 409)
+        self.assertIn("no commits", why)
+        with open(os.path.join(issue["worktree"], "f.txt"), "w") as f:
+            f.write("half done\n")
+        code, why = self.finish(name)
+        self.assertIn("uncommitted", why)
+        gitc(issue["worktree"], "commit", "-q", "-am", "fix")
+        self.store.ingest(name, ev("UserPromptSubmit", sid="S", prompt="more"))     # Claude working
+        code, why = self.finish(name)
+        self.assertIn("still working", why)
+        self.store.ingest(name, ev("Stop", sid="S", last_assistant_message="done"))
+        with open(os.path.join(self.repo, "g.txt"), "w") as f:
+            f.write("x\n")
+        gitc(self.repo, "add", "g.txt")
+        gitc(self.repo, "commit", "-q", "-m", "main moved")                         # base moved on: no merge
+        moved = self.head("main")
+        code, why = self.finish(name)
+        self.assertIn("rebase", why)
+        self.assertEqual(self.head("main"), moved)
+        self.assertNotEqual(moved, main)
+        self.assertEqual(self.store.issue_status(name)[1]["behind"], 1)
+        self.assertTrue(os.path.isdir(issue["worktree"]))
+        self.assertEqual(self.killed, [])
+        self.assertIn(name, self.store.issues)
+
+    def test_finish_refused_when_your_changes_are_in_the_way(self):
+        name, issue = self.start_issue()
+        self.settle(name)
+        self.commit_in(issue["worktree"])
+        with open(os.path.join(self.repo, "f.txt"), "w") as f:
+            f.write("mine, not committed\n")
+        main = self.head("main")
+        code, why = self.finish(name)
+        self.assertEqual(code, 409)
+        self.assertEqual(self.head("main"), main)
+        with open(os.path.join(self.repo, "f.txt")) as f:
+            self.assertEqual(f.read(), "mine, not committed\n")
+        self.assertIn(name, self.store.issues)
+
+    def test_discard(self):
+        name, issue = self.start_issue()
+        self.commit_in(issue["worktree"])
+        with open(os.path.join(issue["worktree"], "new.txt"), "w") as f:
+            f.write("x")
+        main = self.head("main")
+        self.assertEqual(self.store.discard_issue(name)[0], 200)
+        self.assertEqual(self.head("main"), main)
+        self.assertFalse(os.path.exists(issue["worktree"]))
+        self.assertEqual(gitc(self.repo, "branch", "--list", name), "")
+        self.assertNotIn(name, self.store.issues)
+        self.assertEqual(self.finish(name)[0], 404)
+        self.assertEqual(self.store.finish_issue("a")[0], 404)                        # not an issue
+
+    def test_rename_keeps_the_issue(self):
+        name, issue = self.start_issue()
+        with mock.patch.object(self.store.lifecycle, "rename", lambda o, n: None, create=True):
+            self.assertEqual(self.store.rename(name, "fixit")[0], 200)
+        self.assertEqual(self.store.issues["fixit"], issue)
+        self.assertEqual(self.store.summary("fixit")["issue"]["branch"], name)
+
+    def test_claude_is_told(self):
+        name, issue = self.start_issue()
+        with mock.patch.object(issues, "path", lambda: self.store.issues_path):
+            text = issues.context_for(name)
+            self.assertIn(f"`{name}`", text)
+            self.assertIn("commit", text)
+            self.assertEqual(issues.context_for("a"), "")
+        with mock.patch.object(issues, "path", lambda: "/nonexistent/issues.json"):
+            self.assertEqual(issues.context_for(name), "")
 
 class TestPages(StoreCase):
     def test_publish_versions_list_delete(self):

@@ -35,6 +35,7 @@ Daemon state (Store, in store.py, is assembled from one class per feature; all s
   pages.py       HTML pages Claude publishes, their sandbox, sharing
   live.py        live widgets scripts show and update
   uploads.py     files sent from the phone
+  issues.py      issues: a session in a git worktree of its own, merged back by fast-forward
   notify.py      GROVY_NOTIFY_CMD
   plugins.py     daemon plugins: the built-in ones (plugins/) and the user's (~/.config/grovy/plugins/*.py)
 """

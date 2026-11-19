@@ -230,6 +230,13 @@ LOGIN_PAGE = (b"<!doctype html><meta name=viewport content='width=device-width,i
               b"(it ends in <code>?token=...</code>). Your browser remembers it for a year.</p>")
 
 
+def _res(code, res, key=None):
+    """(code, JSON body) for a Store answer: the result (under `key` if given) when it worked, else {"error": ...}."""
+    if code != 200:
+        return code, {"error": res}
+    return code, ({key: res} if key else res)
+
+
 class Http(http.server.BaseHTTPRequestHandler):
     server_version = "grovyd"
     protocol_version = "HTTP/1.1"
@@ -366,6 +373,11 @@ class Http(http.server.BaseHTTPRequestHandler):
             return self._sse()
         if path == "/api/projects":
             return self._send(200, {"projects": store.lifecycle.trusted_projects()})
+        if path == "/api/issues/projects":
+            return self._send(*_res(*store.issue_projects(), key="projects"))
+        m = re.fullmatch(r"/api/issues/([^/]+)", path)
+        if m and core.valid_name(m.group(1)):
+            return self._send(*_res(*store.issue_status(m.group(1))))
         if path == "/api/conversations":
             code, res = store.conversations(parse_qs(url.query).get("path", [""])[0])
             return self._send(code, {"conversations": res} if code == 200 else {"error": res})
@@ -507,6 +519,13 @@ class Http(http.server.BaseHTTPRequestHandler):
         if path == "/api/sessions":
             return wrap(*store.create(body.get("name"), body.get("path"), body.get("ask"),
                                       body.get("resume"), body.get("fork")))
+        if path == "/api/issues":
+            return _res(*store.create_issue(body.get("path"), body.get("text"), body.get("ask")))
+        m = re.fullmatch(r"/api/issues/([^/]+)/(finish|discard)", path)
+        if m and core.valid_name(m.group(1)):
+            if m.group(2) == "finish":
+                return _res(*store.finish_issue(m.group(1), body.get("tip")))
+            return _res(*store.discard_issue(m.group(1)))
         m = re.fullmatch(r"/api/sessions/([^/]+)/rename", path)
         if m and core.valid_name(m.group(1)):
             return wrap(*store.rename(m.group(1), body.get("name")))

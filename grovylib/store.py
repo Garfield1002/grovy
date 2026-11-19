@@ -13,6 +13,7 @@ from .manage import SessionLifecycle
 from .pages import Pages
 from .live import LiveCards
 from .uploads import Attachments
+from .issues import Issues
 
 
 HISTORY = 300            # events kept in memory per session
@@ -38,7 +39,7 @@ def _owner(r):
     return r.get("session", r.get("ccs"))
 
 
-class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Attachments):
+class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Attachments, Issues):
     def __init__(self, sdir, tmux_live=tmuxctl.tmux_managed, paste=tmuxctl.paste_prompt, notifier=None,
                  key=tmuxctl.send_key, lifecycle=None, oom=None):
         self.dir = sdir
@@ -66,6 +67,9 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
         self.live_new = {}      # name -> deque of creation times (rate limit)
         self._pub_at, self._pub_timer = {}, {}
         self.plugins = None     # plugins.Plugins once grovyd has loaded the user's plugins
+        self.issues_path = os.path.join(sdir, "issues.json")
+        self.issues = {}        # session name -> {root, base, branch, worktree, created} (issues.py)
+        self.issue_lock = threading.Lock()
         self._load()
 
     # ------------------------------------------------------------ persistence
@@ -74,6 +78,9 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
         pages = core.read_json(self.pages_path, {})
         self.pages = {k: v for k, v in pages.items() if core.ID_RE.match(k) and isinstance(v, dict)} \
             if isinstance(pages, dict) else {}
+        issues = core.read_json(self.issues_path, {})
+        self.issues = {k: v for k, v in issues.items() if core.valid_name(k) and isinstance(v, dict)} \
+            if isinstance(issues, dict) else {}
         st = core.read_json(self.state_path, {})
         for name, s in (st.get("sessions") or {}).items():
             if core.valid_name(name) and isinstance(s, dict):
@@ -374,6 +381,8 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
         s["pending_permissions"] = len(self._pending(name))
         s["queued_prompts"] = sum(p["status"] in ("queued", "injected") for p in mine)
         s["accepts_input"] = s["state"] in states.INPUT_STATES and not s["pending_permissions"]
+        issue = self.issues.get(name)
+        s["issue"] = {"branch": issue["branch"], "base": issue["base"]} if issue else None
         s["can_force"] = self._forceable(s) and not s["pending_permissions"]
         # background work, oldest first (none once Claude has exited, even if its end went unreported)
         s["tasks"] = [] if s["state"] == "exited" else sorted(

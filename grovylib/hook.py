@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 
-from . import claude, client, core, sessions
+from . import claude, client, core, issues, sessions
 
 
 STATUS_FIELDS = ("model", "effort", "fast_mode", "context_window", "cwd", "session_id")
@@ -106,7 +106,7 @@ def cmd_hook(name):
             print(f"grovy hook: daemon unreachable ({e}); event not recorded", file=sys.stderr)
         if event == "SessionStart":   # also after /clear and /compact
             context = "\n\n".join(filter(None, [claude.widget_guide() if core.env("WIDGETS", "1") != "0" else "",
-                                                 claude.user_instructions()]))
+                                                 claude.user_instructions(), issues.context_for(name)]))
             if context:
                 sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                                                     "additionalContext": context}}))
