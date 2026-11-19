@@ -131,6 +131,53 @@ def _pick_bind(assume_yes):
     return got
 
 
+def _port_busy(bind, port):
+    """True if something already holds (bind, port). http.server sets SO_REUSEADDR, so we do too: a socket in
+    TIME_WAIT doesn't count as busy, only a live listener does — the same condition the daemon would hit."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind((bind, port))
+        return False
+    except OSError:
+        return True
+    finally:
+        s.close()
+
+
+def _free_port(bind, start):
+    """The first free port at or after `start` (wrapping is pointless; ports above it are plenty)."""
+    for p in range(start, 65536):
+        if not _port_busy(bind, p):
+            return p
+    return start
+
+
+def _pick_port(bind, assume_yes, own_port):
+    """Ask which TCP port to listen on, warning when it's already taken by something other than our own daemon
+    (another user's grovy bound to 0.0.0.0 is the common one) and suggesting a free one. `own_port` is the port
+    our running daemon already uses, so re-running setup doesn't flag it. Typing the taken port again uses it
+    anyway: that consent is in-session only, never stored. Non-interactive: the env/default port, no prompt."""
+    default, last = core.env_int("PORT", 7333), None
+    if assume_yes or not sys.stdin.isatty():
+        return default
+    while True:
+        got = _ask("TCP port for the phone to reach grovy", default)
+        try:
+            port = int(got)
+            if not 1 <= port <= 65535:
+                raise ValueError
+        except ValueError:
+            print(f"  {got!r} is not a port number (1-65535).")
+            continue
+        if port == own_port or port == last or not _port_busy(bind, port):
+            return port
+        last, default = port, _free_port(bind, port + 1)
+        print(f"  port {port} on {bind} is already in use (maybe another user's grovy, bound to 0.0.0.0).\n"
+              f"  press enter for {default}, or type {port} again to use it anyway.")
+
+
 def cmd_setup(a):
     """One-time install: link grovy onto PATH, write and start the systemd user service, print the phone link."""
     dry = a.dry_run
@@ -165,18 +212,22 @@ def cmd_setup(a):
     # 3. the daemon as a service
     bind = a.bind or _pick_bind(a.yes)
     ipaddress.ip_address(bind)
-    unit = service_unit(bind, a.port)
-    running = False
+    running, own_port = False, None
     try:
-        running = bool(client.sock_request({"type": "status"}, timeout=1.0))
+        st = client.sock_request({"type": "status"}, timeout=1.0) or {}
+        running = bool(st)
+        m = re.match(r"http://.+:(\d+)", st.get("url", ""))
+        own_port = int(m.group(1)) if m else None
     except (OSError, ValueError):
         pass
+    port = a.port if a.port is not None else _pick_port(bind, a.yes, own_port)
+    unit = service_unit(bind, port)
     systemd = not a.no_service and shutil.which("systemctl") and subprocess.run(
         ["systemctl", "--user", "show-environment"], capture_output=True, timeout=10).returncode == 0
     if a.no_service or not systemd:
         if not a.no_service:
             print("no systemd user session here: start the daemon yourself, e.g. in tmux:")
-        print(f"  tmux new -d -s grovyd 'GROVY_BIND={bind} GROVY_PORT={a.port} {target} serve'")
+        print(f"  tmux new -d -s grovyd 'GROVY_BIND={bind} GROVY_PORT={port} {target} serve'")
     else:
         path = os.path.expanduser("~/.config/systemd/user/grovy.service")
         old = open(path).read() if os.path.exists(path) else None

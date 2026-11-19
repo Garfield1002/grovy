@@ -845,6 +845,40 @@ class TestSetupAndCustomCss(unittest.TestCase):
         self.assertIn("Environment=PATH=/a:/b:/x%%y\n", u)  # de-duplicated, % escaped for systemd
         self.assertIn(os.path.join(core.HERE, "grovy") + " serve", u)
 
+    def test_pick_port_prompts_and_avoids_a_taken_port(self):
+        """Interactively, setup asks for a port and steers off one another program (e.g. another user's grovy
+        bound to 0.0.0.0) already holds, suggesting a free one; our own daemon's port is never flagged."""
+        import socket
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", 0))
+        s.listen()
+        self.addCleanup(s.close)
+        busy = s.getsockname()[1]
+        self.assertTrue(install._port_busy("127.0.0.1", busy))
+        free = install._free_port("127.0.0.1", busy + 1)
+        self.assertFalse(install._port_busy("127.0.0.1", free))
+
+        tty = mock.patch.object(sys.stdin, "isatty", lambda: True)
+        # a plain, free answer is honoured (surrounding spaces stripped)
+        with tty, mock.patch("builtins.input", side_effect=[f" {free} "]):
+            self.assertEqual(install._pick_port("127.0.0.1", False, None), free)
+        # a taken port is refused; pressing enter takes the suggested free port
+        with tty, mock.patch("builtins.input", side_effect=[str(busy), ""]):
+            self.assertEqual(install._pick_port("127.0.0.1", False, None), free)
+        # typing the taken port again uses it anyway (consent is in-session only, like --port)
+        with tty, mock.patch("builtins.input", side_effect=[str(busy), str(busy)]):
+            self.assertEqual(install._pick_port("127.0.0.1", False, None), busy)
+        # garbage is re-asked
+        with tty, mock.patch("builtins.input", side_effect=["nope", str(free)]):
+            self.assertEqual(install._pick_port("127.0.0.1", False, None), free)
+        # our own already-running daemon's port is not treated as a conflict
+        with tty, mock.patch("builtins.input", side_effect=[str(busy)]):
+            self.assertEqual(install._pick_port("127.0.0.1", False, busy), busy)
+        # non-interactive: no prompt, env/default port
+        with mock.patch.object(sys.stdin, "isatty", lambda: False), mock.patch.dict(os.environ, {"GROVY_PORT": "7340"}):
+            self.assertEqual(install._pick_port("127.0.0.1", False, None), 7340)
+
     def test_dry_run_changes_nothing(self):
         home = tempfile.mkdtemp(dir=TMP)
         env = {"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, "cfg"), "PATH": "/usr/bin:/bin"}

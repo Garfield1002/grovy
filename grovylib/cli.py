@@ -287,7 +287,7 @@ def main(argv=None):
     s.set_defaults(fn=lambda a: hook.cmd_hook(a.name))
     s = sub.add_parser("setup", help="one-time install: PATH link, systemd service, phone link")
     s.add_argument("--bind", help="address to listen on (asked if omitted)")
-    s.add_argument("--port", type=int, default=core.env_int("PORT", 7333))
+    s.add_argument("--port", type=int, help="TCP port to listen on (asked if omitted)")
     s.add_argument("--no-service", action="store_true", help="don't install the systemd service")
     s.add_argument("-y", "--yes", action="store_true", help="don't ask; use the suggested address")
     s.add_argument("--dry-run", action="store_true", help="show what would be done, change nothing")
