@@ -145,20 +145,23 @@ in a background thread with a 15s timeout, so a failing bot never blocks hooks o
 `examples/notify-telegram.sh` posts to an existing bot (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`).
 
 **Push notifications on your devices (Web Push).** Needs HTTPS (see "HTTPS"): browsers allow service workers and
-push only on a secure page. ⋯ → Notifications (`extensions/push.js`) turns them on per device: it asks for permission
+push only on a secure page. ⋯ → Notifications (on the session list; `extensions/push.js`) turns them on per device: it asks for permission
 right inside the tap (iPhone shows the prompt nowhere else), subscribes with grovy's VAPID key and registers the
 subscription's endpoint with the built-in plugin `plugins/push.py`, which sends a test. On iPhone it only works in
 grovy opened from the home screen. The plugin listens to the same moments as `GROVY_NOTIFY_CMD` (its `notify` event,
-not rate-limited; a notification per session replaces the previous one on the phone) and sends each subscribed
+not rate-limited) and sends each subscribed
 device an **empty** push through its browser's push service (Apple, Google, Mozilla: the only way to wake a phone),
 which so learns that something happened and when, never what. The service worker (`sw.js`) then fetches the text
 from grovy (`POST /api/x/push/pending`, with the login cookie, over HTTPS) and shows it; tapping it opens the session.
 Hence no payload encryption, and no crypto code in grovy: the VAPID key (P-256, in the plugin's `data_dir()`, 0600) is
 made and used with the `openssl` command (ES256 tokens, one per push service, reused for 11h).
+* All of grovy is **one notification, a stack**: a line per session (its latest news, newest first, at most 6), kept in
+  the notification's own `data`, so dismissing or tapping it starts a new stack. It alerts when it appears, and again
+  only for news that needs you (input, error); a finished turn updates it silently. Tapping it opens the session if
+  it holds one, else the list. The badge (`assets/badge-96.png`) is white on transparent: Android draws it as a mask.
 * Every push shows a notification (browsers count silent ones against the site, and Safari drops the subscription):
-  one that finds no new message (an earlier one took it) re-shows the latest quietly, without a new alert; one that
-  can't reach grovy says "open grovy to see". A notification about the session you are looking at is shown and closed
-  at once. Pushes carry a `Topic` per session and kind, so a phone that was off gets one of each, not a burst.
+  one that finds no new message (an earlier one took it) redraws the stack quietly; one that can't reach grovy says
+  "open grovy to see". While a grovy window is in front, news is shown and closed at once (the page shows it). Pushes carry a `Topic` per session and kind, so a phone that was off gets one of each, not a burst.
 * On iPhone, `subscribe()` must run inside the tap itself: the extension fetches the key and the service worker
   beforehand, and calls it first thing (it asks for permission itself). It never unsubscribes a device on its own.
 * Messages wait per device (at most 20, in memory: lost on a daemon restart) until its service worker takes them.

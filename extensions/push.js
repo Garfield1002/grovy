@@ -83,10 +83,10 @@ grovy.extension("push", grovy => {
       }
       turnOn(subscribing);
     })();
-  }, {where: "both"});
+  }, {where: "home", sub: "Push notifications on this device"});
 
   // Keep grovy's list right: a subscribed device tells grovy again on each start (grovy may have dropped it after a
   // failed push). Never unsubscribe here: without a tap, the device couldn't subscribe again.
   if (can && Notification.permission === "granted")
     reg.then(r => r && r.pushManager.getSubscription()).then(sub => sub && call("subscribe", sub.endpoint)).catch(() => {});
-});
+}, {about: "⋯ → Notifications"});

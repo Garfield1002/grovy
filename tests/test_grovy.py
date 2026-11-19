@@ -4487,5 +4487,67 @@ const fnArg = f => f;
         self.assertEqual(r, ["nested too deeply"] * 3)
 
 
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestServiceWorker(unittest.TestCase):
+    """sw.js's push handler, run in node against a fake registration: what the phone would show."""
+    HARNESS = r"""
+const handlers = {}, shown = [];
+let inbox = [], latest = null, wins = [];
+class Note { constructor(title, o) { Object.assign(this, o, {title}); this.data = structuredClone(o.data); }
+  close() { shown.splice(shown.indexOf(this), 1); } }
+const self = globalThis.self = {
+  addEventListener: (k, f) => { handlers[k] = f; },
+  clients: {matchAll: async () => wins, claim: async () => {}},
+  registration: {
+    pushManager: {getSubscription: async () => ({endpoint: "https://push.example/x"})},
+    getNotifications: async (o = {}) => shown.filter(n => !o.tag || n.tag === o.tag),
+    showNotification: async (title, o) => {
+      if (o.renotify && o.silent) throw new TypeError("renotify and silent");
+      const old = shown.findIndex(n => n.tag === o.tag);
+      const n = new Note(title, o); if (old >= 0) shown[old] = n; else shown.push(n);
+      log.push({title, body: o.body || "", alert: !o.silent, tag: o.tag});
+    }}};
+globalThis.fetch = async () => { const m = inbox; inbox = []; if (m.length) latest = m[m.length - 1];
+  return {ok: true, json: async () => ({messages: m, latest})}; };
+const log = [];
+async function push(...msgs) { inbox = msgs; let p; handlers.push({waitUntil: x => { p = x; }}); await p; }
+const M = (session, kind, text) => ({session, kind, text});
+"""
+
+    def run_sw(self, body):
+        with open(os.path.join(ROOT, "sw.js"), encoding="utf-8") as f:
+            src = f.read()
+        js = self.HARNESS + src + "\n(async () => {" + body + "\nconsole.log(JSON.stringify({log, shown: shown.map(" \
+            "n => ({title: n.title, body: n.body, tag: n.tag}))}));})();"
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_sessions_stack_in_one_notification(self):
+        """Each session had a notification of its own, so a busy afternoon filled the shade, buzzing every time."""
+        r = self.run_sw("""
+await push(M("a", "done", "finished: tests pass"));
+await push(M("b", "done", "finished: refactor"));
+await push(M("a", "input", "permission: Bash"));""")
+        self.assertEqual([x["alert"] for x in r["log"]], [True, False, True])   # a finished turn only updates it
+        self.assertEqual(len(r["shown"]), 1)
+        self.assertEqual(r["shown"][0]["title"], "2 sessions: 1 needs you, 1 finished")
+        self.assertEqual(r["shown"][0]["body"], "a: permission: Bash\nb: refactor")
+
+    def test_nothing_shows_while_grovy_is_in_front(self):
+        r = self.run_sw("""
+await push(M("a", "done", "finished: x"));
+wins = [{focused: true, visibilityState: "visible", url: "https://h/#/"}];
+await push(M("b", "input", "permission: Bash"));""")
+        self.assertEqual([n["body"] for n in r["shown"]], ["a: x"])   # the stack stays; nothing new shown
+
+    def test_a_push_without_news_redraws_quietly(self):
+        r = self.run_sw("""
+await push(M("a", "input", "question"));
+await push();""")
+        self.assertEqual([x["alert"] for x in r["log"]], [True, False])
+        self.assertEqual(r["shown"][0]["title"], "a needs you")
+
+
 if __name__ == "__main__":
     unittest.main()

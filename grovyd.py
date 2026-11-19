@@ -194,7 +194,7 @@ ASSETS_DIR = os.path.join(core.HERE, "assets")
 
 # Public static files: an allowlist, never a path from the request.
 ASSETS = {"icon-64.png": "image/png", "icon-180.png": "image/png", "icon-192.png": "image/png",
-          "icon-512.png": "image/png", "backdrop.svg": "image/svg+xml"}
+          "icon-512.png": "image/png", "badge-96.png": "image/png", "backdrop.svg": "image/svg+xml"}
 
 
 SW_PATH = os.path.join(core.HERE, "sw.js")
