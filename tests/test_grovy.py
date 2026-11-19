@@ -1786,6 +1786,9 @@ class TestIssues(StoreCase):
         self.assertEqual(self.head("main"), tip)
         self.assertEqual(gitc(self.repo, "log", "-1", "--format=%s", "main").strip(), "fix")
         self.assertEqual(gitc(self.repo, "branch", "--show-current").strip(), "other")   # your checkout untouched
+        # Merged into main, not into "other": the branch still goes (`git branch -d` refused it here)
+        self.assertEqual(gitc(self.repo, "branch", "--list", name), "")
+        self.assertFalse(os.path.exists(issue["worktree"]))
 
     def test_finish_refusals_change_nothing(self):
         name, issue = self.start_issue()

@@ -449,7 +449,7 @@ the `Issues` part of `Store`; the page side is the built-in extension `extension
   send). Where the base branch is checked out (your main checkout, usually), it is `git merge --ff-only` there, which
   updates those files and refuses if your own uncommitted changes are in the way; where it isn't, `git update-ref`
   moves it, only from the commit it was checked against. Then the session is stopped and forgotten, and the worktree
-  (`git worktree remove`, which refuses if anything changed since) and the branch (`git branch -d`, merged) deleted.
+  (`git worktree remove`, which refuses if anything changed since) and the branch (once checked to be in the base branch: `git branch -d` would check the branch your checkout has out) deleted.
   Nothing is pushed.
 * Discard stops the session and deletes the worktree and branch with their commits and changes (`--force`, `-D`),
   after you confirm. An issue's session can't be removed from the list (⋯ → Remove): that would leave its worktree

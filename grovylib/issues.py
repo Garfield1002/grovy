@@ -109,8 +109,16 @@ def add_worktree(root, name, base):
 
 
 def remove_worktree(issue, force=False):
-    git(issue["root"], "worktree", "remove", *(["--force"] if force else []), issue["worktree"])
-    git(issue["root"], "branch", "-D" if force else "-d", issue["branch"])
+    root, branch = issue["root"], issue["branch"]
+    git(root, "worktree", "remove", *(["--force"] if force else []), issue["worktree"])
+    if not force:
+        # Merged into the base branch, not into whatever the main checkout has out (`git branch -d` checks that one,
+        # so it refused whenever the checkout was on another branch).
+        try:
+            git(root, "merge-base", "--is-ancestor", f"refs/heads/{branch}", f"refs/heads/{issue['base']}")
+        except GitError:
+            raise GitError(f"{branch} isn't in {issue['base']}: kept") from None
+    git(root, "branch", "-D", branch)
 
 
 def status(issue):
