@@ -382,7 +382,7 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
         s["queued_prompts"] = sum(p["status"] in ("queued", "injected") for p in mine)
         s["accepts_input"] = s["state"] in states.INPUT_STATES and not s["pending_permissions"]
         issue = self.issues.get(name)
-        s["issue"] = {"branch": issue["branch"], "base": issue["base"]} if issue else None
+        s["issue"] = {"branch": issue["branch"], "base": issue["base"], "root": issue["root"]} if issue else None
         s["can_force"] = self._forceable(s) and not s["pending_permissions"]
         # background work, oldest first (none once Claude has exited, even if its end went unreported)
         s["tasks"] = [] if s["state"] == "exited" else sorted(

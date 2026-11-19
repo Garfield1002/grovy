@@ -68,6 +68,7 @@ main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px
 .sess .rm { align-self:center; flex:none; font-size:13px; font-weight:600; color:var(--bad); border:1px solid var(--line);
   border-radius:99px; padding:6px 12px; background:var(--card); }
 .sess .badge { font-size:12px; font-weight:700; color:#fff; background:var(--warn); border-radius:99px; padding:1px 8px; }
+.sess.wt { padding-left:22px; border-left:2px solid var(--line); }   /* a worktree, nested under its root project */
 .empty { text-align:center; color:var(--mut); padding:48px 10px; }
 /* the grove backdrop (from grove, the same author's tmux agent manager), only on the session list */
 #backdrop { display:none; position:fixed; right:-6vw; bottom:0; height:min(72vh, 640px); aspect-ratio:941/1672;
@@ -665,6 +666,37 @@ function md(src) {
 }
 
 // ---------------------------------------------------------------- session list
+// An issue's session lives in a git worktree of a project; show it indented, right below that project's own
+// session (keeping each session's sorted order). A worktree whose root project has no session falls to the end.
+function orderSessions(sessions) {
+  const kids = {};   // root path -> its worktree sessions
+  for (const s of sessions) if (s.issue) (kids[s.issue.root] ||= []).push(s);
+  const out = [];
+  for (const s of sessions) {
+    if (s.issue) continue;                             // placed under its root below, not at top level
+    out.push([s, false]);
+    for (const k of kids[s.cwd] || []) out.push([k, true]);
+    delete kids[s.cwd];
+  }
+  for (const r in kids) for (const k of kids[r]) out.push([k, true]);   // root project has no session of its own
+  return out;
+}
+
+function sessCard(s, nested) {
+  return h("button", {class: "sess" + (nested ? " wt" : ""), "data-fk": "s:" + s.name, onclick: () => go("#/s/" + s.name)},
+    h("span", {class: dotClass(s)}),
+    h("div", {class: "body"},
+      h("div", {class: "top"}, h("span", {class: "name"}, s.name),
+        s.pending_permissions ? h("span", {class: "badge"}, s.pending_permissions + " waiting") : null,
+        h("span", {class: "when"}, ago(s.last_event))),
+      h("div", {class: "sub"}, base(s.cwd), " · ", LABEL[s.state] || s.state,
+        s.queued_prompts ? ` · ${s.queued_prompts} queued` : "", ...(s.background && s.state !== "exited" ? [" · ", runMark(s.background)] : []),
+        s.meta && s.meta.context != null && s.state !== "exited" ? ` · context ${s.meta.context}%` : ""),
+      s.activity ? h("div", {class: "prev"}, s.activity) : null),
+    s.state === "exited" ? h("span", {class: "rm", role: "button", tabindex: "0", "data-fk": "rm:" + s.name, "aria-label": "Remove " + s.name,
+      onclick: ev => { ev.stopPropagation(); removeSessions([s.name]); }}, "Remove") : null);
+}
+
 let showAllPages = false;
 async function renderList() {
   document.body.classList.add("home");
@@ -681,20 +713,8 @@ async function renderList() {
     all.length > shown.length ? h("button", {class: "earlier", onclick: () => { showAllPages = true; refresh(); }},
       `Show all ${all.length} pages`) : null] : [];
   document.title = "grovy" + (sessions.some(s => s.pending_permissions || s.state === "needs_input") ? " (!)" : "");
-  paint(main, ...(sessions.length ? sessions.map(s => {
-    return h("button", {class: "sess", "data-fk": "s:" + s.name, onclick: () => go("#/s/" + s.name)},
-      h("span", {class: dotClass(s)}),
-      h("div", {class: "body"},
-        h("div", {class: "top"}, h("span", {class: "name"}, s.name),
-          s.pending_permissions ? h("span", {class: "badge"}, s.pending_permissions + " waiting") : null,
-          h("span", {class: "when"}, ago(s.last_event))),
-        h("div", {class: "sub"}, base(s.cwd), " · ", LABEL[s.state] || s.state,
-          s.queued_prompts ? ` · ${s.queued_prompts} queued` : "", ...(s.background && s.state !== "exited" ? [" · ", runMark(s.background)] : []),
-          s.meta && s.meta.context != null && s.state !== "exited" ? ` · context ${s.meta.context}%` : ""),
-        s.activity ? h("div", {class: "prev"}, s.activity) : null),
-      s.state === "exited" ? h("span", {class: "rm", role: "button", tabindex: "0", "data-fk": "rm:" + s.name, "aria-label": "Remove " + s.name,
-        onclick: ev => { ev.stopPropagation(); removeSessions([s.name]); }}, "Remove") : null);
-  }) : [h("div", {class: "empty"}, "No sessions yet. Tap ＋ to start one.")]),
+  paint(main, ...(sessions.length ? orderSessions(sessions).map(([s, nested]) => sessCard(s, nested))
+    : [h("div", {class: "empty"}, "No sessions yet. Tap ＋ to start one.")]),
     ...(() => { const dead = sessions.filter(s => s.state === "exited").map(s => s.name);
       return dead.length > 1 ? [h("button", {class: "earlier", onclick: () => removeSessions(dead)}, `Remove all ${dead.length} ended sessions`)] : []; })(),
     ...pageSection.flat().filter(Boolean));

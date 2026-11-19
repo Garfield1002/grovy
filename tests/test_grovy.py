@@ -1737,7 +1737,7 @@ class TestIssues(StoreCase):
         with open(self.store.issues_path) as f:
             self.assertIn(name, json.load(f))                                 # saved before Claude starts
         self.assertEqual([p["text"] for p in self.store.prompts if p["session"] == name], ["Fix the time shown twice!"])
-        self.assertEqual(self.store.summary(name)["issue"], {"branch": name, "base": "main"})
+        self.assertEqual(self.store.summary(name)["issue"], {"branch": name, "base": "main", "root": self.repo})
         self.assertIsNone(self.store.summary("a")["issue"])
         self.assertEqual(self.start_issue()[0], name + "-2")                 # same words: a name of its own
 

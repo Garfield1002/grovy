@@ -427,6 +427,10 @@ links, and ⋯ → Git says so (asked again after a minute: plugins load just af
 
 **Issues.** One small change, in a session and a git worktree of its own, merged back in one tap (`grovylib/issues.py`,
 the `Issues` part of `Store`; the page side is the built-in extension `extensions/issues.js`).
+* On the home screen an issue's session shows indented (a left-border guide), right below its root project's own
+  session, keeping each session's sorted order (`orderSessions` in `index.html`, matching a session's `cwd` against the
+  `root` each issue's summary now carries). Several issues of one project stack under it; an issue whose root project
+  has no session of its own falls to the end, still indented.
 * ⋯ → New issue (home screen) lists the trusted projects that are git repositories (a main checkout, not a linked
   worktree), each with its default branch: origin's HEAD if it has one locally, else `main`, else `master`. Always that
   branch, whatever is checked out: an issue is a fix for the main line. Claude Code's own `--worktree` isn't used: it
