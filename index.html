@@ -132,6 +132,8 @@ body.home #backdrop { display:block; }
 .cb .copy { position:absolute; top:6px; right:6px; border:1px solid var(--line); background:var(--card);
   border-radius:8px; font-size:12px; padding:5px 9px; min-height:32px; }
 .tw { overflow-x:auto; margin:0 0 .8em; }
+.mathb { overflow-x:auto; overflow-y:hidden; margin:0 0 .7em; padding:2px 0; white-space:pre-wrap; }
+.md math[display="block"] { overflow-x:auto; overflow-y:hidden; max-width:100%; }
 .tw table { border-collapse:collapse; font-size:14px; }
 .tw th, .tw td { border-bottom:1px solid var(--line); padding:6px 10px 6px 0; text-align:left; vertical-align:top; }
 .rc { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin:0 0 8px; }
@@ -522,7 +524,10 @@ function inline(text) {
   // One left-to-right scan; a code span wins at its position and nothing inside it is parsed,
   // while bold/italic may contain code spans (handled by recursion).
   const out = [];
-  const re = /(`+)([^`]|[^`].*?[^`])\1(?!`)|\*\*(.+?)\*\*|__(.+?)__|\*([^\s*](?:.*?[^\s*])?)\*|(?<![\w])_([^\s_](?:.*?[^\s_])?)_(?![\w])|~~(.+?)~~|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>()`]*[^\s<>().,;:!?'"*_`])/g;
+  // Math ($…$, \(…\), and $$…$$ or \[…\] for display) comes last, so it only wins where it starts first: a dollar
+  // amount is no math, since a closing $ follows no space and comes before no letter, digit, ( or { ("$5 and $10",
+  // "$PATH:$HOME", "$(pwd)/$(ls)").
+  const re = /(`+)([^`]|[^`].*?[^`])\1(?!`)|\*\*(.+?)\*\*|__(.+?)__|\*([^\s*](?:.*?[^\s*])?)\*|(?<![\w])_([^\s_](?:.*?[^\s_])?)_(?![\w])|~~(.+?)~~|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>()`]*[^\s<>().,;:!?'"*_`])|\$\$(.+?)\$\$|\\\[(.+?)\\\]|\\\((.+?)\\\)|(?<![\w$\\])\$(?=[^\s$])((?:\\.|[^$\\])+?)(?<!\s)\$(?![\w$({])/g;
   let last = 0, m;
   while ((m = re.exec(text))) {
     if (m.index > last) out.push(text.slice(last, m.index));
@@ -531,11 +536,18 @@ function inline(text) {
     else if (m[5] || m[6]) out.push(h("em", {}, inline(m[5] || m[6])));
     else if (m[7]) out.push(h("s", {}, inline(m[7])));
     else if (m[8]) out.push(h("a", {href: m[9], target: "_blank", rel: "noopener noreferrer"}, inline(m[8])));
-    else out.push(h("a", {href: m[10], target: "_blank", rel: "noopener noreferrer"}, m[10]));
+    else if (m[10]) out.push(h("a", {href: m[10], target: "_blank", rel: "noopener noreferrer"}, m[10]));
+    else out.push(math(m[11] ?? m[12] ?? m[13] ?? m[14], m[11] != null || m[12] != null, m[0]));
     last = re.lastIndex;
   }
   if (last < text.length) out.push(text.slice(last));
   return out;
+}
+let MATH = null;   // render(tex, display) -> a node, from grovy.math (the built-in one: extensions/math.js)
+function math(tex, display, src) {   // src: the math as written, shown as it is when it can't be drawn
+  if (!MATH) return src;
+  try { return MATH(tex, display); }
+  catch (e) { return h("code", {class: "mathx", title: "Not drawn: " + (e && e.message || e)}, src); }
 }
 function copyText(text, btn) {
   const done = () => { btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1500); };
@@ -624,6 +636,17 @@ function md(src) {
       continue;
     }
     if (!l.trim()) { flush(); i++; continue; }
+    if ((m = l.match(/^\s*(\$\$|\\\[)(.*)$/))) {                        // display math on lines of its own
+      const close = m[1] === "$$" ? "$$" : "\\]", body = [m[2]];
+      let j = i;
+      while (!body[body.length - 1].includes(close) && ++j < lines.length && j - i < 60 && lines[j].trim()) body.push(lines[j]);
+      const all = body.join("\n"), k = all.indexOf(close);
+      const after = k >= 0 ? all.slice(k + 2).trim() : "";
+      if (k >= 0 && /^[.,;:!?]?$/.test(after)) {   // "$$ x = 1 $$." keeps its full stop
+        flush(); root.append(h("div", {class: "mathb"}, math(all.slice(0, k), true, lines.slice(i, j + 1).join("\n")), after));
+        i = j + 1; continue;
+      }
+    }
     if ((m = l.match(/^(#{1,6})\s+(.*)$/))) { flush(); root.append(h("h" + Math.min(4, m[1].length), {}, inline(m[2]))); i++; continue; }
     if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)) { flush(); root.append(h("hr")); i++; continue; }
     if (l.includes("|") && i + 1 < lines.length && SEP.test(lines[i + 1])) {
@@ -2009,6 +2032,10 @@ window.grovy = Object.freeze({
   // a ⋯ menu item; where: "session", "home" or "both"; when(state): shown only when it returns true (state: the open
   // session's, or null on the home screen); section: a header to group it under in the session menu ("Conversation",
   // "Session", or any name of your own; the home menu is a flat list and ignores it)
+  math(render) {   // draws the math in replies: render(tex, display) returns a node, or throws (the TeX then shows as written)
+    MATH = fnArg(render, "grovy.math");
+    if (booted) { cache.clear(); refresh(); }
+  },
   menu(label, run, {where = "session", sub = "", section = "", when = null} = {}) {
     if (!["session", "home", "both"].includes(where)) throw new Error(`grovy.menu: where must be "session", "home" or "both"`);
     ext.menu.push({label: String(label), run: fnArg(run, "grovy.menu"), where, sub: String(sub), section: String(section),

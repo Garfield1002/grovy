@@ -19,6 +19,8 @@
      grovy.widget(type, render)         a ```widget type Claude can draw: render(spec) returns nodes, and throws an
                                         Error with a readable message for bad input. Tell Claude about it in
                                         ~/.config/grovy/instructions.md (added to every session's instructions).
+     grovy.math(render)                 draw the LaTeX in replies yourself: render(tex, display) returns a node,
+                                        or throws (the TeX then shows as written)
      grovy.menu(label, run, {where})    an item in the ⋯ menu: where "session" (default), "home" or "both"; add
                                         when: state => true/false to show it only sometimes (state: the open
                                         session's, null on the home screen); add section: "Conversation" | "Session"

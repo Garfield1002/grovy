@@ -44,6 +44,7 @@ in a terminal. grovy listens to Claude's hooks and shows everything on a phone-f
   commands that work from the phone.
 - **Start, resume, rename, stop:** start Claude in any trusted folder, continue or fork a past conversation,
   stop sessions and resume them later.
+- **Math:** formulas Claude writes in LaTeX (`$x^2$`, `$$\sum_i x_i$$`) show as real math.
 - **Widgets and pages:** Claude can answer with charts, checklists, diagrams, images or buttons to pick from, and
   publish full HTML pages (reports, dashboards) that open full-screen. A page can be shared on your network
   with a link.

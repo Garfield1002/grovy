@@ -3618,5 +3618,150 @@ console.log(JSON.stringify(box.childNodes.map(x => x.n)));""")
         self.assertEqual(r, ["b", "text:hi", "a"])
 
 
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestMath(unittest.TestCase):
+    """LaTeX in replies: index.html's inline() finds it, extensions/math.js draws it as MathML (run in node, fake DOM)."""
+    HARNESS = r"""
+class El { constructor(tag) { this.tag = this.localName = tag; this.attrs = {}; this.kids = []; }
+  setAttribute(k, v) { this.attrs[k] = String(v); } addEventListener() {}
+  set className(v) { this.attrs.class = v; }
+  append(...ks) { for (const k of ks) this.kids.push(typeof k === "string" ? {text: k} : k); }
+  get textContent() { return this.kids.map(k => k.text ?? k.textContent).join(""); } }
+const document = {createElement: t => new El(t), createElementNS: (ns, t) => new El(t)};
+globalThis.Node = El;
+const ser = k => typeof k === "string" ? k : k.text != null ? k.text : "<" + k.tag +
+  Object.entries(k.attrs).map(([a, v]) => ` ${a}="${v}"`).join("") + ">" + k.kids.map(ser).join("") + "</" + k.tag + ">";
+let booted = false;
+const fnArg = f => f;
+"""
+
+    def run_js(self, body, with_math=True):
+        with open(os.path.join(ROOT, "index.html"), encoding="utf-8") as f:
+            src = f.read()
+        fns = [re.search(r"^function %s\(.*?^\}" % n, src, re.S | re.M).group(0) for n in ("h", "inline", "math")]
+        js = self.HARNESS + "let MATH = null;\n" + "\n".join(fns) + "\n"
+        if with_math:
+            js += "const grovy = {css() {}, math(r) { MATH = r; }, extension(n, setup) { setup(grovy); }};\n"
+            with open(os.path.join(ROOT, "extensions", "math.js"), encoding="utf-8") as f:
+                js += f.read() + "\n"
+        js += "const tex = (t, d) => ser(MATH(t, d)), line = t => inline(t).map(ser).join(\"\");\n"
+        js += "const err = t => { try { MATH(t); return null; } catch (e) { return e.message; } };\n"
+        out = subprocess.run(["node", "-e", js + "console.log(JSON.stringify((() => {" + body + "})()));"],
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_finds_math_but_not_money_or_variables(self):
+        r = self.run_js("""return ["$x^2$ grows", "costs $5 and $10", "$PATH:$HOME", "from $5-$10", "`$x$`",
+                                   "\\\\(a\\\\) and \\\\[b\\\\]", "so $$a$$ here", "a$b$", "$ x $"].map(line);""")
+        self.assertTrue(r[0].startswith("<math><mrow><msup><mi>x</mi><mn>2</mn></msup></mrow></math>"), r[0])
+        self.assertEqual(r[1:4], ["costs $5 and $10", "$PATH:$HOME", "from $5-$10"])
+        self.assertEqual(r[4], "<code>$x$</code>")
+        self.assertEqual(r[5], '<math><mrow><mi>a</mi></mrow></math> and <math display="block"><mrow><mi>b</mi></mrow></math>')
+        self.assertIn('<math display="block">', r[6])
+        self.assertEqual(r[7:], ["a$b$", "$ x $"])
+
+    def test_math_wins_over_emphasis_inside_it(self):
+        """$a_1 * b_2$ must not turn into italics: the math starts first, so it takes the whole span."""
+        r = self.run_js("""return [line("$a_1 * b_2$ and *c*"), line("**bold $x$**")];""")
+        self.assertNotIn("<em>", r[0].split("</math>")[0])
+        self.assertIn("<em>c</em>", r[0])
+        self.assertTrue(r[1].startswith("<strong>bold <math>"), r[1])
+
+    def test_without_the_extension_math_shows_as_written(self):
+        r = self.run_js("""return line("area $\\\\pi r^2$ ok");""", with_math=False)
+        self.assertEqual(r, "area $\\pi r^2$ ok")
+
+    def test_tex_it_cannot_read_shows_as_code(self):
+        r = self.run_js("""return [line("$\\\\frac{a}$"), line("${x$")];""")
+        self.assertTrue(all(x.startswith('<code class="mathx" title="Not drawn: ') for x in r), r)
+        self.assertTrue(r[0].endswith(">$\\frac{a}$</code>"), r[0])
+
+    def test_fractions_roots_scripts(self):
+        r = self.run_js("""return [tex("\\\\frac{a}{b}"), tex("\\\\sqrt[3]{x}"), tex("x_i^2"), tex("f'(x)"), tex("\\\\frac12")];""")
+        self.assertEqual(r[0], "<math><mrow><mfrac><mrow><mi>a</mi></mrow><mrow><mi>b</mi></mrow></mfrac></mrow></math>")
+        self.assertEqual(r[1], "<math><mrow><mroot><mrow><mi>x</mi></mrow><mrow><mi>3</mi></mrow></mroot></mrow></math>"
+                         .replace("<mi>3</mi>", "<mn>3</mn>"))
+        self.assertIn("<msubsup><mi>x</mi><mi>i</mi><mn>2</mn></msubsup>", r[2])
+        self.assertIn("<msup><mi>f</mi><mo>′</mo></msup>", r[3])
+        self.assertIn("<mfrac><mn>1</mn><mn>2</mn></mfrac>", r[4])
+
+    def test_limits_go_under_in_display_only(self):
+        r = self.run_js("""return [tex("\\\\sum_{i=1}^n i", false), tex("\\\\sum_{i=1}^n i", true),
+                                   tex("\\\\lim_{x \\\\to 0} f", true), tex("\\\\int_0^1 x", true)];""")
+        self.assertIn("<msubsup><mo>∑</mo>", r[0])
+        self.assertIn("<munderover><mo>∑</mo>", r[1])
+        self.assertIn("<munder><mi>lim</mi>", r[2])
+        self.assertIn("<msubsup><mo>∫</mo>", r[3])
+
+    def test_symbols_fonts_and_text(self):
+        r = self.run_js("""return [tex("\\\\alpha \\\\le \\\\Omega"), tex("\\\\mathbb{R}^n \\\\mathcal{L} \\\\mathbf{v}"),
+                                   tex("\\\\text{if } x"), tex("\\\\sin x"), tex("a \\\\not= b")];""")
+        self.assertEqual(r[0], '<math><mrow><mi>α</mi><mo>≤</mo><mi mathvariant="normal">Ω</mi></mrow></math>')
+        self.assertIn("ℝ", r[1]); self.assertIn("ℒ", r[1]); self.assertIn("𝐯", r[1])
+        self.assertIn("<mtext>if </mtext>", r[2])
+        self.assertIn('<mi>sin</mi><mspace width="0.1667em"></mspace><mi>x</mi>', r[3])
+        self.assertIn("<mo>≠</mo>", r[4])
+
+    def test_delimiters_matrices_and_aligned_rows(self):
+        r = self.run_js("""return [tex("\\\\left( \\\\frac{a}{b} \\\\right)"),
+                                   tex("\\\\begin{pmatrix} 1 & 2 \\\\\\\\ 3 & 4 \\\\end{pmatrix}"),
+                                   tex("|x| = \\\\begin{cases} x & x \\\\ge 0 \\\\\\\\ -x & \\\\text{else} \\\\end{cases}"),
+                                   tex("a &= b \\\\\\\\ &= c", true)];""")
+        self.assertIn('<mo stretchy="true" symmetric="true" form="prefix">(</mo>', r[0])
+        self.assertEqual(r[1].count("<mtr>"), 2); self.assertEqual(r[1].count("<mtd"), 4)
+        self.assertIn('<mtable class="m-cases">', r[2])
+        self.assertIn('<mtable class="m-al">', r[3]); self.assertEqual(r[3].count("<mtr>"), 2)
+
+    def test_signs_after_an_operator_are_unary(self):
+        """"det A = -2" was spaced like a subtraction; "a - b" and "(a) - b" must stay binary."""
+        r = self.run_js("""return [tex("x = -2"), tex("-x"), tex("a - b"), tex("(a) - b"), tex("|x - a|")];""")
+        self.assertIn('<mo form="prefix">−</mo><mn>2</mn>', r[0])
+        self.assertIn('<mo form="prefix">−</mo>', r[1])
+        self.assertNotIn("prefix", r[2]); self.assertNotIn("prefix", r[3])
+        self.assertIn('<mo stretchy="false" lspace="0" rspace="0">|</mo>', r[4])
+
+    def test_review_fixes(self):
+        """Shell text read as math; \\text showing commands; \\textbf losing spaces; \\hline in red; nested [..]."""
+        r = self.run_js("""return [line("run $(pwd)/$(ls) now"), line("${HOME}/${USER}"),
+            tex("\\\\operatorname*{arg\\\\,max}_x", true), tex("\\\\text{\\\\textbf{a b} costs \\\\$5}"),
+            tex("\\\\textbf{hello world}"), tex("\\\\begin{array}{c|c} a & b \\\\\\\\ \\\\hline c & d \\\\end{array}"),
+            tex("\\\\sqrt[\\\\sqrt[3]{2}]{x}"), tex("n! - 1"), tex("\\\\max\\\\{a\\\\}")];""")
+        self.assertEqual(r[:2], ["run $(pwd)/$(ls) now", "${HOME}/${USER}"])
+        self.assertIn("<munder><mi>arg max</mi>", r[2])
+        self.assertIn("<mtext>a\u00a0b\u00a0costs\u00a0$5</mtext>", r[3])
+        self.assertIn('<mtext style="font-weight:bold">hello\u00a0world</mtext>', r[4])
+        self.assertNotIn("m-err", r[5])
+        self.assertEqual(r[6].count("<mroot>"), 2)
+        self.assertNotIn("prefix", r[7])
+        self.assertNotIn("mspace", r[8])
+
+    def test_display_block_keeps_trailing_punctuation(self):
+        with open(os.path.join(ROOT, "index.html"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('/^[.,;:!?]?$/.test(after)', src)
+
+    def test_unknown_command_is_marked_and_the_rest_draws(self):
+        r = self.run_js("""return tex("\\\\foo + 1");""")
+        self.assertEqual(r, '<math><mrow><mtext class="m-err">\\foo</mtext><mo>+</mo><mn>1</mn></mrow></math>')
+
+    def test_bad_input_is_refused_not_obeyed(self):
+        """The TeX is Claude's (untrusted): a colour may not smuggle in CSS, and nesting can't exhaust the stack."""
+        r = self.run_js("""return [err("\\\\color{red;background:url(x)} x"), err("\\\\textcolor{red}{x}"),
+                                   err("{".repeat(5000) + "x" + "}".repeat(5000)), err("x".repeat(5000)),
+                                   err("\\\\left( x"), err("\\\\begin{pmatrix} 1"), err("\\\\begin{evil} x \\\\end{evil}"),
+                                   tex("\\\\text{<img src=x>}")];""")
+        self.assertIn("colour", r[0])
+        self.assertIsNone(r[1])
+        self.assertIn("too long", r[2]); self.assertIn("too long", r[3])
+        self.assertIn("\\right", r[4]); self.assertIn("\\end", r[5]); self.assertIn("unknown environment", r[6])
+        self.assertIn("<mtext><img src=x></mtext>", r[7])
+
+    def test_deep_nesting_within_the_length_limit(self):
+        r = self.run_js("""return [err("{".repeat(1000) + "}".repeat(1000)), err("\\\\sqrt{".repeat(500) + "}".repeat(500)),
+                                   err("\\\\it\\\\rm".repeat(600))];""")
+        self.assertEqual(r, ["nested too deeply"] * 3)
+
+
 if __name__ == "__main__":
     unittest.main()

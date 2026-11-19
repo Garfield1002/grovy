@@ -99,7 +99,7 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
 
 * **Built-in extensions** are `extensions/*.js` in the grovy folder, loaded in file-name order right after grovy's own
   script. They are ordinary features written against `window.grovy` only: `context-bar.js` (the line above the message
-  box, see "Status info"), `git.js` (see "Git"), `issues.js` (see "Issues") and `widgets.js` (the widget types, see "Widgets"). Each registers with `grovy.extension(name, setup)`; the setups run at start-up,
+  box, see "Status info"), `git.js` (see "Git"), `issues.js` (see "Issues"), `math.js` (see "Math") and `widgets.js` (the widget types, see "Widgets"). Each registers with `grovy.extension(name, setup)`; the setups run at start-up,
   after `custom.js`, so `grovy.disable(name)` there turns one off (or replace it: disable it and copy it under another
   name).
 * **`custom.css`** is added after the built-in styles (a later rule with the same selector wins).
@@ -111,6 +111,7 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   * The open session: `session`, and `state` as a copy.
   * `draft(text)`, and `send(text)`: the Send button's request, never forced, through the send hooks.
   * `widget(type, render)`: adds or replaces a widget renderer.
+  * `math(render)`: draws the math in replies (`render(tex, display)` returns a node or throws); replaces the built-in.
   * `menu(label, run, {where, when, section})`: a ⋯ item; `when(state)` (the open session's state, null at home) shows it
     only when it returns true (a throwing or non-true `when` hides it). `section` groups it under a header in the
     session menu ("Conversation", "Session", or a name of its own, in that order then first-seen; the home menu is flat).
@@ -517,6 +518,28 @@ the box. In the `/` picker the first command is highlighted; ↑/↓ move, Tab o
 when closed. With a mouse (`pointer: fine`), opening a session focuses the message box; never on a touch screen (it would
 pop the keyboard), and permission cards are never focused automatically, so a stray Enter can't answer one. Live
 re-renders keep keyboard focus on the same control (`paint()`, matching rebuilt rows by `data-fk`).
+
+**Math.** Markdown rendering (`md()`/`inline()` in `index.html`, so replies and anything else drawn with `grovy.md`,
+such as commit messages) finds LaTeX: `$…$` and `\(…\)` inside a line, `$$…$$` and `\[…\]` either inside a line or
+on lines of their own (a block, up to 60 lines, ending at a blank line; one punctuation mark after the closing `$$` is
+kept). Display math is centred and scrolls sideways when wide; inline math doesn't wrap. A `$…$` needs no space after
+the opening `$`, none before the closing one, and no letter, digit, `$`, `(` or `{` right after it, so `$5 and $10`,
+`$PATH:$HOME` and `$(pwd)/$(ls)` stay text; a code span that starts first wins. Math is matched last in the inline pattern, so it only wins where it starts first (`$a_1 * b_2$` is not italics, while
+`**$x$**` is bold math). Drawing is the built-in extension `extensions/math.js` (`grovy.math`): a small TeX parser that
+builds MathML node by node, which the browser lays out itself (MathML Core: Chrome 109+, Safari, Firefox), so no
+library, font or CSP change. It covers what replies hold (fractions, roots, scripts and primes, Greek, operators,
+relations and arrows, big operators with limits under them in display only, functions, accents, `\mathbb`-style fonts
+through the Unicode math letters, `\text`, `\left…\right`, `\big`, matrices, cases, `aligned`, colours). An unknown
+command shows in red and the rest still draws; TeX it can't read (unbalanced braces, a missing argument, `\left`
+without `\right`, over 4000 characters, nesting over 40 deep, `\rm`/`\color` scopes included) shows as written in a
+code span, with the reason as its tooltip, and so does all math when the extension is off. The TeX is untrusted: the
+only values taken from it into attributes are a colour matching `#rgb`, `#rrggbb` or a plain name, and `\hspace`-style
+lengths as numbers clamped to -2..10em. `\text{…}` keeps its words: spacing commands become spaces, other commands
+are dropped. A sign right after an operator or at the start is unary
+(`= -2`); plain `(`, `|` get no spacing, as in TeX. Claude is told about the delimiters in `WIDGET_GUIDE`. Not done:
+macros (`\newcommand`), `\tag` numbering, line breaking of long inline math, display math inside list items, and
+a `|` inside math in a table row (it splits the cell: Claude can write `\vert`). False positives remain possible
+for `\(…\)`/`\[…\]` in prose about regexes.
 
 **Widgets.** Claude's reply can contain ` ```widget ` blocks holding one JSON object: `chart` (bar, line, pie),
 `stats`, `progress`, `note`, `log`, `checklist`, `choices`, `form`, `diagram` or `image`. The page draws them itself with DOM and SVG

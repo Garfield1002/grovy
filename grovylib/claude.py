@@ -122,8 +122,8 @@ def session_pythonpath():
 
 
 WIDGET_GUIDE = """\
-grovy: the user may read your final message of each turn on a phone, which renders markdown and ```widget \
-blocks (one JSON object each; grovy draws them, no HTML). The terminal shows the raw JSON, so state key facts in \
+grovy: the user may read your final message of each turn on a phone, which renders markdown, LaTeX math \
+($..$ inline, $$..$$ on lines of its own) and ```widget blocks (one JSON object each; grovy draws them, no HTML). The terminal shows the raw JSON, so state key facts in \
 text too. Use a widget only when it clearly beats text, usually at most one per reply.
 - chart: {"type":"chart","kind":"bar|line|pie","title":"..","labels":["a","b"],"series":[{"name":"..","values":[1,2]}],"unit":"ms"}
 - stats: {"type":"stats","title":"..","items":[{"label":"Tests","value":"88/88","note":"..","tone":"ok|warn|bad"}]}
