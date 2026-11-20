@@ -15,6 +15,9 @@ grovy.extension("widgets", grovy => {
 .c1 { --c:var(--c1) } .c2 { --c:var(--c2) } .c3 { --c:var(--c3) } .c4 { --c:var(--c4) } .c5 { --c:var(--c5) } .c6 { --c:var(--c6) }
 .wg-image { padding:6px; } .wg-image .wt { margin:4px 6px 8px; } .wcap { margin:6px 6px 2px; }
 .wimg { display:block; } .wimg img { display:block; max-width:100%; max-height:70vh; margin:0 auto; border-radius:8px; }
+.wfile { display:flex; align-items:center; gap:12px; padding:11px 13px; min-height:44px; border:1px solid var(--line); border-radius:10px; background:var(--bg); text-decoration:none; color:inherit; }
+.wfile:active { background:var(--line); } .wfile .wf-ic { font-size:20px; line-height:1; color:var(--busy); flex:none; }
+.wfile .wf-b { min-width:0; } .wfile .wf-n { font-weight:600; overflow-wrap:anywhere; } .wfile .wn { margin-top:1px; }
 .lg { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:13px; color:var(--mut); margin:0 0 8px; }
 .lg span { display:inline-flex; align-items:center; gap:6px; } .lg i { width:10px; height:10px; border-radius:3px; background:var(--c); flex:none; }
 .lg.col { flex-direction:column; gap:6px; color:var(--fg); font-size:14px; } .lg em { font-style:normal; color:var(--mut); margin-left:auto; padding-left:10px; }
@@ -79,6 +82,8 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
   const tone = t => TONES.has(t) ? t : "";
   const fmt = n => Math.abs(n) >= 1e6 || (Math.abs(n) < 1e-3 && n) ? n.toPrecision(3) : String(+n.toFixed(Math.abs(n) < 10 ? 2 : Math.abs(n) < 1000 ? 1 : 0));
   const wtitle = t => t ? h("div", {class: "wt"}, wtext(t, 200)) : null;
+  const hsize = n => { n = Math.max(0, n); const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i === 0 ? n : +n.toFixed(n < 10 ? 1 : 0)) + " " + u[i]; };
   const dur = s => { s = Math.max(0, Math.round(s)); return s < 60 ? s + "s" : s < 3600 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`
     : `${Math.floor(s / 3600)}h ${String(Math.floor(s % 3600 / 60)).padStart(2, "0")}m`; };
   let widgetSeq = 0;   // unique ids within the page (form fields, diagram arrowheads)
@@ -182,6 +187,18 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
       link.append(h("img", {src: url, alt: wtext(s.caption, 300), loading: "lazy",
         onerror: () => link.replaceWith(h("div", {class: "wn"}, "This image is no longer available."))}));
       return [wtitle(s.title), link, s.caption ? h("div", {class: "wn wcap"}, wtext(s.caption, 300)) : null];
+    },
+
+    file(s) {   // url: what `grovy x share FILE` printed (a file grovy serves from disk as a download)
+      const url = wtext(s.url, 60);
+      if (!/^\/xfile\/[0-9a-f]{32}$/.test(url))
+        throw new Error("url must be what `grovy x share FILE` printed");
+      const name = wtext(s.name, 120) || "file";
+      const meta = s.size == null ? "Download" : hsize(wnum(s.size, "size")) + " · Download";
+      const card = h("a", {class: "wfile", href: url, download: name, rel: "noopener"},
+        h("span", {class: "wf-ic"}, "↓"),
+        h("span", {class: "wf-b"}, h("div", {class: "wf-n"}, name), h("div", {class: "wn"}, meta)));
+      return [wtitle(s.title), card, s.caption ? h("div", {class: "wn wcap"}, wtext(s.caption, 300)) : null];
     },
 
     log(s) {

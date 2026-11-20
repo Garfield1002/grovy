@@ -1282,6 +1282,50 @@ class TestPlugins(StoreCase):
                     lambda: api.route("GET", "../x", print), lambda: api.on("event", 3)):
             self.assertRaises((ValueError, TypeError), bad)
 
+    def test_command_dispatch(self):
+        host, _ = self.load({"c.py": (
+            "def setup(grovy):\n"
+            "    @grovy.command\n"
+            "    def run(cmd):\n"
+            "        if cmd.args == ['boom']: raise RuntimeError('nope')\n"
+            "        if cmd.args == ['bad']: return 2, 'no good'\n"
+            "        if cmd.args == ['num']: return 7   # not text\n"
+            "        return f'args={cmd.args} session={cmd.session} cwd={cmd.cwd}'\n")})
+        self.assertEqual(host.command("c", ["x", "y"], "a", "/w"),
+                         (200, {"out": "args=['x', 'y'] session=a cwd=/w"}))
+        self.assertEqual(host.command("c", ["bad"], None, None), (2, {"out": "no good"}))
+        self.assertEqual(host.command("nope", [], None, None)[0], 404)   # no such command
+        self.assertEqual(host.command("c", ["boom"], None, None)[0], 500)
+        self.assertEqual(host.command("c", ["num"], None, None)[0], 500)   # must be text
+        self.assertEqual(host.command("c", [], "a", None), (200, {"out": "args=[] session=a cwd=None"}))
+
+    def test_download_registry(self):
+        host, _ = self.load({})
+        api = plugins.Api(host, "t")
+        url = api.download("/tmp/report.pdf", session="a")
+        token = url.rsplit("/", 1)[1]
+        self.assertRegex(url, r"^/xfile/[0-9a-f]{32}$")
+        self.assertEqual(host.download_entry(token), {"path": "/tmp/report.pdf", "name": "report.pdf", "session": "a"})
+        self.assertIsNone(host.download_entry("0" * 32))   # unknown token
+        tok2 = api.download("/x/a.b", name="../weird name!.txt").rsplit("/", 1)[1]
+        self.assertEqual(host.download_entry(tok2)["name"], "weird_name_.txt")   # path and odd chars stripped from the name
+        self.assertRaises(ValueError, lambda: api.download("relative/path"))   # must be absolute
+        self.assertRaises(ValueError, lambda: api.download(123))
+        for i in range(plugins.DOWNLOADS_MAX + 5):   # bounded: the oldest offers are dropped
+            api.download(f"/tmp/f{i}")
+        self.assertLessEqual(len(host.downloads), plugins.DOWNLOADS_MAX)
+        self.assertIsNone(host.download_entry(token))   # the early one was evicted
+
+    def test_failed_plugin_download_offer_is_rolled_back(self):
+        # a setup() that offers a file and then raises must leave nothing serving: the offer is removed with the plugin
+        host, _ = self.load({"leak.py": (
+            "def setup(grovy):\n"
+            "    grovy.download('/tmp/leak.bin')\n"
+            "    raise RuntimeError('boom')\n")})
+        self.assertEqual(host.loaded, [])
+        self.assertIn("leak", host.failed)
+        self.assertEqual(host.downloads, {})
+
 
 class TestBuiltinPlugins(StoreCase):
     def test_builtin_first_and_user_replaces(self):
@@ -1304,6 +1348,31 @@ class TestBuiltinPlugins(StoreCase):
             self.assertEqual(sys.modules["grovy_plugin_c_d"].WHO, "mine")
             # the real built-in folder ships the git plugin, and it loads
             self.assertIn("git", plugins.Plugins(self.store, "/nonexistent", builtin=plugins.BUILTIN_DIR).load().loaded)
+
+    def test_share_plugin(self):
+        with mock.patch("sys.stderr", io.StringIO()):
+            host = plugins.Plugins(self.store, "/nonexistent", builtin=plugins.BUILTIN_DIR).load()
+        self.assertIn("share", host.loaded)
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "report.csv"), "w") as f:
+            f.write("a,b\n1,2\n")
+        # a relative path resolves against the session's cwd, and the file is offered (not copied)
+        code, res = host.command("share", ["report.csv", "--caption", "here you go"], "a", d)
+        self.assertEqual(code, 200)
+        self.assertTrue(res["out"].startswith("```widget\n") and res["out"].rstrip().endswith("```"))
+        spec = json.loads(res["out"].split("\n", 1)[1].rsplit("\n```", 1)[0])
+        self.assertEqual((spec["type"], spec["name"], spec["size"], spec["caption"]),
+                         ("file", "report.csv", 8, "here you go"))
+        entry = host.download_entry(spec["url"].rsplit("/", 1)[1])
+        self.assertEqual((entry["path"], entry["session"]), (os.path.join(d, "report.csv"), "a"))
+        # missing file: a non-zero status with a message, not a widget
+        code, res = host.command("share", ["nope.txt"], "a", d)
+        self.assertEqual(code, 1)
+        self.assertIn("can't read nope.txt", res["out"])
+        # a directory is not a regular file
+        self.assertEqual(host.command("share", [d], "a", d)[0], 2)
+        # no argument: usage
+        self.assertEqual(host.command("share", [], "a", d)[0], 2)
 
 
 @unittest.skipUnless(shutil.which("git"), "git not installed")
@@ -3057,6 +3126,29 @@ class TestLiveEndToEnd(unittest.TestCase):
         self.assertEqual((steps["status"], steps["spec"]["items"][0]["value"]), ("done", 50))
         self.assertEqual((left["status"], left["spec"]["items"][0]["value"]), ("stopped", 2))
 
+    def test_x_share_through_the_socket(self):
+        with mock.patch("sys.stderr", io.StringIO()):
+            self.store.plugins = plugins.Plugins(self.store, "/nonexistent", builtin=plugins.BUILTIN_DIR).load()
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "out.log"), "w") as f:
+            f.write("done\n")
+        g = os.path.join(ROOT, "grovy.py")
+        r = subprocess.run([sys.executable, g, "x", "share", "out.log"], cwd=d, env=self.env,
+                           capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('"type": "file"', r.stdout)      # the widget block Claude puts in its reply
+        self.assertRegex(r.stdout, r"/xfile/[0-9a-f]{32}")
+        # a missing file is a real error: stderr, non-zero exit, no widget
+        r2 = subprocess.run([sys.executable, g, "x", "share", "nope.txt"], cwd=d, env=self.env,
+                            capture_output=True, text=True, timeout=20)
+        self.assertEqual((r2.returncode, r2.stdout), (1, ""))
+        self.assertIn("can't read nope.txt", r2.stderr)
+        # an unknown plugin command
+        r3 = subprocess.run([sys.executable, g, "x", "nope", "arg"], env=self.env,
+                            capture_output=True, text=True, timeout=20)
+        self.assertEqual(r3.returncode, 1)
+        self.assertIn("no plugin command", r3.stderr)
+
 
 class TestHttp(unittest.TestCase):
     @classmethod
@@ -3206,6 +3298,31 @@ class TestHttp(unittest.TestCase):
         self.assertEqual(self.req("/api/images/a/..%2Fstate.json")[0], 404)
         with mock.patch.object(self.httpd, "token", "secret"):
             self.assertEqual(self.req("/api/images/" + spec["src"])[0], 401)
+
+    def test_shared_file_download(self):
+        host = plugins.Plugins(self.store, "/nonexistent").load()
+        self.addCleanup(setattr, self.store, "plugins", None)
+        self.store.plugins = host
+        d = tempfile.mkdtemp(dir=TMP)
+        p = os.path.join(d, "data.bin")
+        with open(p, "wb") as f:
+            f.write(b"\x00\x01\x02hello")
+        url = plugins.Api(host, "share").download(p, name="my report.bin")
+        code, body, h = self.req(url)
+        self.assertEqual((code, body), (200, b"\x00\x01\x02hello"))
+        # served as a download, never rendered on grovy's origin
+        self.assertEqual(h["Content-Type"], "application/octet-stream")
+        self.assertEqual(h["Content-Disposition"], 'attachment; filename="my_report.bin"')
+        self.assertEqual(h["Content-Length"], "8")
+        self.assertEqual(h["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(h["Content-Security-Policy"], "default-src 'none'")
+        self.assertEqual(h["X-Frame-Options"], "DENY")
+        self.assertEqual(self.req("/xfile/" + "0" * 32)[0], 404)   # unknown token
+        self.assertEqual(self.req("/xfile/not-hex")[0], 404)
+        with mock.patch.object(self.httpd, "token", "secret"):
+            self.assertEqual(self.req(url)[0], 401)                 # behind grovy's login
+        os.unlink(p)
+        self.assertEqual(self.req(url)[0], 404)                     # the file is gone, not a half-sent 200
 
     def test_image_command_refuses_non_images(self):
         fake = os.path.join(TMP, "notes.png")

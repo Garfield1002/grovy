@@ -150,6 +150,24 @@ def cmd_page(a):
     return 0
 
 
+def cmd_x(a):
+    """Run a plugin's `grovy x PLUGIN ...` command: forward it to the daemon and print what the plugin returns."""
+    msg = {"type": "plugin", "plugin": a.plugin, "args": a.args, "session": core.env("SESSION"), "cwd": os.getcwd()}
+    try:
+        reply = client.sock_request(msg, timeout=40) or {}   # a command gets the plugin route deadline (30s) plus slack
+    except (OSError, ValueError) as e:
+        print(f"grovy x: daemon unreachable ({e})", file=sys.stderr)
+        return 1
+    if "error" in reply:
+        print(f"grovy x {a.plugin}: {reply['error']}", file=sys.stderr)
+        return 1
+    code = reply.get("code", 200)
+    out = reply.get("out", "")
+    if out:
+        print(out, file=sys.stdout if code == 200 else sys.stderr)
+    return 0 if code == 200 else (code if 1 <= code < 256 else 1)
+
+
 def _live_cli(key, spec, status="running", message=None):
     """Live widget from the command line: report problems on stderr, but never fail the caller's pipeline."""
     if not scriptlib.active():
@@ -303,6 +321,9 @@ def main(argv=None):
     for x in (pp, pr, pl):
         x.add_argument("--session", help="default: $GROVY_SESSION")
         x.set_defaults(fn=cmd_page)
+    s = sub.add_parser("x", help="run a plugin command: grovy x PLUGIN [args...] (e.g. grovy x share FILE)")
+    s.add_argument("plugin"), s.add_argument("args", nargs=argparse.REMAINDER, help="arguments passed to the plugin")
+    s.set_defaults(fn=cmd_x)
     s = sub.add_parser("image", help="keep a copy of an image for the phone; prints the widget block to put in a reply")
     s.add_argument("file"), s.add_argument("--caption"), s.add_argument("--session", help="default: $GROVY_SESSION")
     s.set_defaults(fn=cmd_image)

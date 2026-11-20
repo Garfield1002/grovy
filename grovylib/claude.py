@@ -132,6 +132,7 @@ text too. Use a widget only when it clearly beats text, usually at most one per 
 - choices: {"type":"choices","question":"..","multi":false,"options":[{"label":"..","description":"..","message":"text to send if picked"}]}
 - form: {"type":"form","title":"..","submit":"..","fields":[{"name":"k","label":"..","kind":"text|textarea|number|select|toggle","options":[".."],"default":".."}]}
 - image: run `GROVY image FILE [--caption T]` (png/jpg/gif/webp, e.g. a plot or screenshot you made) and put the ```widget block it prints in your reply.
+- file: to share any file for the user to download (a report, csv, zip, log), run `GROVY x share FILE [--caption T]` and put the ```widget block it prints in your reply. The file isn't copied; grovy serves it from its path, so leave it in place.
 - diagram: {"type":"diagram","direction":"down|right","nodes":[{"id":"a","label":"..","tone":"ok|warn|bad"}],"edges":[{"from":"a","to":"b","label":".."}]}
 choices/form only prefill the user's message box; they review and send it. Limits: ~12 bars, 8 pie slices, 30 nodes.
 Only when the user asks for a page (they may say "local page": that means this), or the result is too big for \

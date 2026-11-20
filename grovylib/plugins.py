@@ -14,6 +14,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import sys
 import threading
 import traceback
@@ -25,9 +26,10 @@ ROUTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(/[A-Za-z0-9][A-Za-z0-9_.
 EVENTS = ("event", "state", "notify")
 QUEUE_MAX = 1000
 SETUP_TIMEOUT = 10        # seconds for one plugin's setup(); past that it is skipped (and its thread left behind)
-ROUTE_TIMEOUT = 30        # seconds a route may take before the request gets 504 (its thread is left to finish)
-ROUTES_RUNNING = 8        # routes running at once (hung ones included); more get 503, so they can't use up the server
+ROUTE_TIMEOUT = 30        # seconds a route (or a `grovy x` command) may take before it gets 504
+ROUTES_RUNNING = 8        # routes/commands running at once (hung ones included); more get 503, so they can't use up the server
 ANSWER_MAX = 4 * 1024 * 1024
+DOWNLOADS_MAX = 4000      # file offers kept at once (grovy.download); the oldest are dropped past this
 BUILTIN_DIR = os.path.join(core.HERE, "plugins")
 
 
@@ -86,6 +88,33 @@ class Api:
         self._register("route", lambda: self._host.routes.__setitem__((self.name, method, path), fn))
         return fn
 
+    def command(self, fn):
+        """grovy.command(fn) (or @grovy.command): fn(cmd) answers `grovy x PLUGIN ...` run from inside a session, so a
+        plugin can give the session's Claude a verb (the file-sharing plugin uses it: `grovy x share FILE`). cmd has
+        .args (the words after the plugin name), .session (the session it ran in, or None) and .cwd (where it ran, for
+        resolving a relative path). Return the text to print, or (status, text) with a non-zero status for an error on
+        stderr. One handler per plugin; runs on a thread of its own with the route deadline. Only works inside setup()."""
+        if not callable(fn):
+            raise TypeError("grovy.command needs a function")
+        self._register("command", lambda: self._host.commands.__setitem__(self.name, fn))
+        return fn
+
+    def download(self, path, name=None, session=None):
+        """grovy.download(path) offers a file on disk to the phone and returns a URL ("/xfile/..") to put in a widget or
+        a page. The file is NOT copied: grovy serves it straight from PATH (an absolute path), behind its login, always
+        as a download (never rendered). name is the download's file name (default: PATH's). Usable from any thread."""
+        self._alive("download")
+        if not isinstance(path, str) or not os.path.isabs(path):
+            raise ValueError("grovy.download: path must be an absolute path")
+        fname = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(name or path)).strip("._-")[:120] or "file"
+        token = secrets.token_hex(16)
+        with self._host.dl_lock:
+            self._host.downloads[token] = {"path": path, "name": fname, "plugin": self.name,
+                                           "session": session if isinstance(session, str) else None}
+            while len(self._host.downloads) > DOWNLOADS_MAX:   # bounded: drop the oldest offer
+                self._host.downloads.pop(next(iter(self._host.downloads)))
+        return f"/xfile/{token}"
+
     # Copies are made under Store's lock: the originals change under other threads, and a plugin must never hold
     # (or change) grovy's own objects.
     def sessions(self):
@@ -129,6 +158,13 @@ class Request:
         self.method, self.path, self.query, self.body = method, path, query, body
 
 
+class Cmd:
+    def __init__(self, args, session, cwd):
+        self.args = [str(a) for a in args] if isinstance(args, list) else []
+        self.session = session if isinstance(session, str) else None
+        self.cwd = cwd if isinstance(cwd, str) else None
+
+
 class Plugins:
     def __init__(self, store, folder=None, builtin=None):
         self.store = store
@@ -136,12 +172,15 @@ class Plugins:
         self.builtin = builtin   # grovyd passes BUILTIN_DIR; None loads only the user's (as the tests do)
         self.handlers = {e: [] for e in EVENTS}
         self.routes = {}
+        self.commands = {}          # plugin name -> its `grovy x` handler
+        self.downloads = {}         # token -> {path, name, session}: files offered with grovy.download (served by grovyd)
         self.loaded, self.failed = [], {}
         self.q = queue.Queue(maxsize=QUEUE_MAX)
         self.dropped = 0
         self.thread = None
         self.running = threading.BoundedSemaphore(ROUTES_RUNNING)
         self.reg_lock = threading.Lock()
+        self.dl_lock = threading.Lock()
 
     def load(self):
         if core.env("PLUGINS", "1") == "0":
@@ -179,7 +218,7 @@ class Plugins:
         """Import one plugin and run its setup() on a thread of its own, with a deadline. Returns an error or None.
         A plugin that fails is removed whole: what it registered, and its module."""
         api = Api(self, name)
-        before = ({e: list(h) for e, h in self.handlers.items()}, dict(self.routes))
+        before = ({e: list(h) for e, h in self.handlers.items()}, dict(self.routes), dict(self.commands))
         out = {}
 
         def run():
@@ -203,7 +242,9 @@ class Plugins:
             err = out.get("err") or (f"setup() took longer than {SETUP_TIMEOUT}s" if t.is_alive() else None)
             if err:
                 api._dead = True
-                self.handlers, self.routes = before
+                self.handlers, self.routes, self.commands = before
+                with self.dl_lock:   # download() bypasses reg_lock, so its offers aren't in `before`: drop this plugin's
+                    self.downloads = {t: e for t, e in self.downloads.items() if e.get("plugin") != name}
                 sys.modules.pop(modname, None)
         return err
 
@@ -274,3 +315,55 @@ class Plugins:
         if len(body) > ANSWER_MAX:
             return 500, {"error": f"plugin {plugin} answered more than {ANSWER_MAX // 1048576} MB"}
         return code, body
+
+    def command(self, plugin, args, session, cwd):
+        """A `grovy x PLUGIN ...` call forwarded from the CLI. Returns (status, {"out": text}) or (status, {"error": ..}).
+        Runs on a thread of its own with the route deadline and shares the route slots, so a hung command can't take
+        over the server any more than a hung route can."""
+        fn = self.commands.get(plugin)
+        if fn is None:
+            have = ", ".join(sorted(self.commands)) or "none"
+            return 404, {"error": f"no plugin command {plugin!r} (plugins offering one: {have})"}
+        if not self.running.acquire(blocking=False):
+            return 503, {"error": f"too many plugin requests are still running (at most {ROUTES_RUNNING})"}
+        out = {}
+
+        def run():
+            try:
+                out["res"] = fn(Cmd(args, session, cwd))
+            except BaseException as e:
+                out["err"] = f"{type(e).__name__}: {e}"
+            finally:
+                self.running.release()
+
+        t = threading.Thread(target=run, name=f"grovy-cmd-{plugin}", daemon=True)
+        try:
+            t.start()
+        except RuntimeError as e:
+            self.running.release()
+            return 503, {"error": f"can't run plugin {plugin} now: {e}"}
+        t.join(ROUTE_TIMEOUT)
+        if t.is_alive():
+            log(f"plugin {plugin} (command): no answer after {ROUTE_TIMEOUT}s")
+            return 504, {"error": f"plugin {plugin} didn't answer in {ROUTE_TIMEOUT}s"}
+        if "err" in out:
+            log(f"plugin {plugin} (command): {out['err']}")
+            return 500, {"error": f"plugin {plugin} failed: {out['err']}"}
+        res, code = out.get("res"), 200
+        if (isinstance(res, tuple) and len(res) == 2 and isinstance(res[0], int) and not isinstance(res[0], bool)):
+            code, res = res
+        if res is None:
+            res = ""
+        if not isinstance(res, str):
+            log(f"plugin {plugin} (command): answer is not text")
+            return 500, {"error": f"plugin {plugin} answered something that isn't text"}
+        if len(res.encode("utf-8", "surrogatepass")) > ANSWER_MAX:
+            return 500, {"error": f"plugin {plugin} answered more than {ANSWER_MAX // 1048576} MB"}
+        return code, {"out": res}
+
+    def download_entry(self, token):
+        """The file offered under TOKEN (a copy), or None: grovyd serves it as a download at /xfile/TOKEN.
+        The owning plugin name is internal bookkeeping (for rollback) and left out."""
+        with self.dl_lock:
+            e = self.downloads.get(token)
+            return {"path": e["path"], "name": e["name"], "session": e["session"]} if e else None

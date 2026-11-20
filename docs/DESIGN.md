@@ -156,6 +156,13 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   * `route("GET" | "POST", path, fn)` for `/api/x/PLUGIN/PATH`. It sits behind the token. POST is checked like the
     rest of the API. A GET also needs an `X-Grovy: 1` header, which `grovy.api` sends and a tapped link or a page's
     navigation can't. Keep GET routes read-only all the same.
+  * `command(fn)` (one per plugin): answers `grovy x PLUGIN ...` run inside a session, so a plugin can give the
+    session's Claude a verb. `fn(cmd)` gets `cmd.args`, `cmd.session` and `cmd.cwd` (for a relative path) and returns
+    the text to print, or `(status, text)`. The CLI forwards it over the daemon's socket; the file-sharing plugin
+    (see "File sharing") uses it.
+  * `download(path, name=None, session=None)`: offer a file on disk to the phone, returning a `/xfile/TOKEN` URL. The
+    file is **not** copied; grovyd serves it straight from `path` (absolute) as a download (see "File sharing"). The
+    offers live in a bounded in-memory registry on the plugins host, so they are lost on a restart.
   * `sessions()` and `session(name)`, as copies.
   * `send(session, text)`: the phone's rules, never forced, with a copy as its result.
   * `log()`.
@@ -169,7 +176,8 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
     over. Two files that map to the same module name (`a-b.py`, `a_b.py`): the second is skipped.
   * A route runs on its own thread with a 30s deadline (504). At most 8 run at once, hung ones included (503), so they
     can't use up the server's connections. An answer must be JSON (no NaN), at most 4 MB, with a status that can carry
-    a body.
+    a body. A `command` runs the same way, sharing those 8 slots and the deadline; its answer is text (≤ 4 MB), and a
+    non-zero status prints it on stderr with that exit code.
   * A plugin that failed can't use its `Api` any more, even from a thread it left running.
   * A callback or route that raises is logged (a route answers 500), and the rest carries on.
 
@@ -565,6 +573,23 @@ bytes, ≤ 20 MB), copies it to `STATE/images/SESSION/DATE-TIME-RAND-NAME` (mode
 and prints a ` ```widget ` block `{"type":"image","src":"SESSION/FILE"}` for Claude to put in its reply. The page
 fetches it from `GET /api/images/SESSION/FILE` (logged in; name pattern and image types only; `O_NOFOLLOW`; served
 as an image with `default-src 'none'`), so a widget can only show images grovy copied, never an arbitrary path.
+
+**File sharing.** The built-in plugin `plugins/share.py` lets a session's Claude hand the user *any* file to download
+on the phone: `grovy x share FILE [--caption T]` (the CLI `x` verb forwards to the plugin's `command`, see
+"Plugins"). Unlike the image widget, the file is **not** copied — `grovy.download(path)` registers the file's path
+and returns a `/xfile/TOKEN` URL (token = 16 random bytes), and the plugin prints a ` ```widget ` block
+`{"type":"file","name":..,"size":..,"url":..}` for Claude's reply; the phone draws it as a card with a Download
+button (the `file` widget in `extensions/widgets.js`). Tapping it is a top-level navigation, so the `SameSite=Lax`
+login cookie goes with it. grovyd serves `GET /xfile/TOKEN` (behind the token like everything past `_authed`) by
+streaming the file from disk — no size limit, not read into memory — as `Content-Disposition: attachment`,
+`application/octet-stream`, nosniff, `default-src 'none'`, `X-Frame-Options: DENY`, so an arbitrary file a session
+offered is always a download and can never render or run on grovy's origin. It opens the path fresh each time (a
+regular file only), so a file that has since moved or been deleted is a 404, not a half-sent 200. The offer points
+at a path, not a copy: the file must still be there when the user taps, and a session's own output (a report, CSV,
+zip or log it just made) is the intended use. The registry is in memory and bounded (oldest dropped past 4000), so
+offers don't survive a daemon restart. Because the daemon runs as the user and serves only paths a session (also the
+user's own code) chose, this adds no read reach beyond what the session already had; the login is what keeps it off
+the LAN. Without the plugin (`GROVY_PLUGINS=0`, or a user `share.py` that replaces it) there is no `share` verb.
 
 **Live widgets (from scripts).** A long command Claude runs (training, a build, a batch job) can show cards in the
 chat *while it runs*, between your message and Claude's reply, and update them in place. Sessions get grovy's folder

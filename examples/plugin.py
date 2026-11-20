@@ -12,6 +12,12 @@ grovy folder, are written the same way: read plugins/git.py for a longer example
                              something JSON-able, or (status, value). request.query (GET), request.body (POST).
                              Call it with grovy.api() from custom.js (a GET needs its X-Grovy header, so a link
                              can't trigger it); keep GET routes read-only all the same. 30s deadline.
+    grovy.command(fn)        fn(cmd) answers `grovy x PLUGIN ...` run inside a session (one handler per plugin): give
+                             the session's Claude a verb. cmd.args (the words after the plugin name), cmd.session,
+                             cmd.cwd (for a relative path). Return the text to print, or (status, text). 30s deadline.
+    grovy.download(path, name=None, session=None)   offer a file on disk to the phone; returns a "/xfile/.." URL to put
+                             in a widget or a page. The file is NOT copied: grovy serves it from `path` (absolute),
+                             behind its login, always as a download. (grovy's built-in share plugin uses both of these.)
     grovy.sessions(), grovy.session(name)   the session list / one session's detail (copies)
     grovy.send(session, text)               send a message, with the phone's rules (never forced)
     grovy.log(text)                          a line in grovy's log (journalctl --user -u grovy)

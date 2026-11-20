@@ -96,6 +96,17 @@ class SockHandler(socketserver.StreamRequestHandler):
             else:
                 code, res = 400, "unknown page op"
             self._reply({"ok": res} if code == 200 else {"error": res})
+        elif t == "plugin":   # `grovy x PLUGIN ...` run inside a session; the plugin answers with text to print
+            plugin = str(msg.get("plugin") or "")
+            if store.plugins is None:
+                self._reply({"error": "plugins are still loading; try again in a moment" if plugins_on()
+                             else "plugins are off (GROVY_PLUGINS=0)"})
+            else:
+                code, res = store.plugins.command(plugin, msg.get("args") or [], msg.get("session"), msg.get("cwd"))
+                try:
+                    self._reply(dict(res, code=code))
+                except OSError:
+                    pass   # the client stopped waiting
 
     def _reply(self, obj):
         self.wfile.write(json.dumps(obj).encode() + b"\n")
@@ -314,6 +325,50 @@ class Http(http.server.BaseHTTPRequestHandler):
     def _err(self, code, msg):
         self._send(code, {"error": msg})
 
+    def _send_file(self, path, filename):
+        """Stream a file from disk as a download: an attachment, octet-stream, never rendered on grovy's origin
+        (nosniff + CSP none), so an arbitrary file a session offered can't run as a page here. No size limit: the
+        bytes are streamed, not read into memory. Behind grovy's login, like every route past _authed()."""
+        try:   # O_NONBLOCK: opening a fifo/device path would otherwise block here, before the S_ISREG check, with no
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)   # deadline on this handler. Regular-file reads ignore it.
+        except OSError:
+            return self._err(404, "not found")
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):   # not a directory, device, fifo, ...
+                os.close(fd)
+                fd = -1   # so a broken pipe while sending the 404 can't close this fd a second time
+                return self._err(404, "not found")
+            size = st.st_size
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(filename or "")).strip("._-")[:120] or "file"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f'attachment; filename="{safe}"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy", "default-src 'none'")
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.end_headers()
+            left, f = size, os.fdopen(fd, "rb")   # f now owns fd
+            fd = -1
+            with f:
+                while left > 0:
+                    chunk = f.read(min(left, 1 << 16))
+                    if not chunk:   # file shrank under us; Connection: close ends it cleanly
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+        except OSError:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
     def _authed(self):
         token = self.server.token
         if not token or not self.server.enforce:
@@ -439,6 +494,12 @@ class Http(http.server.BaseHTTPRequestHandler):
                 return self._err(404, "not found")
             return self._send(200, got[1], got[0], [("Cache-Control", "private, max-age=604800"),
                                                     ("Content-Security-Policy", "default-src 'none'")])
+        m = re.fullmatch(r"/xfile/([0-9a-f]{32})", path)
+        if m:   # a file a plugin offered with grovy.download (file-sharing): served from disk as a download, never rendered
+            entry = store.plugins.download_entry(m.group(1)) if store.plugins else None
+            if not entry:
+                return self._err(404, "not found")
+            return self._send_file(entry["path"], entry["name"])
         m = re.fullmatch(r"/api/sessions/([^/]+)/history", path)
         if m and core.valid_name(m.group(1)):
             qs = parse_qs(url.query)
