@@ -21,9 +21,12 @@ the peer's notifications (needs you / finished / failed), which the hub sends on
 (Web Push). Until a fresh list has arrived, and whenever the link is down, the peer's sessions show `unknown`.
 
 Everything a peer sends is untrusted input, like Claude's output: names and ids are checked before use, answers are
-size-capped, pages keep the hub's PAGE_CSP, downloads are re-served as downloads. The link only goes one way: the hub
-connects to the peer, never the reverse, so a peer can't reach the hub's sessions or files.
+size-capped, pages keep the hub's PAGE_CSP, downloads are re-served as downloads. Through grovy itself the link only
+goes one way (the hub connects to the peer, never the reverse). The SSH login the tunnel uses is another matter: it
+is the peer's way into the hub's account (a shell, unless the key is restricted; and even a key restricted to
+forwarding can bind a socket anywhere the account can write). See docs/DESIGN.md, "Other machines".
 """
+import collections
 import getpass
 import http.client
 import json
@@ -49,6 +52,9 @@ REQUEST_TIMEOUT = 20  # seconds for one proxied request
 STREAM_TIMEOUT = 45   # the peer's event stream pings every 15s: this much silence means the link is dead
 ANSWER_MAX = 16 * 1024 * 1024
 BACKOFF_MAX = 30
+RESYNC_EVERY = 60     # seconds between full re-fetches of a peer's lists, whatever its stream says
+STALE_AFTER = 3       # failed list fetches in a row before a peer's sessions show `unknown`
+NOTIFY_MAX, NOTIFY_WINDOW = 20, 60   # notifications passed on per peer per window (seconds)
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 KINDS = ("input", "done", "error")
 
@@ -201,7 +207,7 @@ class Peer:
     def __init__(self, name, conf, hub):
         self.name, self.conf, self.hub = name, conf, hub
         self.lock = threading.Lock()
-        self.state = "connecting"   # connecting (no fresh list yet) | online | offline
+        self.state = "connecting"   # connecting (no fresh list yet) | online | stale (lists failing) | offline
         self.error = None
         self.last_seen = None       # last time the peer answered anything
         self.sessions = None        # its session list as of the last refresh (None: never had one)
@@ -212,6 +218,9 @@ class Peer:
         self.stop = threading.Event()
         self.threads = []
         self.conn = None            # the event stream's connection, closed by close() to end its read at once
+        self.linked = False         # the stream is subscribed (said hello) and hasn't dropped since
+        self.failures = 0           # list refreshes failed in a row on a live stream
+        self.notified, self.throttled = collections.deque(), False
 
     # -- requests
     def connection(self, timeout=REQUEST_TIMEOUT):
@@ -268,9 +277,13 @@ class Peer:
         if not isinstance(obj, dict):
             raise PeerError(f"{self.name} answered something that isn't grovy's API (HTTP {code})")
         if code == 401:
-            return 502, {"error": f"{self.name} refused this grovy's login: its token changed? On {self.name} run "
-                                  f"`grovy peer token`, then here `grovy peer add {self.name}`"}
+            return 502, {"error": self.login_refused()}
         return code, obj
+
+    def login_refused(self):
+        """A peer's 401, for the phone: a 502 with what to do (a 401 would look like the phone's own login failing)."""
+        return (f"{self.name} refused this grovy's login: its token changed? On {self.name} run `grovy peer token`, "
+                f"then here `grovy peer add {self.name}`")
 
     def seen(self):
         with self.lock:
@@ -290,9 +303,12 @@ class Peer:
             left = n
             try:
                 while left > 0:
-                    chunk = read(min(left, 1 << 16))
+                    try:
+                        chunk = read(min(left, 1 << 16))
+                    except OSError as e:   # the phone's side, not the peer's (a slow or dropped upload)
+                        return 408, {"error": f"the file stopped arriving from this device ({reason(e, self.name)})"}
                     if not chunk:
-                        break
+                        return 400, {"error": "the file arrived incomplete from this device"}
                     c.send(chunk)
                     left -= len(chunk)
             except BrokenPipeError:
@@ -310,9 +326,12 @@ class Peer:
             obj = None
         if not isinstance(obj, dict):
             return 502, {"error": f"{self.name} answered something that isn't grovy's API (HTTP {r.status})"}
-        if r.status != 200 and isinstance(obj.get("error"), str):
-            obj = {"error": f"{self.name}: {obj['error']}"}
-        return r.status, obj
+        if r.status == 401:
+            return 502, {"error": self.login_refused()}
+        if r.status != 200:
+            err = obj.get("error")
+            return r.status, {"error": f"{self.name}: {err}" if isinstance(err, str) else f"{self.name}: HTTP {r.status}"}
+        return 200, {k: obj.get(k) for k in ("path", "name", "size")}
 
     # -- the link
     def start(self):
@@ -322,6 +341,7 @@ class Peer:
             self.threads.append(t)
 
     def close(self):
+        """Stop for good (removed or replaced in peers.json): nothing it still receives is acted on."""
         self.stop.set()
         self.wake.set()
         c = self.conn
@@ -342,6 +362,9 @@ class Peer:
                 why = str(e)
             except (OSError, http.client.HTTPException, ValueError) as e:
                 why = reason(e, self.name)
+            except Exception as e:   # never let the thread die: the peer would stay "online" for good
+                log(f"{self.name}: event stream error: {e!r}")
+                why = f"unexpected error ({type(e).__name__})"
             self._offline(why)
             if time.monotonic() - started > 60:
                 delay = 1
@@ -351,6 +374,8 @@ class Peer:
     def _stream(self):
         c = self.conn = self.connection(STREAM_TIMEOUT)
         try:
+            if self.stop.is_set():   # closed before conn was set: close() couldn't reach it
+                return
             try:
                 c.request("GET", "/api/events?notify=1", headers=self.headers())
                 r = c.getresponse()
@@ -377,16 +402,18 @@ class Peer:
             c.close()
 
     def _message(self, msg):
+        if self.stop.is_set():
+            return
         if msg.get("hello"):   # subscribed: from here on nothing is missed, so fetch everything once
             with self.lock:
                 self.gen += 1
-                self.full = True
+                self.linked, self.full = True, True
             self.wake.set()
             return
         n = msg.get("notify")
         if isinstance(n, dict):
             s, kind, text = n.get("session"), n.get("kind"), n.get("text")
-            if core.valid_name(s) and kind in KINDS and isinstance(text, str):
+            if core.valid_name(s) and kind in KINDS and isinstance(text, str) and self._may_notify():
                 self.hub.notify(join(self.name, s), kind, core.norm(text)[:300])
             return
         if "session" in msg:
@@ -400,10 +427,29 @@ class Peer:
                     return
             self.wake.set()
 
+    def _may_notify(self):
+        """At most NOTIFY_MAX notifications per NOTIFY_WINDOW seconds from one peer (a peer gone haywire can't
+        flood your phone); the rest are dropped, and that is logged once per window."""
+        t = time.monotonic()
+        with self.lock:
+            while self.notified and t - self.notified[0] > NOTIFY_WINDOW:
+                self.notified.popleft()
+            if len(self.notified) >= NOTIFY_MAX:
+                first = not self.throttled
+                self.throttled = True
+            else:
+                self.notified.append(t)
+                self.throttled = False
+                return True
+        if first:
+            log(f"{self.name}: too many notifications, dropping some")
+        return False
+
     def _offline(self, why):
         with self.lock:
             was = self.state
             self.gen += 1
+            self.linked = False
             self.state, self.error = "offline", why
             self.dirty, self.full = set(), False
         if was != "offline":
@@ -412,57 +458,83 @@ class Peer:
 
     def _refresh_loop(self):
         while not self.stop.is_set():
-            self.wake.wait()
+            woken = self.wake.wait(RESYNC_EVERY)
             self.wake.clear()
             if self.stop.is_set():
                 return
-            with self.lock:
-                gen, names, full = self.gen, self.dirty, self.full
-                self.dirty, self.full = set(), False
-            if not names and not full:
-                continue
             try:
-                code, got = self.call("GET", "/api/sessions")
-                pcode, pg = self.call("GET", "/api/pages")
-                if code != 200 or pcode != 200:
-                    raise PeerError(f"its session and page lists answered HTTP {code} and {pcode}")
-            except PeerError as e:
-                with self.lock:
-                    if gen == self.gen:   # still the same link: try again shortly
-                        self.dirty |= names
-                        self.full = self.full or full
-                        self.error = str(e)
+                self._refresh(woken)
+            except Exception as e:   # never let the thread die with the state frozen
+                log(f"{self.name}: refresh error: {e!r}")
+                self._failed(None, set(), True, f"unexpected answer ({type(e).__name__})")
                 if self.stop.wait(1):
                     return
                 self.wake.set()
-                continue
-            sessions = [s for s in (got.get("sessions") or []) if isinstance(s, dict) and core.valid_name(s.get("name"))]
-            page_list = [p for p in (pg.get("pages") or []) if isinstance(p, dict) and core.ID_RE.match(str(p.get("id")))]
-            with self.lock:
-                if gen != self.gen:   # the link dropped (or reconnected) meanwhile: this answer may be stale
-                    continue
-                before, was = self.sessions, self.state
-                self.sessions, self.pages = sessions, page_list
-                if full:
-                    self.state, self.error = "online", None
-            if full:
-                if was != "online":
-                    log(f"{self.name}: online")
-                if before is not None and was != "online":
-                    self._missed(before, sessions)
-                self.hub.publish(None)
-            else:
-                for n in names:
-                    self.hub.publish(join(self.name, n))
+
+    def _failed(self, gen, names, full, why):
+        """A refresh that didn't work on a link that is still up: retried; after STALE_AFTER in a row the sessions
+        show `unknown` with the reason (the stream being up proves nothing about the lists)."""
+        stale = False
+        with self.lock:
+            if gen is not None and gen != self.gen:
+                return
+            self.dirty |= names
+            self.full = self.full or full
+            self.error = why
+            self.failures += 1
+            if self.failures >= STALE_AFTER and self.state == "online":
+                self.state, stale = "stale", True
+        if stale:
+            log(f"{self.name}: not answering ({why})")
+            self.hub.publish(None)
+
+    def _refresh(self, woken):
+        with self.lock:
+            if not woken and self.linked:   # a periodic full resync repairs a hint the peer's stream dropped
+                self.full = True
+            gen, names, full = self.gen, self.dirty, self.full
+            self.dirty, self.full = set(), False
+        if not names and not full:
+            return
+        try:
+            code, got = self.call("GET", "/api/sessions")
+            pcode, pg = self.call("GET", "/api/pages")
+            if code != 200 or pcode != 200:
+                raise PeerError(f"its session and page lists answered HTTP {code} and {pcode}")
+        except PeerError as e:
+            self._failed(gen, names, full, str(e))
+            if not self.stop.wait(1):
+                self.wake.set()
+            return
+        sessions = [s for s in _list(got.get("sessions")) if summary_ok(s)]
+        page_list = [p for p in _list(pg.get("pages")) if isinstance(p, dict) and is_id(p.get("id"))]
+        with self.lock:
+            if gen != self.gen or self.stop.is_set():   # the link dropped (or reconnected) meanwhile: maybe stale
+                return
+            before, was = self.sessions, self.state
+            self.sessions, self.pages = sessions, page_list
+            self.failures = 0
+            if full or was == "stale":
+                self.state, self.error = "online", None
+        if full or was == "stale":
+            if was != "online":
+                log(f"{self.name}: online")
+            if before is not None and was != "online":
+                self._missed(before, sessions)
+            self.hub.publish(None)
+        else:
+            for n in names:
+                self.hub.publish(join(self.name, n))
 
     def _missed(self, before, after):
         """After the link was down: a session that needs you now and didn't before gets the notification it would
         have had (its real one may have been lost with the link). Read from the peer's state, not guessed."""
         def waiting(s):
-            return bool(s.get("pending_permissions")) or s.get("state") == "needs_input"
+            n = s.get("pending_permissions")
+            return (isinstance(n, int) and n > 0) or s.get("state") == "needs_input"
         old = {s["name"]: waiting(s) for s in before}
         for s in after:
-            if waiting(s) and not old.get(s["name"]):
+            if waiting(s) and not old.get(s["name"]) and self._may_notify():
                 self.hub.notify(join(self.name, s["name"]), "input", "needs you (while the link was down)")
 
     # -- what the hub shows
@@ -473,79 +545,139 @@ class Peer:
     def listed(self):
         """This peer's sessions for the hub's list: named pc:NAME; `unknown` unless the link is up and fresh."""
         with self.lock:
-            state, seen, sessions = self.state, self.last_seen, list(self.sessions or [])
+            state, seen, err, sessions = self.state, self.last_seen, self.error, list(self.sessions or [])
         out = []
         for s in sessions:
-            s = rewrite_summary(self.name, s)
+            try:
+                s = rewrite_summary(self.name, s)
+            except Malformed:
+                continue
             if state != "online":
                 s.update(state="unknown", accepts_input=False, can_force=False, pending_permissions=0, tasks=[],
+                         background=0,
                          activity=f"{self.name} is offline (last seen {ago(seen)})" if state == "offline"
+                         else f"{self.name} isn't answering: {err}" if state == "stale"
                          else f"connecting to {self.name}…")
             out.append(s)
         return out
 
     def listed_pages(self):
         with self.lock:
-            return [rewrite_page(self.name, p) for p in self.pages]
+            pages_ = list(self.pages)
+        return [p for p in (rewrite_page(self.name, p) for p in pages_) if p is not None]
 
 
 # ------------------------------------------------------------------ rewriting what a peer says
 # Explicit, per shape: only the names and ids the phone acts on are prefixed. Nothing inside a tool's input or a
-# message is touched (what the phone shows for approval must be exactly what the peer sent).
-def _pre(peer, v):
-    return join(peer, v) if isinstance(v, str) else v
+# message is touched (what the phone shows for approval must be exactly what the peer sent). Everything is checked:
+# an id goes into URLs the phone builds, so anything but 32 hex digits is dropped (a hostile "x/../../sessions/a/kill"
+# would otherwise turn a tap on Allow into another request); fields of the wrong type are replaced or dropped.
+ID = re.compile(r"[0-9a-f]{32}")
+
+
+class Malformed(ValueError):
+    """An answer without the shape grovy's API gives."""
+
+
+def is_id(v):
+    return isinstance(v, str) and bool(ID.fullmatch(v))
+
+
+def _name(peer, v):
+    return join(peer, v) if core.valid_name(v) else None
+
+
+def _id(peer, v):
+    return join(peer, v) if is_id(v) else None
+
+
+def _list(v):
+    return v if isinstance(v, list) else []
+
+
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _str(v):
+    return v if isinstance(v, str) else None
+
+
+def summary_ok(s):
+    try:
+        rewrite_summary("x", s)
+        return True
+    except Malformed:
+        return False
 
 
 def rewrite_summary(peer, s):
+    if not isinstance(s, dict) or not core.valid_name(s.get("name")):
+        raise Malformed("a session without a valid name")
     s = dict(s)
-    s["name"] = join(peer, s.get("name"))
+    s["name"] = join(peer, s["name"])
     s["machine"] = peer
-    if s.get("state") not in states.STATE_RANK:
-        s["state"] = "unknown"
+    st = s.get("state")
+    s["state"] = st if isinstance(st, str) and st in states.STATE_RANK else "unknown"
     for k in ("pending_permissions", "queued_prompts", "background"):
-        if not isinstance(s.get(k), int) or isinstance(s.get(k), bool):
-            s[k] = 0
-    for k in ("last_event",):
-        if not isinstance(s.get(k), (int, float)) or isinstance(s.get(k), bool):
-            s[k] = None
+        s[k] = s[k] if isinstance(s.get(k), int) and not isinstance(s.get(k), bool) and s[k] >= 0 else 0
+    s["last_event"] = _num(s.get("last_event"))
+    for k in ("cwd", "last_error", "claude_session_id"):
+        s[k] = _str(s.get(k))
+    s["activity"] = _str(s.get("activity")) or ""
+    for k in ("accepts_input", "can_force", "outdated"):
+        s[k] = s.get(k) is True
+    s["tasks"] = [t for t in _list(s.get("tasks")) if isinstance(t, dict)]
+    m = s.get("meta")
+    s["meta"] = {"model": _str(m.get("model")), "effort": _str(m.get("effort")), "fast": m.get("fast") is True,
+                 "context": _num(m.get("context"))} if isinstance(m, dict) else None
+    i = s.get("issue")
+    s["issue"] = {k: _str(i.get(k)) for k in ("branch", "base", "root")} if isinstance(i, dict) else None
     return s
 
 
 def rewrite_event(peer, e):
-    if not isinstance(e, dict):
-        return e
-    e = dict(e, session=_pre(peer, e.get("session")))
-    d = e.get("data")
-    if e.get("type") == "Page" and isinstance(d, dict) and isinstance(d.get("page"), str):
-        e["data"] = dict(d, page=join(peer, d["page"]))
+    """An event, or None (dropped) when it isn't one."""
+    if not isinstance(e, dict) or not isinstance(e.get("id"), int) or isinstance(e.get("id"), bool) \
+            or not isinstance(e.get("type"), str):
+        return None
+    e = dict(e, session=_name(peer, e.get("session")), ts=_num(e.get("ts")))
+    d = e.get("data") if isinstance(e.get("data"), dict) else {}
+    if e["type"] == "Page":
+        d = dict(d, page=_id(peer, d.get("page")))
+    e["data"] = d
     return e
 
 
 def rewrite_item(peer, p):
-    """A permission request or a queued prompt."""
-    if not isinstance(p, dict):
-        return p
-    return dict(p, id=_pre(peer, p.get("id")), session=_pre(peer, p.get("session")))
+    """A permission request or a queued prompt, or None (dropped) without a well-formed id."""
+    if not isinstance(p, dict) or not is_id(p.get("id")):
+        return None
+    return dict(p, id=join(peer, p["id"]), session=_name(peer, p.get("session")))
 
 
 def rewrite_page(peer, p):
-    if not isinstance(p, dict):
-        return p
-    p = dict(p, session=_pre(peer, p.get("session")), share=_pre(peer, p.get("share")))
+    if not isinstance(p, dict) or ("id" in p and not is_id(p["id"])):
+        return None
+    p = dict(p, session=_name(peer, p.get("session")), share=_id(peer, p.get("share")))
     if "id" in p:
-        p["id"] = _pre(peer, p["id"])
+        p["id"] = join(peer, p["id"])
     return p
+
+
+def _kept(fn, peer, items):
+    return [x for x in (fn(peer, i) for i in _list(items)) if x is not None]
 
 
 def rewrite_detail(peer, d):
     d = dict(d)
-    if isinstance(d.get("session"), dict):
-        d["session"] = rewrite_summary(peer, d["session"])
-    d["events"] = [rewrite_event(peer, e) for e in d.get("events") or []]
-    d["permissions"] = [rewrite_item(peer, p) for p in d.get("permissions") or []]
-    d["prompts"] = [rewrite_item(peer, p) for p in d.get("prompts") or []]
+    d["session"] = rewrite_summary(peer, d.get("session"))
+    d["events"] = _kept(rewrite_event, peer, d.get("events"))
+    d["permissions"] = _kept(rewrite_item, peer, d.get("permissions"))
+    d["prompts"] = _kept(rewrite_item, peer, d.get("prompts"))
     pg = d.get("pages") if isinstance(d.get("pages"), dict) else {}
-    d["pages"] = {join(peer, k): rewrite_page(peer, v) for k, v in pg.items()}
+    d["pages"] = {join(peer, k): v for k, v in ((k, rewrite_page(peer, v)) for k, v in pg.items() if is_id(k))
+                  if v is not None}
     d.pop("now", None)   # timestamps are the peer's; the phone keeps the hub's clock (clocks assumed in sync)
     return d
 
@@ -553,32 +685,43 @@ def rewrite_detail(peer, d):
 def rewrite_conversations(peer, d):
     d = dict(d)
     out = []
-    for c in d.get("conversations") or []:
-        if isinstance(c, dict) and isinstance(c.get("open_in"), str) and c["open_in"].startswith("grovy:"):
-            c = dict(c, open_in="grovy:" + join(peer, c["open_in"][6:]))
+    for c in _list(d.get("conversations")):
+        if not isinstance(c, dict):
+            continue
+        o = c.get("open_in")
+        if isinstance(o, str) and o.startswith("grovy:"):
+            c = dict(c, open_in="grovy:" + _name(peer, o[6:]) if core.valid_name(o[6:]) else None)
         out.append(c)
     d["conversations"] = out
     return d
 
 
 def _events(peer, d):
-    return dict(d, events=[rewrite_event(peer, e) for e in d.get("events") or []])
+    return dict(d, events=_kept(rewrite_event, peer, d.get("events")))
 
 
 def _pages(peer, d):
-    return dict(d, pages=[rewrite_page(peer, p) for p in d.get("pages") or []])
+    return dict(d, pages=_kept(rewrite_page, peer, d.get("pages")))
 
 
 def _shared(peer, d):
-    return dict(d, page=rewrite_page(peer, d["page"])) if isinstance(d.get("page"), dict) else d
+    page = rewrite_page(peer, d.get("page"))
+    if page is None:
+        raise Malformed("no page in the answer")
+    return dict(d, page=page)
 
 
 def _prompt(peer, d):
-    return rewrite_item(peer, d) if "id" in d else d
+    p = rewrite_item(peer, d)
+    if p is None:
+        raise Malformed("no prompt in the answer")
+    return p
 
 
 def _renamed(peer, d):
-    return dict(d, status=join(peer, d["status"])) if isinstance(d.get("status"), str) else d
+    if not core.valid_name(d.get("status")):
+        raise Malformed("no new name in the answer")
+    return dict(d, status=join(peer, d["status"]))
 
 
 # ------------------------------------------------------------------ routing the phone's requests
@@ -605,7 +748,7 @@ FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}")
 
 
 def _is_id(v):
-    return bool(core.ID_RE.match(v))
+    return is_id(v)
 
 
 class Peers:
@@ -718,9 +861,14 @@ class Peers:
         except PeerError as e:
             return 502, {"error": str(e)}
         if code == 200 and rewrite:
-            obj = rewrite(p.name, obj)
-        elif code != 200 and isinstance(obj.get("error"), str):
-            obj = {"error": f"{p.name}: {obj['error']}"}
+            try:
+                obj = rewrite(p.name, obj)
+            except Exception as e:   # Malformed, or a type no check foresaw: never the hub's own error
+                log(f"{p.name}: unexpected answer to {method} {path.split('?')[0]}: {e!r}")
+                return 502, {"error": f"{p.name} answered something unexpected"}
+        elif code != 200:
+            err = obj.get("error")
+            obj = {"error": f"{p.name}: {err}" if isinstance(err, str) else f"{p.name} answered HTTP {code}"}
         return code, obj
 
     def handle_get(self, path, query, xgrovy=False):
@@ -805,22 +953,19 @@ class Peers:
         return None
 
     def shared(self, path):
-        """/s/pc:TOKEN: a peer's shared page (no login, like the hub's own: the link is the credential)."""
+        """/s/pc:TOKEN: a peer's shared page (no login, like the hub's own: the link is the credential). Before login,
+        so every failure is the same plain 404: nothing about which peers exist or whether they are reachable."""
         m = SHARED_GET.fullmatch(path)
-        if not m:
+        if not m or SEP not in unquote(m.group(1)):
             return None
+        gone = "raw", 404, "text/plain", b"Not found (this page is no longer shared).", []
         try:
             t = self.target(m.group(1), _is_id)
-        except Answer:
-            return "raw", 404, "text/plain", b"Not found (this page is no longer shared).", []
-        if not t:
-            return None
-        try:
-            code, ctype, data = self._raw(t[0], "GET", f"/s/{t[1]}")
-        except Answer as a:
-            return "raw", a.code, "text/plain", a.body["error"].encode(), []
+            code, ctype, data = t[0].request("GET", f"/s/{t[1]}")
+        except (Answer, PeerError):
+            return gone
         if code != 200 or ctype != "text/html":
-            return "raw", 404, "text/plain", b"Not found (this page is no longer shared).", []
+            return gone
         return "shared", data
 
     def _raw(self, p, method, path):
@@ -1005,8 +1150,10 @@ def check_remote_socket(path):
 
 
 def run_tunnel(host, name, port, remote=None, ssh="ssh", run=subprocess.run, popen=subprocess.Popen,
-               sleep=time.sleep, clock=time.monotonic, rounds=None, out=sys.stderr, local="127.0.0.1"):
-    """Keep the reverse tunnel up: prepare, connect, wait for ssh to end, back off, repeat (forever unless rounds)."""
+               sleep=time.sleep, clock=time.monotonic, rounds=None, out=sys.stderr, local="127.0.0.1", prepare=True):
+    """Keep the reverse tunnel up: prepare, connect, wait for ssh to end, back off, repeat (forever unless rounds).
+    prepare=False skips the remote shell (for a key restricted to forwarding): remote is then the absolute path, and
+    a stale socket is the hub's sshd's business (StreamLocalBindUnlink yes)."""
     def say(msg):
         print(f"grovy peer tunnel: {msg}", file=out, flush=True)
     delay, n = 2, 0
@@ -1014,11 +1161,16 @@ def run_tunnel(host, name, port, remote=None, ssh="ssh", run=subprocess.run, pop
         n += 1
         start = clock()
         try:
-            r = run(prepare_argv(host, name, remote, ssh), capture_output=True, text=True, timeout=60,
-                    stdin=subprocess.DEVNULL)
-            lines = (r.stdout or "").strip().splitlines()
-            if r.returncode:
-                say(f"couldn't prepare the socket on {host}: {(r.stderr or '').strip()[-300:] or f'ssh exit {r.returncode}'}")
+            if prepare:
+                r = run(prepare_argv(host, name, remote, ssh), capture_output=True, text=True, timeout=60,
+                        stdin=subprocess.DEVNULL)
+                lines = (r.stdout or "").strip().splitlines()
+            else:
+                r, lines = None, [remote or ""]
+            if r is not None and r.returncode:
+                err = (r.stderr or "").strip()[-300:]
+                say(f"couldn't prepare the socket on {host}: {err or f'ssh exit {r.returncode}'}" +
+                    ("" if err else " (a key restricted to forwarding? then use --no-prepare --remote-socket PATH)"))
             elif not lines or check_remote_socket(lines[-1]):
                 say(check_remote_socket(lines[-1] if lines else ""))
                 return 2
@@ -1052,6 +1204,9 @@ def cmd_tunnel(a):
     rs = a.remote_socket
     if rs is not None and (not rs.startswith(("/", "~/")) or re.search(r"[\s:]", rs)):
         core.die("--remote-socket: an absolute path (or ~/...), with no spaces or ':'")
+    if a.no_prepare and (rs is None or check_remote_socket(rs)):
+        core.die("--no-prepare needs --remote-socket with the socket's absolute path on the hub (no ~: no remote "
+                 "shell expands it), e.g. --remote-socket /home/you/.local/state/grovy/peers/pc.sock")
     if not re.fullmatch(r"[0-9a-fA-F.:]{2,45}|localhost", a.local_host):
         core.die("--local-host: an IP address (where this machine's grovy listens)")
     try:
@@ -1060,7 +1215,7 @@ def cmd_tunnel(a):
         print(f"grovy peer tunnel: warning: nothing answers on {a.local_host}:{a.port} yet (is grovy serving here?)",
               file=sys.stderr)
     try:
-        return run_tunnel(a.host, a.name, a.port, a.remote_socket, local=a.local_host)
+        return run_tunnel(a.host, a.name, a.port, a.remote_socket, local=a.local_host, prepare=not a.no_prepare)
     except KeyboardInterrupt:
         return 0
 
@@ -1084,4 +1239,7 @@ def add_parser(sub):
     x.add_argument("--remote-socket", help="socket path on the hub (default: ~/.local/state/grovy/peers/NAME.sock)")
     x.add_argument("--port", type=int, default=core.env_int("PORT", 7333), help="this machine's grovy port")
     x.add_argument("--local-host", default="127.0.0.1", help="the address this machine's grovy listens on")
+    x.add_argument("--no-prepare", action="store_true",
+                   help="run no command on the hub, only the forward (for a key restricted to forwarding); "
+                        "needs --remote-socket ABSOLUTE-PATH, its folder made once by hand")
     x.set_defaults(fn=cmd_tunnel)

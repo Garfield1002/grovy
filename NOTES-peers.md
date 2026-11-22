@@ -15,7 +15,7 @@ Branch `peers` (from `https`). Not merged, not pushed: the user reviews and merg
   attachments of peer sessions, open_in fix), `extensions/widgets.js` (peer images/files).
 - Docs: DESIGN "Other machines (peers)", failure modes, limitations, tests; README "Another computer"; module map;
   CLAUDE.md files table.
-- Tests: `tests/test_peers.py` (37 tests). Full suite green.
+- Tests: `tests/test_peers.py` (51 tests). Full suite green.
 
 ## E2E done (2026-11-22, scratch daemons in a private tmux server via TMUX_TMPDIR, all cleaned up)
 hub :7397 + pc :7398, forwarder socket -> pc; list, view, prompt, permission allow/deny through the hub (fake
@@ -24,6 +24,15 @@ down; one real Claude session on the pc daemon driven entirely through the hub (
 allow -> file created -> Stop), hub GROVY_NOTIFY_CMD got "[pc:real] permission: Bash" and "[pc:real] finished: done";
 kill + resume of it through the hub; `grovy peer tunnel` with a fake `ssh` on PATH (prep script + -R), drop and
 automatic reconnect; real `ssh -G` accepts the argv. Screenshots of list/detail/offline/new-session sheet looked right.
+
+## Review round 1 (adversarial review findings, all fixed; see commit "Peers: review fixes")
+- Peer ids fullmatch-checked (32 hex) or dropped; UI encodeURIComponent on every id in a path; core.ID_RE now \A..\Z.
+- Every peer field type-checked; threads catch everything; `stale` state when lists fail on a live stream; full
+  resync every 60s; `/s/pc:..` pre-login = plain 404; upload 401 -> 502, phone-side upload failure -> 408;
+  offline sessions lose `background`; notifications throttled (20/min/peer) and dead after close().
+- Honest trust docs + `--no-prepare`; restricted authorized_keys entry verified against a private OpenSSH 10.0 sshd
+  (no shell; -L blocked only with a permitopen; -R unix NOT limited by path and can replace sockets with
+  StreamLocalBindUnlink yes). Real-ssh e2e of the tunnel (restricted key + --no-prepare, and plain key) passed.
 
 ## Next steps / ideas
 - Adversarial review before merge (user's rule).

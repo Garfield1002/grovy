@@ -442,6 +442,180 @@ class TestPeerLink(PeerLink):
         self.assertEqual([s["name"] for s in d["sessions"]], ["a"])
 
 
+class TestHostilePeer(PeerLink):
+    """A peer that sends what grovy never would. Review findings, each checked against the code before the fix."""
+    EVIL = "x/../../sessions/main/kill?"
+    HX = "d" * 32
+
+    def detail(self, **over):
+        d = {"session": {"name": "a", "state": "idle", "pending_permissions": 1, "last_event": 1},
+             "events": [{"id": 1, "ts": 1, "session": "a", "type": "Page", "data": {"page": self.EVIL}},
+                        {"id": 2, "ts": 2, "session": "a", "type": "Page", "data": {"page": self.HX}}],
+             "permissions": [{"id": self.EVIL, "session": "a"}, {"id": self.HX + "\n", "session": "a"},
+                             {"id": self.HX, "session": "a", "tool_input": {"command": "ls"}}],
+             "prompts": [{"id": self.EVIL, "session": "a"}, {"id": self.HX, "session": "../b"}],
+             "pages": {self.EVIL: {"version": 1}, self.HX: {"version": 1, "share": self.EVIL}}}
+        d.update(over)
+        return d
+
+    def test_hostile_ids_are_dropped(self):
+        with mock.patch.object(self.pc(), "call", return_value=(200, self.detail())):
+            code, d = self.get("/api/sessions/pc:a")
+        self.assertEqual(code, 200)
+        self.assertEqual([p["id"] for p in d["permissions"]], ["pc:" + self.HX])
+        self.assertEqual([(p["id"], p["session"]) for p in d["prompts"]], [("pc:" + self.HX, None)])
+        self.assertEqual(list(d["pages"]), ["pc:" + self.HX])
+        self.assertIsNone(d["pages"]["pc:" + self.HX]["share"])
+        self.assertEqual([e["data"]["page"] for e in d["events"]], [None, "pc:" + self.HX])
+        self.assertNotIn("..", json.dumps(d))
+
+    def test_hostile_ids_in_action_answers(self):
+        for verb, ans in (("prompts", {"id": self.EVIL, "session": "a"}), ("rename", {"status": "../x"})):
+            with mock.patch.object(self.pc(), "call", return_value=(200, ans)):
+                code, d = self.post(f"/api/sessions/pc:a/{verb}", {"text": "x", "name": "b"})
+            self.assertEqual(code, 502, verb)
+            self.assertIn("unexpected", d["error"])
+        with mock.patch.object(self.pc(), "call", return_value=(200, {"page": {"id": self.EVIL, "share": "x"}})):
+            self.assertEqual(self.post(f"/api/pages/pc:{self.HX}/share", {"shared": True})[0], 502)
+        with mock.patch.object(self.pc(), "call", side_effect=[(200, {"sessions": []}),
+                                                               (200, {"pages": [{"id": self.EVIL}, {"id": self.HX}]})]):
+            with self.pc().lock:
+                self.pc().full = True
+            self.pc().wake.set()
+            self.assertTrue(wait_for(lambda: [p["id"] for p in self.pc().listed_pages()] == ["pc:" + self.HX]))
+
+    def test_malformed_types_never_break_the_hub(self):
+        pc = self.pc()
+        with pc.lock:   # what the refresher keeps is checked on the way in; this is the belt to those braces
+            pc.sessions = [{"name": "a", "state": ["x"], "meta": "y", "issue": 3, "tasks": {}, "background": "2"},
+                           {"name": "b", "state": {"k": 1}, "pending_permissions": -4}]
+        code, d = self.get("/api/sessions")
+        self.assertEqual(code, 200)
+        names = {s["name"]: s for s in d["sessions"]}
+        self.assertIn("a", names)   # the hub's own session is still listed
+        self.assertEqual(names["pc:a"]["state"], "unknown")
+        self.assertEqual((names["pc:a"]["meta"], names["pc:a"]["issue"], names["pc:a"]["tasks"]), (None, None, []))
+        self.assertEqual(names["pc:b"]["pending_permissions"], 0)
+        for bad in (self.detail(events=5, permissions={"a": 1}, prompts="x", pages=[1]),):
+            with mock.patch.object(pc, "call", return_value=(200, bad)):
+                code, d = self.get("/api/sessions/pc:a")
+            self.assertEqual(code, 200)
+            self.assertEqual((d["events"], d["permissions"], d["prompts"], d["pages"]), ([], [], [], {}))
+        with mock.patch.object(pc, "call", return_value=(200, self.detail(session=[1]))):
+            code, d = self.get("/api/sessions/pc:a")
+        self.assertEqual((code, d["error"]), (502, "pc answered something unexpected"))
+        with mock.patch.object(pc, "call", return_value=(200, {"conversations": 7})):
+            self.assertEqual(self.get("/api/conversations?path=/x&peer=pc"), (200, {"conversations": []}))
+        with mock.patch.object(pc, "call", return_value=(404, {"error": ["not", "text"]})):
+            self.assertEqual(self.get("/api/sessions/pc:a"), (404, {"error": "pc answered HTTP 404"}))
+
+    def test_refresher_survives_anything(self):
+        pc = self.pc()
+        with mock.patch.object(pc, "call", return_value=(200, {"sessions": 5})):   # used to kill the thread
+            with pc.lock:
+                pc.full = True
+            pc.wake.set()
+            time.sleep(0.3)
+        with mock.patch.object(pc, "call", side_effect=RuntimeError("boom")):
+            with pc.lock:
+                pc.full = True
+            pc.wake.set()
+            self.assertTrue(wait_for(lambda: pc.status()["state"] == "stale"))
+            self.assertIn("RuntimeError", pc.status()["error"])
+        self.assertTrue(wait_for(lambda: pc.status()["state"] == "online"))   # it kept retrying, and recovered
+        self.assertEqual(pc.listed()[0]["state"], "idle")
+
+    def test_failing_lists_on_a_live_stream_show_unknown(self):
+        pc = self.pc()
+        with mock.patch.object(pc, "call", return_value=(502, {"error": "pc refused this grovy's login"})):
+            self.peer.ingest("a", ev("UserPromptSubmit", prompt="go"))   # a hint: the refresh fails, again and again
+            self.assertTrue(wait_for(lambda: pc.status()["state"] == "stale"))
+            st = pc.status()
+            self.assertIn("HTTP 502", st["error"])
+            s = pc.listed()[0]
+            self.assertEqual((s["state"], s["accepts_input"]), ("unknown", False))
+            self.assertIn("isn't answering", s["activity"])
+            self.assertEqual(self.get("/api/sessions")[1]["peers"][0]["state"], "stale")
+        self.assertTrue(wait_for(lambda: pc.status()["state"] == "online"))
+        self.assertEqual(pc.listed()[0]["state"], "working")
+
+    def test_periodic_resync_repairs_a_lost_hint(self):
+        pc = self.pc()
+        with mock.patch.object(peers, "RESYNC_EVERY", 0.2):
+            pc.wake.set()   # the next wait uses the short period
+            with self.peer.lock:   # a change whose hint never arrived (the peer's stream queue overflowed)
+                self.peer.sessions["a"]["state"] = "working"
+            self.assertTrue(wait_for(lambda: pc.listed()[0]["state"] == "working"))
+
+    def test_generation_guard(self):
+        """A full refresh in flight when the link drops must not bring the peer back online with its old answer."""
+        pc = self.pc()
+        self.fwd.stop()   # no reconnect can make it legitimately online meanwhile
+        self.assertTrue(wait_for(lambda: pc.status()["state"] == "offline"))
+        entered, release = threading.Event(), threading.Event()
+        answer = {"sessions": [{"name": "a", "state": "idle"}]}
+
+        def slow(method, path, *a, **k):
+            if path == "/api/sessions":
+                entered.set()
+                release.wait(5)
+                return 200, answer
+            return 200, {"pages": []}
+        with mock.patch.object(pc, "call", side_effect=slow):
+            with pc.lock:
+                pc.linked, pc.full = True, True   # as on "hello"
+            pc.wake.set()
+            self.assertTrue(entered.wait(5))
+            pc._offline("dropped while fetching")
+            release.set()
+            time.sleep(0.5)
+        self.assertEqual(pc.status()["state"], "offline")
+        self.assertEqual(pc.listed()[0]["state"], "unknown")
+
+    def test_shared_route_tells_nothing_before_login(self):
+        gone = (404, b"Not found (this page is no longer shared).")
+        self.assertEqual(self.req("/s/mac:" + self.HX)[:2], gone)          # no such machine
+        self.assertEqual(self.req("/s/pc:" + self.HX)[:2], gone)           # no such page
+        self.fwd.stop()
+        self.assertTrue(wait_for(lambda: self.pc().status()["state"] == "offline"))
+        self.assertEqual(self.req("/s/pc:" + self.HX)[:2], gone)           # unreachable: nothing about it
+
+    def test_upload_errors(self):
+        wrong = peers.Peer("pc", {"socket": self.sock, "token": "wrong-token-123456", "tls": False}, self.hub.peers)
+        code, d = wrong.upload("/api/sessions/a/attachments", "f.txt", io.BytesIO(b"abc").read, 3)
+        self.assertEqual(code, 502)
+        self.assertIn("refused this grovy's login", d["error"])
+
+        def slow(n):
+            raise socket.timeout("timed out")
+        code, d = self.pc().upload("/api/sessions/a/attachments", "f.txt", slow, 3)
+        self.assertEqual(code, 408)
+        self.assertIn("stopped arriving from this device", d["error"])
+        self.assertNotIn("offline", d["error"])
+
+    def test_offline_sessions_have_no_background_work(self):
+        pc = self.pc()
+        with pc.lock:
+            pc.sessions = [{"name": "a", "state": "idle", "background": 2, "tasks": [{"id": "t"}]}]
+        pc._offline("test")
+        s = pc.listed()[0]
+        self.assertEqual((s["background"], s["tasks"]), (0, []))
+
+    def test_notifications_throttled_and_stop_with_close(self):
+        pc = self.pc()
+        for i in range(peers.NOTIFY_MAX + 5):
+            pc._message({"notify": {"session": "a", "kind": "done", "text": f"n{i}"}})
+        self.assertEqual(len(self.hub.notifier.sent), peers.NOTIFY_MAX)
+        old = peers.Peer("pc", pc.conf, self.hub.peers)
+        old.close()
+        old._message({"notify": {"session": "a", "kind": "input", "text": "late"}})
+        self.assertEqual(len(self.hub.notifier.sent), peers.NOTIFY_MAX)
+        conn = mock.Mock()
+        with mock.patch.object(old, "connection", return_value=conn):   # closed before its stream connected
+            old._stream()
+        conn.request.assert_not_called()
+
+
 class TestNoPeers(unittest.TestCase):
     def test_nothing_changes_without_peers_json(self):
         with mock.patch.object(sessions, "registry", lambda: {}):
@@ -519,6 +693,23 @@ class TestConfig(unittest.TestCase):
         with self.assertRaises(SystemExit):
             peers.cmd_add(types.SimpleNamespace(socket=None, tls=False, name="PC Two"))
 
+    def test_ids_are_whole_matches(self):
+        hx = "a" * 32
+        self.assertIsNone(core.ID_RE.match(hx + "\n"))   # "$" let a trailing newline through
+        self.assertTrue(core.ID_RE.match(hx))
+        self.assertFalse(peers.is_id(hx + "\n"))
+
+    def test_uid_check(self):
+        d = tempfile.mkdtemp(dir=TMP)
+        os.chmod(d, 0o700)
+        path = os.path.join(d, "s.sock")
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(path)
+        self.addCleanup(s.close)
+        with mock.patch.object(peers.os, "getuid", return_value=os.getuid() + 1):
+            with self.assertRaisesRegex(PermissionError, "not a socket of this user's"):
+                peers.check_socket(path)
+
     def test_names(self):
         self.assertEqual(peers.split("pc:foo"), ("pc", "foo"))
         self.assertIsNone(peers.split("foo"))
@@ -580,6 +771,14 @@ class TestPage(unittest.TestCase):
             html = f.read()
         self.assertNotIn("open_in.slice(4)", html)
         self.assertIn('c.open_in.slice("grovy:".length)', html)
+
+    def test_ids_are_encoded_in_paths(self):
+        """Review: a peer's id went into /api/permissions/${p.id}/decision unencoded."""
+        with open(os.path.join(base.ROOT, "index.html")) as f:
+            html = f.read()
+        self.assertIsNone(re.search(r"/\$\{(p\.)?id\}", html))
+        self.assertNotIn('"/p/" + id', html)
+        self.assertIn("/api/permissions/${encodeURIComponent(p.id)}/decision", html)
 
     def test_route_accepts_peer_names(self):
         with open(os.path.join(base.ROOT, "index.html")) as f:
@@ -646,6 +845,23 @@ class TestTunnel(unittest.TestCase):
         self.assertEqual(calls[0][calls[0].index("-R") + 1], "/h/.local/state/grovy/peers/pc.sock:127.0.0.1:7333")
         self.assertEqual(sleeps, [2, 4])
         self.assertIn("Connection refused", out.getvalue())
+
+    def test_no_prepare_runs_nothing_on_the_hub(self):
+        calls = []
+        proc = mock.Mock()
+        proc.wait.return_value = 0
+        run = mock.Mock()
+        code = peers.run_tunnel("hub", "pc", 7333, remote="/h/s/pc.sock", run=run,
+                                popen=lambda argv, **k: calls.append(argv) or proc, sleep=lambda s: None,
+                                rounds=1, out=io.StringIO(), prepare=False)
+        self.assertEqual(code, 0)
+        run.assert_not_called()
+        self.assertEqual(calls[0][calls[0].index("-R") + 1], "/h/s/pc.sock:127.0.0.1:7333")
+        self.assertNotIn("sh -c", " ".join(calls[0]))
+        for bad in (None, "~/s.sock"):   # without a remote shell nothing expands ~
+            with self.assertRaises(SystemExit):
+                peers.cmd_tunnel(types.SimpleNamespace(host="hub", remote_socket=bad, port=7333, name="pc",
+                                                       local_host="127.0.0.1", no_prepare=True))
 
     def test_bad_remote_path_stops(self):
         bad = mock.Mock(returncode=0, stdout="/" + "x" * 150 + "\n", stderr="")

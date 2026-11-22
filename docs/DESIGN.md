@@ -670,6 +670,9 @@ PC: grovyd (127.0.0.1:7333) ◄── ssh -R ──── hub: ~/.local/state/gr
   (sshd only binds over one with `StreamLocalBindUnlink yes`, which it usually lacks) and print the socket's absolute
   path; then `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes
   -R SOCK:127.0.0.1:PORT HOST`; when ssh ends it waits 2s, 4s, … up to 60s (reset after a minute up) and starts again.
+  `--no-prepare` skips the remote shell entirely (needed with a key restricted to forwarding, below): then
+  `--remote-socket` must be the absolute path, its folder made once by hand (`mkdir -p -m 700`), and a stale socket is
+  left to the hub's sshd (`StreamLocalBindUnlink yes`, which sashimi has).
   Argument arrays throughout; the script is `shlex`-quoted for the remote shell, `~/` becomes `"$HOME"/`, a host that
   starts with `-` is refused. It's a **Unix socket, not a TCP port**: the hub is shared with other users, and a
   loopback port would be open to all of them; sshd creates the socket 0600 (`StreamLocalBindMask` 0177). The default
@@ -716,27 +719,57 @@ PC: grovyd (127.0.0.1:7333) ◄── ssh -R ──── hub: ~/.local/state/gr
   and only then tells the phones `pc:X` changed, so a phone that re-fetches sees the new state. When the stream says
   `hello` (it is subscribed: nothing after this can be missed), the hub re-fetches everything and then publishes
   `null` (phones re-fetch everything). A generation counter, bumped on every connect and disconnect, drops a fetch
-  that started on an older link, so a list fetched just before a drop can't bring sessions back as idle. The stream
-  times out after 45s without data (the peer pings every 15s); it reconnects after 1s, 2s, … up to 30s.
-* **Reachability.** Each peer is `connecting` (no fresh list since the link came up), `online` or `offline` (with the
-  reason and when it last answered). `/api/sessions` gains `host` (this machine's short name) and `peers`
-  (`{name, state, last_seen, error}`), only when peers exist. Unless `online`, a peer's last known sessions are listed
-  with state **`unknown`**, `accepts_input: false`, no pending count, and "pc is offline (last seen 3 min ago)" as their
-  activity: never `idle`. Its detail and actions answer 502.
+  that started on an older link, so a list fetched just before a drop can't bring sessions back as idle. Every 60s
+  the hub re-fetches everything anyway, which repairs a hint the peer dropped (its per-stream queue holds 100). The
+  stream times out after 45s without data (the peer pings every 15s); it reconnects after 1s, 2s, … up to 30s. Both
+  threads catch every error, log it and carry on (offline / `stale`), so a peer's odd answer can't freeze its state.
+* **Reachability.** Each peer is `connecting` (no fresh list since the link came up), `online`, `stale` (the stream is
+  up but 3 list fetches in a row failed: a peer whose token changed answers its stream until it restarts, but not the
+  lists) or `offline` (with the reason and when it last answered). `/api/sessions` gains `host` (this machine's short
+  name) and `peers` (`{name, state, last_seen, error}`), only when peers exist. Unless `online`, a peer's last known
+  sessions are listed with state **`unknown`**, `accepts_input: false`, no pending count or background work, and
+  "pc is offline (last seen 3 min ago)" or "pc isn't answering: …" as their activity: never `idle`. A request for a
+  peer's session is still tried on the socket whatever the state (the tunnel may be back before the stream notices);
+  only when that fails does it answer 502 with the reason.
 * **Notifications.** On the peer, a stream opened with `?notify=1` (a hub) also receives `{"notify": {session, kind,
   text}}` at each `Store._notify` (browsers' streams never do, so they are unchanged); it is counted apart from the
   browsers at the same address in the per-client stream cap (through the tunnel that address is 127.0.0.1). The hub
   passes each one to its own `_notify` as `pc:NAME`: `GROVY_NOTIFY_CMD`, and plugins' `notify` callbacks, hence Web
   Push. After the link was down, a session that now waits on you and didn't before gets one "needs you (while the
-  link was down)" notification, read from the peer's state.
+  link was down)" notification, read from the peer's state. At most 20 per peer per minute are passed on (the rest are
+  dropped and logged), and a peer removed or replaced in peers.json delivers nothing more, even from a stream that was
+  still connecting.
 * **UI.** A peer's session shows its machine as a small label before its name (list, sidebar, switcher, title bar);
   the home screen says which peers are offline or connecting; ＋ asks which machine (when peers exist) and lists that
   machine's trusted folders and conversations. Rename keeps the machine. The route accepts `#/s/pc:NAME` (and its
   percent-encoded form, which notifications use). `grovy.session` is `pc:NAME` there; `extensions/widgets.js` sends a
   peer's images and files to the peer.
-* **Trust.** Everything from a peer is untrusted input, like Claude's output: listed names must be valid (others are
-  dropped), states unknown to grovy become `unknown`, counts must be numbers. The link only goes one way: the hub
-  connects to the peer, never the reverse, so a peer can't reach the hub's sessions, files or plugins.
+* **Trust: what a peer sends.** Everything from a peer is untrusted input, like Claude's output. Ids must be exactly 32
+  hex digits, or the item is dropped (permissions, prompts, pages, the keys of `detail.pages`, a `Page` event's page,
+  share tokens): an id goes into URLs the phone builds, and `x/../../sessions/main/kill` would otherwise turn a tap on
+  Allow into another request on the hub (the page also `encodeURIComponent`s every id it puts in a path). Session
+  names must be valid; events need a numeric id and a type; every summary field the page reads is type-checked
+  (unknown states become `unknown`); any answer that still doesn't fit gives 502 "pc answered something unexpected".
+  The pre-login `/s/pc:…` route answers a plain 404 for every failure (no peer names, reachability or errors).
+* **Trust: what the link gives a peer.** Through grovy, nothing: the hub connects to the peer, never the reverse, and
+  no route lets a peer reach the hub's sessions, files or plugins. **The SSH login is another matter.** By default
+  `grovy peer tunnel` logs in to the hub with an ordinary key and runs `sh -c` there, so whoever controls the PC (or
+  its key) has a shell on the hub as you. A key restricted in the hub's `~/.ssh/authorized_keys` narrows that; checked
+  with OpenSSH 10.0 (a private sshd as this user, `StreamLocalBindUnlink yes` like sashimi's):
+
+  `restrict,port-forwarding,command="/bin/false",permitopen="127.0.0.1:9" ssh-ed25519 AAAA… pc-tunnel`
+
+  with `grovy peer tunnel HUB --no-prepare --remote-socket /home/you/.local/state/grovy/peers/pc.sock`.
+  * no shell or command (the forced command runs instead; `-N` asks for none), no agent or X11 forwarding, no pty;
+  * `-L` to the hub's TCP ports **and** to its Unix sockets (e.g. grovyd's own) is refused once any `permitopen` is
+    given (here a port nothing should listen on); with `restrict,port-forwarding` alone both still work;
+  * `-R` to a Unix socket **is not limited by path**: `permitlisten` only applies to TCP. The key can bind a socket
+    anywhere the account can write, and with `StreamLocalBindUnlink yes` **replace an existing one**, e.g. the hub
+    grovyd's own `grovyd.sock` (then the hub's sessions' hooks, permission requests included, would talk to the PC).
+    Only the hub's sshd configuration could narrow that (e.g. a `Match` block); grovy can't.
+
+  So treat a PC with a tunnel key as able to act as you on the hub's grovy: give the key to machines you trust as much
+  as the hub itself, and prefer the restricted entry above over a plain key.
 
 ## Out of memory
 
@@ -859,8 +892,11 @@ the SSH tunnel, and cuts and restores it: list, detail, history, prompts, queued
 interrupt/kill/resume/create, rename, live hints, notifications, offline `unknown` state and 502s, recovery with the
 "needs you" catch-up, stale-fetch protection, pages under the hub's CSP and shared links, streamed uploads and
 thumbnails, plugin routes, a wrong token, hostile names from a peer, removing a peer, peers.json validation and mode,
-socket ownership checks, the tunnel's ssh argv, its remote script (run by a real `sh`, quoting included) and backoff,
-and that nothing changes without peers.json.
+socket ownership checks, the tunnel's ssh argv, its remote script (run by a real `sh`, quoting included), backoff and
+`--no-prepare`, and that nothing changes without peers.json. `TestHostilePeer` plays a peer that sends what grovy
+never would: path-traversing and newline-ended ids, wrong types everywhere, a refresher that throws, lists failing on
+a live stream (`stale`), a lost hint (periodic resync), a refresh in flight when the link drops (generation guard),
+the pre-login `/s/` route, upload errors, notification floods and a closed peer.
 
 **Peers by hand** (no second machine needed): two scratch daemons (`--port 7397` hub, `7398` "pc", own state and
 config dirs), `grovy peer token` (pc) piped into `grovy peer add pc --socket HUBSTATE/peers/pc.sock` (hub), and

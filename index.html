@@ -741,7 +741,8 @@ async function renderList() {
   if (view !== null) return;
   const down = (machines || []).filter(m => m.state !== "online").map(m => h("div", {class: "warnline", "data-fk": "peer:" + m.name},
     m.state === "offline" ? `${m.name} is offline (last seen ${m.last_seen ? ago(m.last_seen) + (ago(m.last_seen) === "now" ? "" : " ago") : "never"})`
-      + (m.error ? `: ${m.error}` : "") : `Connecting to ${m.name}…`));
+      + (m.error ? `: ${m.error}` : "") : m.state === "stale" ? `${m.name} isn't answering: ${m.error || "?"}`
+      : `Connecting to ${m.name}…` + (m.error ? ` (${m.error})` : "")));
   pages = Object.fromEntries(all.map(p => [p.id, p]));
   if (viewing && !pages[viewing.id]) closeViewer();
   else if (viewing && (pages[viewing.id].version !== viewing.version || pages[viewing.id].share !== viewing.share))
@@ -1009,7 +1010,7 @@ function questionNode(p) {
   const send = async (decision, payload) => {
     submit.disabled = skip.disabled = true; card.querySelectorAll(".opt, textarea").forEach(b => b.disabled = true);
     note.textContent = "Sending…";
-    try { await api(`/api/permissions/${p.id}/decision`, {decision, answers: payload}); note.textContent = "Sent, waiting for Claude…"; waitingNote(note, Date.now()); }
+    try { await api(`/api/permissions/${encodeURIComponent(p.id)}/decision`, {decision, answers: payload}); note.textContent = "Sent, waiting for Claude…"; waitingNote(note, Date.now()); }
     catch (err) { note.textContent = "Failed: " + err.message; submit.disabled = skip.disabled = false; }
     refresh();
   };
@@ -1055,7 +1056,7 @@ function permNode(p) {
   const allow = h("button", {class: "btn allow"}, "Allow once"), deny = h("button", {class: "btn deny"}, "Deny");
   const decide = async d => {
     allow.disabled = deny.disabled = true; note.textContent = "Sending…";
-    try { await api(`/api/permissions/${p.id}/decision`, {decision: d}); note.textContent = "Sent, waiting for Claude…"; waitingNote(note, Date.now()); }
+    try { await api(`/api/permissions/${encodeURIComponent(p.id)}/decision`, {decision: d}); note.textContent = "Sent, waiting for Claude…"; waitingNote(note, Date.now()); }
     catch (err) { note.textContent = "Failed: " + err.message; }
     refresh();
   };
@@ -1082,7 +1083,7 @@ function promptNode(p) {
     : p.status === "unconfirmed" && p.typed ? [2, "typed, but Claude never confirmed it: check the terminal", "warn"]
     : PSTATUS[p.status] || [0, p.status, ""];
   const cancel = p.status === "queued" ? h("button", {class: "link", onclick: async () => {
-    try { await api(`/api/prompts/${p.id}/cancel`, {}); } catch (e) { say(e.message); } refresh(); }}, "cancel") : null;
+    try { await api(`/api/prompts/${encodeURIComponent(p.id)}/cancel`, {}); } catch (e) { say(e.message); } refresh(); }}, "cancel") : null;
   return h("div", {class: "u pending"}, ...userText(p.text),
     h("span", {class: "st " + cls}, sent(p.created), ...(n ? [ticks(n)] : []), label, p.error && p.status !== "unconfirmed" ? ": " + p.error : "", cancel));
 }
@@ -1733,7 +1734,7 @@ function lockIcon(open) {   // closed padlock: only you (with the token); open: 
 }
 async function deletePage(id, title) {
   if (!await ask(`Delete the page "${title || "page"}"? Its link stops working.`, "Delete", {danger: true})) return;
-  try { await api(`/api/pages/${id}/delete`, {}); } catch (e) { return say(e.message); }
+  try { await api(`/api/pages/${encodeURIComponent(id)}/delete`, {}); } catch (e) { return say(e.message); }
   refresh();
 }
 function syncViewer() {   // the open page was deleted, republished (reload) or its sharing changed
@@ -1744,7 +1745,7 @@ function syncViewer() {   // the open page was deleted, republished (reload) or 
 function openPage(id) {
   const p = pageOf(id); if (!p) return;
   closeSheet();
-  const src = "/p/" + id + "?v=" + p.version;
+  const src = "/p/" + encodeURIComponent(id) + "?v=" + encodeURIComponent(p.version);
   if (!viewing) history.pushState({viewer: 1}, "");   // the phone's back button closes the viewer
   viewing = {id, version: p.version, share: p.share};
   $("vtitle").textContent = p.title; $("vver").textContent = "v" + p.version;
@@ -1753,11 +1754,11 @@ function openPage(id) {
   if ($("vframe").getAttribute("src") !== src) $("vframe").src = src;
   $("viewer").classList.remove("hidden");
 }
-const shareUrl = token => location.origin + "/s/" + token;
+const shareUrl = token => location.origin + "/s/" + encodeURIComponent(token);
 async function shareSheet(id) {
   const p = pageOf(id); if (!p) return;
   const set = async on => {
-    try { const r = await api(`/api/pages/${id}/share`, {shared: on}); for (const m of [pages, sidePages]) if (m[id]) m[id] = {...m[id], share: r.page.share}; }
+    try { const r = await api(`/api/pages/${encodeURIComponent(id)}/share`, {shared: on}); for (const m of [pages, sidePages]) if (m[id]) m[id] = {...m[id], share: r.page.share}; }
     catch (e) { return say(e.message); }
     viewing && openPage(viewing.id); shareSheet(id);
   };

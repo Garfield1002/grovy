@@ -116,6 +116,10 @@ connects to the hub over SSH, so it needs no open port. Its sessions show as `pc
 
    (A service has no ssh-agent: use a key without a passphrase for it, or set `SSH_AUTH_SOCK`.)
 
+**Mind the key:** the PC's ssh key logs in to the hub, so whoever controls the PC can act as you on the hub. To
+narrow it to the tunnel, use the restricted `authorized_keys` entry and `--no-prepare` described in `docs/DESIGN.md`
+("Other machines"); even then, treat the PC as trusted.
+
 `grovy peer ls` on the hub says whether the PC is online; `grovy peer rm pc` removes it. While the PC is off, its
 sessions show as "unknown" and the home screen says so. What works on the hub only (new issues, new projects) and
 other limits are in `docs/DESIGN.md` ("Other machines").

@@ -173,4 +173,4 @@ def tool_summary(name, inp):
     return {"tool": str(name or "tool")[:60], "arg": arg[:117] + "…" if len(arg) > 120 else arg}
 
 
-ID_RE = re.compile(r"^[0-9a-f]{32}$")
+ID_RE = re.compile(r"\A[0-9a-f]{32}\Z")   # \Z: "$" would also accept a trailing newline
