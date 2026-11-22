@@ -683,6 +683,7 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
 | daemon restarted | sessions untouched; state reloaded and reconciled against tmux; `needs_input` stays `needs_input` (Claude falls back to its terminal dialog); in-flight prompts → `unconfirmed`; a "type anyway" consent never survives a restart |
 | daemon crashes during a permission | hook sees EOF → no output → terminal dialog |
 | Claude exits / tmux killed by hand | `SessionEnd` or reconciliation → `exited`; pending permissions expire; queued prompts → `failed` |
+| Claude dies at once on start (bad flag, unresolved `--resume` id, a `GROVY_CLAUDE` wrapper that fails its own setup) | the tmux session is already gone before `start_session` tags it, so `set-option` would fail with "no such session"; that's swallowed (only a tagging failure on a still-live session is raised) and `check_started` reports "claude exited immediately; to see why run: …" instead |
 | resumed with a new Claude session_id | `SessionStart` updates the id; history stays under the grovy name |
 | prompt while busy | queued, typed after `Stop` |
 | two clients send prompts | each is queued (under a lock) and delivered one at a time, in order |

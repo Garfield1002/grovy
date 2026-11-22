@@ -63,8 +63,17 @@ def start_session(name, cwd, extra_args=()):
                      *(["-e", f"GROVY_CONFIG_DIR={core.env('CONFIG_DIR')}"] if core.env("CONFIG_DIR") else []),
                      "--", *argv)
     pane = r.stdout.strip()
-    tmuxctl.tmux("set-option", "-t", "=" + tmuxctl.tmux_name(name) + ":", "@grovy_state", core.state_dir())
-    tmuxctl.tmux("set-option", "-t", "=" + tmuxctl.tmux_name(name) + ":", "@grovy", name)
+    try:
+        tmuxctl.tmux("set-option", "-t", "=" + tmuxctl.tmux_name(name) + ":", "@grovy_state", core.state_dir())
+        tmuxctl.tmux("set-option", "-t", "=" + tmuxctl.tmux_name(name) + ":", "@grovy", name)
+    except RuntimeError:
+        # The command can exit within milliseconds (a bad flag, an unresolved --resume id, or a
+        # GROVY_CLAUDE wrapper that fails its own setup), taking the tmux session with it before we
+        # tag it. tmux then fails set-option with "no such session". That's not a tmux fault: let
+        # check_started() report the real "claude exited immediately". Only a tagging failure on a
+        # still-live session is a genuine error worth raising.
+        if tmuxctl.tmux("has-session", "-t", "=" + tmuxctl.tmux_name(name), check=False).returncode == 0:
+            raise
     with registry_locked() as reg:
         prev = reg.get(name, {})
         args = list(extra_args)

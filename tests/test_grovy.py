@@ -3638,6 +3638,35 @@ class TestTmuxIntegration(unittest.TestCase):
         self.assertEqual(out.strip(), "GROVY_CONFIG_DIR=" + cfg)
         sessions.kill_session("cd1")
 
+    def test_instant_exit_reports_claude_error_not_tmux(self):
+        """Regression: a claude (or GROVY_CLAUDE wrapper) that dies at once takes its tmux session
+        with it before start_session can tag it. The user must see 'claude exited immediately',
+        not a cryptic 'tmux set-option failed: no such session'."""
+        dead = os.path.join(TMP, "deadclaude")
+        with open(dead, "w") as f:
+            f.write("#!/bin/bash\nexit 7\n")
+        os.chmod(dead, 0o755)
+        real = tmuxctl.tmux
+
+        def race(*a, **k):   # force the real bug's timing: don't tag until the session is reaped
+            if a and a[0] == "set-option":
+                end = time.time() + 5
+                while time.time() < end and \
+                        real("has-session", "-t", "=grovy-dead1", check=False).returncode == 0:
+                    time.sleep(0.02)
+            return real(*a, **k)
+
+        try:
+            with mock.patch.dict(os.environ, {"GROVY_CLAUDE": dead}), \
+                    mock.patch.object(tmuxctl, "tmux", race):
+                sessions.start_session("dead1", self.proj)   # must NOT raise "set-option failed"
+                with self.assertRaises(RuntimeError) as cm:
+                    sessions.check_started("dead1", self.proj, [], wait=0.1)
+            self.assertIn("exited immediately", str(cm.exception))
+        finally:
+            with sessions.registry_locked() as reg:
+                reg.pop("dead1", None)
+
     def test_lifecycle_and_literal_delivery(self):
         sessions.start_session("it1", self.proj)
         sessions.start_session("it2", self.proj)
