@@ -143,6 +143,15 @@ def write_config(peers, path=None):
     os.chmod(path, 0o600)
 
 
+def reason(e, name):
+    """Why a peer can't be reached, in words: a refused or missing socket means no tunnel."""
+    if isinstance(e, (ConnectionRefusedError, FileNotFoundError)):
+        return f"no tunnel (is `grovy peer tunnel` running on {name}?)"
+    if isinstance(e, socket.timeout):
+        return "it doesn't answer (timed out)"
+    return str(e) or type(e).__name__
+
+
 # ------------------------------------------------------------------ HTTP over the socket
 class PeerError(Exception):
     """The peer couldn't be reached, or answered nonsense."""
@@ -178,7 +187,7 @@ def check_socket(path):
     try:
         st = os.lstat(path)
     except FileNotFoundError:
-        raise ConnectionRefusedError("no tunnel (the socket isn't there)") from None
+        raise FileNotFoundError("no tunnel (the socket isn't there)") from None
     if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.getuid():
         raise PermissionError("not a socket of this user's: refusing to send it the token")
     d = os.stat(os.path.dirname(path))
@@ -216,8 +225,7 @@ class Peer:
     def unreachable(self, e):
         with self.lock:
             seen = self.last_seen
-        why = str(e) or type(e).__name__
-        return f"{self.name} is offline (last seen {ago(seen)}): {why}"
+        return f"{self.name} is offline (last seen {ago(seen)}): {reason(e, self.name)}"
 
     def open(self, method, path, body=None, headers=None, timeout=REQUEST_TIMEOUT):
         """Send a request; returns (connection, response) for the caller to read and close. Raises PeerError."""
@@ -333,7 +341,7 @@ class Peer:
             except PeerError as e:
                 why = str(e)
             except (OSError, http.client.HTTPException, ValueError) as e:
-                why = str(e) or type(e).__name__
+                why = reason(e, self.name)
             self._offline(why)
             if time.monotonic() - started > 60:
                 delay = 1
@@ -347,7 +355,7 @@ class Peer:
                 c.request("GET", "/api/events?notify=1", headers=self.headers())
                 r = c.getresponse()
             except (OSError, http.client.HTTPException) as e:
-                raise PeerError(str(e) or type(e).__name__) from None
+                raise PeerError(reason(e, self.name)) from None
             if r.status != 200:
                 raise PeerError(f"its event stream answered HTTP {r.status}" +
                                 (" (wrong token?)" if r.status == 401 else ""))

@@ -264,7 +264,7 @@ class TestPeerLink(PeerLink):
         perm = d["permissions"][0]
         self.assertEqual(perm["id"], "pc:" + p["id"])
         self.assertEqual(perm["tool_input"], {"command": "rm -rf pc:" + "0" * 32})   # shown exactly as sent
-        self.assertEqual(self.get("/api/sessions")[1]["sessions"][0]["name"], "pc:a")   # waiting on you: first
+        self.assertTrue(wait_for(lambda: self.get("/api/sessions")[1]["sessions"][0]["name"] == "pc:a"))   # waiting on you: first
         code, r = self.post(f"/api/permissions/{perm['id']}/decision", {"decision": "allow"})
         self.assertEqual(code, 200, r)
         t.join(5)
@@ -322,6 +322,7 @@ class TestPeerLink(PeerLink):
         code, d = self.get("/api/sessions/pc:a")
         self.assertEqual(code, 502)
         self.assertIn("pc is offline", d["error"])
+        self.assertIn("is `grovy peer tunnel` running on pc?", d["error"])
         code, d = self.post("/api/sessions/pc:a/prompts", {"text": "x"})
         self.assertEqual(code, 502)
         self.assertTrue(any(json.loads(m).get("session") is None for m in q))   # phones re-fetch everything
@@ -527,8 +528,9 @@ class TestConfig(unittest.TestCase):
     def test_socket_checks(self):
         d = tempfile.mkdtemp(dir=TMP)
         path = os.path.join(d, "s.sock")
-        with self.assertRaises(ConnectionRefusedError):
+        with self.assertRaises(FileNotFoundError):
             peers.check_socket(path)
+        self.assertIn("grovy peer tunnel", peers.reason(FileNotFoundError(), "pc"))
         open(path, "w").close()
         with self.assertRaises(PermissionError):   # not a socket
             peers.check_socket(path)
