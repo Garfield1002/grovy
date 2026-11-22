@@ -9,6 +9,8 @@
 // grovy.disable("widgets").
 grovy.extension("widgets", grovy => {
   const {h, md} = grovy;
+  // "pc:" while showing another machine's session (grovylib/peers.py): its images and files are served by that machine
+  const peerOf = () => { const n = grovy.session || "", i = n.indexOf(":"); return i > 0 ? n.slice(0, i + 1) : ""; };
   grovy.css(`
 :root { --c1:#3a6fd8; --c2:#c96442; --c3:#2f8a4c; --c4:#8a5cc7; --c5:#c27c0e; --c6:#2a9aa8; }
 @media (prefers-color-scheme: dark) { :root { --c1:#7aa2ff; --c2:#e08a67; --c3:#5cc47e; --c4:#b48cf0; --c5:#f0a63a; --c6:#5cc8d4; } }
@@ -182,7 +184,8 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
       const src = wtext(s.src, 300);
       if (!/^[A-Za-z0-9_-]+\/\d{8}-\d{6}-[0-9a-f]{4}-[A-Za-z0-9._-]+$/.test(src))
         throw new Error("src must be what `grovy image FILE` printed");
-      const url = "/api/images/" + src.split("/").map(encodeURIComponent).join("/");
+      const [sess, file] = src.split("/");   // in another machine's session (pc:NAME) the copy is on that machine
+      const url = "/api/images/" + encodeURIComponent(peerOf() + sess) + "/" + encodeURIComponent(file);
       const link = h("a", {class: "wimg", href: url, target: "_blank", rel: "noopener"});
       link.append(h("img", {src: url, alt: wtext(s.caption, 300), loading: "lazy",
         onerror: () => link.replaceWith(h("div", {class: "wn"}, "This image is no longer available."))}));
@@ -190,9 +193,10 @@ svg.line .dot { fill:var(--card); stroke:var(--c); stroke-width:2; }
     },
 
     file(s) {   // url: what `grovy x share FILE` printed (a file grovy serves from disk as a download)
-      const url = wtext(s.url, 60);
-      if (!/^\/xfile\/[0-9a-f]{32}$/.test(url))
+      const given = wtext(s.url, 60);
+      if (!/^\/xfile\/[0-9a-f]{32}$/.test(given))
         throw new Error("url must be what `grovy x share FILE` printed");
+      const url = "/xfile/" + encodeURIComponent(peerOf()) + given.slice(7);   // served by the session's own machine
       const name = wtext(s.name, 120) || "file";
       const meta = s.size == null ? "Download" : hsize(wnum(s.size, "size")) + " · Download";
       const card = h("a", {class: "wfile", href: url, download: name, rel: "noopener"},

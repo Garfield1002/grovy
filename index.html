@@ -67,6 +67,10 @@ main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px
   -webkit-box-orient:vertical; overflow-wrap:anywhere; }
 .sess .rm { align-self:center; flex:none; font-size:13px; font-weight:600; color:var(--bad); border:1px solid var(--line);
   border-radius:99px; padding:6px 12px; background:var(--card); }
+.mach { font-size:11px; font-weight:650; color:var(--mut); border:1px solid var(--line); border-radius:6px; padding:0 5px;
+  margin-right:6px; vertical-align:2px; }
+.machines { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 12px; }
+.machines .btn.sel { outline:2px solid var(--acc); }
 .sess .badge { font-size:12px; font-weight:700; color:#fff; background:var(--warn); border-radius:99px; padding:1px 8px; }
 .sess.wt { padding-left:22px; border-left:2px solid var(--line); }   /* a worktree, nested under its root project */
 .empty { text-align:center; color:var(--mut); padding:48px 10px; }
@@ -481,6 +485,10 @@ let skew = 0;   // server clock minus this device's clock: timers compare server
 const serverNow = () => Date.now() / 1000 + skew;
 const clock = ts => new Date(ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
 const base = p => (p || "?").split("/").filter(Boolean).pop() || p;
+// Another machine's session (a peer, grovylib/peers.py) is "pc:NAME"; its ids are "pc:<hex>". Local names have no ":".
+const machineOf = n => { const i = String(n || "").indexOf(":"); return i > 0 ? n.slice(0, i) : null; };
+const localOf = n => { const i = String(n || "").indexOf(":"); return i > 0 ? n.slice(i + 1) : n; };
+const nameNode = n => machineOf(n) ? [h("span", {class: "mach"}, machineOf(n)), localOf(n)] : [n];
 const LABEL = {needs_input: "needs you", idle: "idle", working: "working", starting: "starting",
                exited: "exited", unknown: "unknown", error: "error"};
 const unwrap = t => String(t || "").replace(/<\/?pasted_content[^>]*>/g, "").replace(/\n{3,}/g, "\n\n").trim();
@@ -697,13 +705,14 @@ function md(src) {
 // session (keeping each session's sorted order). A worktree whose root project has no session falls to the end.
 function orderSessions(sessions) {
   const kids = {};   // root path -> its worktree sessions
-  for (const s of sessions) if (s.issue) (kids[s.issue.root] ||= []).push(s);
+  const at = (s, path) => (s.machine || "") + "\0" + path;   // the same folder on two machines isn't one project
+  for (const s of sessions) if (s.issue) (kids[at(s, s.issue.root)] ||= []).push(s);
   const out = [];
   for (const s of sessions) {
     if (s.issue) continue;                             // placed under its root below, not at top level
     out.push([s, false]);
-    for (const k of kids[s.cwd] || []) out.push([k, true]);
-    delete kids[s.cwd];
+    for (const k of kids[at(s, s.cwd)] || []) out.push([k, true]);
+    delete kids[at(s, s.cwd)];
   }
   for (const r in kids) for (const k of kids[r]) out.push([k, true]);   // root project has no session of its own
   return out;
@@ -713,7 +722,7 @@ function sessCard(s, nested) {
   return h("button", {class: "sess" + (nested ? " wt" : ""), "data-fk": "s:" + s.name, onclick: () => go("#/s/" + s.name)},
     h("span", {class: dotClass(s)}),
     h("div", {class: "body"},
-      h("div", {class: "top"}, h("span", {class: "name"}, s.name),
+      h("div", {class: "top"}, h("span", {class: "name"}, ...nameNode(s.name)),
         s.pending_permissions ? h("span", {class: "badge"}, s.pending_permissions + " waiting") : null,
         h("span", {class: "when"}, ago(s.last_event))),
       h("div", {class: "sub"}, base(s.cwd), " · ", LABEL[s.state] || s.state,
@@ -727,9 +736,12 @@ function sessCard(s, nested) {
 let showAllPages = false;
 async function renderList() {
   document.body.classList.add("home");
-  const [{sessions, now: srv}, {pages: all}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
+  const [{sessions, now: srv, peers: machines}, {pages: all}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
   if (typeof srv === "number") skew = srv - Date.now() / 1000;
   if (view !== null) return;
+  const down = (machines || []).filter(m => m.state !== "online").map(m => h("div", {class: "warnline", "data-fk": "peer:" + m.name},
+    m.state === "offline" ? `${m.name} is offline (last seen ${m.last_seen ? ago(m.last_seen) + (ago(m.last_seen) === "now" ? "" : " ago") : "never"})`
+      + (m.error ? `: ${m.error}` : "") : `Connecting to ${m.name}…`));
   pages = Object.fromEntries(all.map(p => [p.id, p]));
   if (viewing && !pages[viewing.id]) closeViewer();
   else if (viewing && (pages[viewing.id].version !== viewing.version || pages[viewing.id].share !== viewing.share))
@@ -740,7 +752,7 @@ async function renderList() {
     all.length > shown.length ? h("button", {class: "earlier", onclick: () => { showAllPages = true; refresh(); }},
       `Show all ${all.length} pages`) : null] : [];
   document.title = "grovy" + (sessions.some(s => s.pending_permissions || s.state === "needs_input") ? " (!)" : "");
-  paint(main, ...(sessions.length ? orderSessions(sessions).map(([s, nested]) => sessCard(s, nested))
+  paint(main, ...down, ...(sessions.length ? orderSessions(sessions).map(([s, nested]) => sessCard(s, nested))
     : [h("div", {class: "empty"}, "No sessions yet. Tap ＋ to start one.")]),
     ...(() => { const dead = sessions.filter(s => s.state === "exited").map(s => s.name);
       return dead.length > 1 ? [h("button", {class: "earlier", onclick: () => removeSessions(dead)}, `Remove all ${dead.length} ended sessions`)] : []; })(),
@@ -760,7 +772,8 @@ async function removeSessions(names) {
 const ATTACHED = /^Attached: (\/\S.*)$/;   // how a message names a file sent from the phone (see the composer)
 const attName = p => p.split("/").pop().replace(/^\d{8}-\d{6}-[0-9a-f]{4}-/, "");
 const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
-const attUrl = p => { const [s, f] = p.split("/").slice(-2); return `/api/attachments/${encodeURIComponent(s)}/${encodeURIComponent(f)}`; };
+const attUrl = p => { const [s, f] = p.split("/").slice(-2); const m = machineOf(view);   // a peer's files are on the peer
+  return `/api/attachments/${encodeURIComponent(m ? m + ":" + s : s)}/${encodeURIComponent(f)}`; };
 function attNode(path) {   // a picture shows as a thumbnail (tap: full size); anything else, or a gone file, as a chip
   const chip = () => h("span", {class: "attl", title: path}, "📎 " + attName(path));
   if (!IMAGE.test(path)) return chip();
@@ -1454,7 +1467,7 @@ async function switcher() {   // tap the title: jump to another session
   const {sessions} = await api("/api/sessions");
   openSheet(h("h2", {}, "Sessions"), ...sessions.map(s => h("button", {class: "item" + (s.name === view ? " cur" : ""),
     onclick: () => { closeSheet(); go("#/s/" + s.name); }},
-    h("span", {class: "dot " + s.state}), h("div", {}, s.name, h("div", {class: "sub"}, base(s.cwd) + " · " + (LABEL[s.state] || s.state))))),
+    h("span", {class: "dot " + s.state}), h("div", {}, ...nameNode(s.name), h("div", {class: "sub"}, base(s.cwd) + " · " + (LABEL[s.state] || s.state))))),
     h("button", {class: "item", onclick: () => { closeSheet(); go("#/"); }}, "All sessions…"));
 }
 $("title").onclick = () => { if (view) switcher(); };
@@ -1550,17 +1563,18 @@ $("resume").onclick = async () => {
 
 function renameSheet(old) {
   const inp = h("input", {class: "field", autocapitalize: "off", autocorrect: "off", enterkeyhint: "done"});
-  inp.value = old;
+  const mach = machineOf(old), pre = mach ? mach + ":" : "";   // a peer's session keeps its machine
+  inp.value = localOf(old);
   const msg = h("div", {class: "note"}, "Letters, digits, - and _ (max 32). Works while Claude is running.");
   const save = h("button", {class: "btn allow"}, "Rename");
-  const ok = () => /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(inp.value) && inp.value !== old;
+  const ok = () => /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(inp.value) && pre + inp.value !== old;
   inp.oninput = () => { save.disabled = !ok(); };
   save.disabled = true;
   save.onclick = async () => {
     save.disabled = true; msg.className = "note"; msg.textContent = "Renaming…";
     try {
-      const nw = inp.value;
-      await api(`/api/sessions/${encodeURIComponent(old)}/rename`, {name: nw});
+      const nw = pre + inp.value;
+      await api(`/api/sessions/${encodeURIComponent(old)}/rename`, {name: inp.value});
       try {   // carry the unsent draft over
         const d = localStorage.getItem("grovy-draft:" + old);
         if (d) { localStorage.setItem("grovy-draft:" + nw, d); localStorage.removeItem("grovy-draft:" + old); }
@@ -1602,11 +1616,19 @@ function searchSheet() {
 }
 
 async function newSession(state = {}) {
-  let folders = [], taken = new Set();
+  let folders = [], taken = new Set(), machines = [], host = "";
+  const machine = state.machine || null;   // null: this machine; else a peer's name (its sessions are "pc:NAME")
+  const on = machine ? "peer=" + encodeURIComponent(machine) : "";
   try {
-    folders = (await api("/api/projects")).projects;
-    taken = new Set((await api("/api/sessions")).sessions.map(s => s.name));
-  } catch (e) { return say(e.message); }
+    const all = await api("/api/sessions");
+    machines = all.peers || []; host = all.host || "this machine";
+    taken = new Set(all.sessions.filter(s => machineOf(s.name) === machine).map(s => localOf(s.name)));
+    folders = (await api("/api/projects" + (on ? "?" + on : ""))).projects;
+  } catch (e) {
+    if (!machine) return say(e.message);
+    folders = []; state = {...state, err: e.message};
+  }
+  const full = n => (machine ? machine + ":" : "") + n;
   let picked = state.picked || null;
   const unique = b => { b = b.replace(/[^A-Za-z0-9_-]/g, "-").replace(/^[-_]+/, "").slice(0, 28) || "s";
     let n = b, i = 2; while (taken.has(n)) n = b + "-" + i++; return n; };
@@ -1618,17 +1640,17 @@ async function newSession(state = {}) {
   const ask = h("input", {type: "checkbox"}); ask.checked = !!state.ask;
   const go_ = h("button", {class: "btn allow", disabled: ""}, "Start fresh");
   const note = h("div", {class: "note"});
-  const keep = () => ({picked, name: name.value, auto: !!name.dataset.auto, ask: ask.checked});
+  const keep = () => ({picked, name: name.value, auto: !!name.dataset.auto, ask: ask.checked, machine});
   const valid = () => { go_.disabled = !(picked && /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(name.value) && !taken.has(name.value)); };
   const loadConvs = async () => {
     convs.replaceChildren(h("div", {class: "sub", style: "color:var(--mut);font-size:13px;margin:0 0 10px"}, "Loading conversations…"));
     let cs = [];
-    try { cs = (await api("/api/conversations?path=" + encodeURIComponent(picked))).conversations; } catch (e) { cs = []; }
+    try { cs = (await api("/api/conversations?path=" + encodeURIComponent(picked) + (on ? "&" + on : ""))).conversations; } catch (e) { cs = []; }
     convs.replaceChildren(...(cs.length ? [h("div", {class: "lbl"}, "Continue a conversation"),
       h("div", {class: "folders"}, cs.map(c => h("button", {class: "item", onclick: () => preview(c, keep())},
         h("div", {style: "min-width:0;flex:1"}, c.title || (c.first || "").slice(0, 80),
           h("div", {class: "sub"}, `${c.messages} message${c.messages === 1 ? "" : "s"} · ${ago(c.mtime) || "now"}`,
-            c.open_in ? " · open " + (c.open_in === "terminal" ? "in a terminal" : "in " + c.open_in.slice(4)) : "")))))] : []));
+            c.open_in ? " · open " + (c.open_in === "terminal" ? "in a terminal" : "in " + c.open_in.slice("grovy:".length)) : "")))))] : []));
   };
   const draw = () => list.replaceChildren(...(!folders.length ? [h("div", {class: "sys", style: "padding:12px 4px;text-align:left"},
       "No trusted folders yet. On the computer, run claude once in a project folder and accept its trust prompt; "
@@ -1641,11 +1663,17 @@ async function newSession(state = {}) {
   filter.oninput = draw;
   go_.onclick = async () => {
     go_.disabled = true; note.textContent = "Starting Claude…";
-    try { await api("/api/sessions", {name: name.value, path: picked, ask: ask.checked}); closeSheet(); go("#/s/" + name.value); }
+    try { await api("/api/sessions", {name: full(name.value), path: picked, ask: ask.checked}); closeSheet(); go("#/s/" + full(name.value)); }
     catch (e) { note.className = "errline"; note.textContent = e.message; valid(); }
   };
   draw(); valid(); if (picked) loadConvs();
-  openSheet(h("h2", {}, "New session"), h("div", {class: "lbl"}, "Folder (ones Claude already trusts)"), filter, list, convs,
+  const pick = m => { if (m !== machine) newSession({ask: ask.checked, machine: m}); };
+  const where = machines.length ? [h("div", {class: "lbl"}, "Machine"), h("div", {class: "machines"},
+    h("button", {class: "btn" + (machine ? "" : " sel"), onclick: () => pick(null)}, host),
+    machines.map(m => h("button", {class: "btn" + (m.name === machine ? " sel" : ""), onclick: () => pick(m.name)},
+      m.name + (m.state === "online" ? "" : " (offline)"))))] : [];
+  openSheet(h("h2", {}, "New session"), ...where, state.err ? h("div", {class: "errline"}, state.err) : null,
+    h("div", {class: "lbl"}, "Folder (ones Claude already trusts)"), filter, list, convs,
     h("div", {class: "lbl"}, "Name"), name,
     h("label", {class: "toggle"}, ask, "Ask before running tools"), note, h("div", {class: "row"}, go_));
 
@@ -1660,12 +1688,13 @@ async function newSession(state = {}) {
       if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(nm.value)) return fail("Name: letters, digits, - and _ only.");
       if (taken.has(nm.value)) return fail(`A session named "${nm.value}" already exists: pick another name.`);
       msg.className = "note"; msg.textContent = fork ? "Forking…" : "Starting Claude…";
-      try { await api("/api/sessions", {name: nm.value, path: st.picked, ask: ask2.checked, resume: c.id, fork}); closeSheet(); go("#/s/" + nm.value); }
+      try { await api("/api/sessions", {name: full(nm.value), path: st.picked, ask: ask2.checked, resume: c.id, fork}); closeSheet(); go("#/s/" + full(nm.value)); }
       catch (e) { fail(e.message); }
     };
     const inCcs = c.open_in && c.open_in.startsWith("grovy:"), inTerm = c.open_in === "terminal";
+    const openName = inCcs ? c.open_in.slice("grovy:".length) : "";
     const actions = inCcs
-      ? [h("button", {class: "btn allow", onclick: () => { closeSheet(); go("#/s/" + c.open_in.slice(4)); }}, "Open session " + c.open_in.slice(4))]
+      ? [h("button", {class: "btn allow", onclick: () => { closeSheet(); go("#/s/" + openName); }}, "Open session " + openName)]
       : inTerm ? [h("button", {class: "btn allow", onclick: () => start(true)}, "Fork a copy")]
       : [h("button", {class: "btn", onclick: () => start(true)}, "Fork a copy"), h("button", {class: "btn allow", onclick: () => start(false)}, "Continue here")];
     openSheet(
@@ -1673,7 +1702,7 @@ async function newSession(state = {}) {
       h("h2", {}, c.title || "Untitled conversation"),
       h("div", {class: "sub", style: "color:var(--mut);font-size:13px;margin:-6px 0 12px"},
         `${base(st.picked)} · ${c.messages} message${c.messages === 1 ? "" : "s"} · last active ${ago(c.mtime) || "now"}`),
-      inCcs ? h("div", {class: "warnline"}, "Already open in grovy session " + c.open_in.slice(4) + ".")
+      inCcs ? h("div", {class: "warnline"}, "Already open in grovy session " + openName + ".")
         : inTerm ? h("div", {class: "warnline"}, "Open in another terminal right now. A fork continues from here as a copy; the original stays untouched.") : null,
       c.first ? h("div", {class: "lbl"}, "First message") : null, c.first ? h("div", {class: "u", style: "margin:0 0 12px auto"}, c.first) : null,
       c.last ? h("div", {class: "lbl"}, "Claude's last reply") : null,
@@ -1786,7 +1815,7 @@ async function renderSide() {
       "data-name": s.name, ...(s.name === view ? {"aria-current": "page"} : {}), onclick: () => go("#/s/" + s.name)},
     h("span", {class: dotClass(s)}),
     h("div", {class: "body"},
-      h("div", {class: "top"}, h("span", {class: "name"}, s.name),
+      h("div", {class: "top"}, h("span", {class: "name"}, ...nameNode(s.name)),
         s.background && s.state !== "exited" ? runMark(s.background, true) : null,
         s.pending_permissions ? h("span", {class: "badge"}, String(s.pending_permissions)) : null,
         h("span", {class: "when"}, ago(s.last_event))),
@@ -1878,7 +1907,9 @@ function focusSheet() {
 // ---------------------------------------------------------------- routing + live updates
 function go(hash) { location.hash = hash; }
 function route() {
-  const m = location.hash.match(/^#\/s\/([A-Za-z0-9_-]+)$/);
+  let hash = location.hash;
+  try { hash = decodeURIComponent(hash); } catch (e) {}   // a notification's link encodes a peer's "pc:NAME"
+  const m = hash.match(/^#\/s\/((?:[a-z0-9][a-z0-9_-]{0,15}:)?[A-Za-z0-9_-]+)$/);
   view = m ? m[1] : null; lastEventId = 0; cur = null; first = true; lastTool = ""; cache.clear();
   older = []; noMore = false; closeSheet(); $("quick").replaceChildren(); canStop = false;
   $("add").classList.toggle("hidden", !!view); $("menu").classList.remove("hidden");
@@ -1887,7 +1918,7 @@ function route() {
   $("pill").classList.toggle("hidden", !view);
   $("composer").classList.toggle("hidden", !view);
   $("typing").classList.add("hidden");
-  $("title").textContent = view || "Sessions";
+  $("title").replaceChildren(...(view ? nameNode(view) : ["Sessions"]));
   main.replaceChildren();
   $("picker").replaceChildren(); commands = []; shrunk = false; setFull(false);
   if (fullState()) history.replaceState(null, "");   // a reload while full: the next back shouldn't land on a stale entry
