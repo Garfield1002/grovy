@@ -719,8 +719,11 @@ PC: grovyd (127.0.0.1:7333) ◄── ssh -R ──── hub: ~/.local/state/gr
   and only then tells the phones `pc:X` changed, so a phone that re-fetches sees the new state. When the stream says
   `hello` (it is subscribed: nothing after this can be missed), the hub re-fetches everything and then publishes
   `null` (phones re-fetch everything). A generation counter, bumped on every connect and disconnect, drops a fetch
-  that started on an older link, so a list fetched just before a drop can't bring sessions back as idle. Every 60s
-  the hub re-fetches everything anyway, which repairs a hint the peer dropped (its per-stream queue holds 100). The
+  that started on an older link, so a list fetched just before a drop can't bring sessions back as idle. At least
+  every 60s by the clock (steady hints don't put it off) the refresh is a full one and phones re-fetch everything,
+  which repairs a hint the peer dropped (its per-stream queue holds 100). A list that isn't a list is a failed
+  refresh, not an empty machine. A failed refresh is retried on the same link after 1s, 2s, … up to 30s, and
+  forgotten if the link dropped meanwhile (the next `hello` re-fetches everything). The
   stream times out after 45s without data (the peer pings every 15s); it reconnects after 1s, 2s, … up to 30s. Both
   threads catch every error, log it and carry on (offline / `stale`), so a peer's odd answer can't freeze its state.
 * **Reachability.** Each peer is `connecting` (no fresh list since the link came up), `online`, `stale` (the stream is
@@ -736,8 +739,9 @@ PC: grovyd (127.0.0.1:7333) ◄── ssh -R ──── hub: ~/.local/state/gr
   browsers at the same address in the per-client stream cap (through the tunnel that address is 127.0.0.1). The hub
   passes each one to its own `_notify` as `pc:NAME`: `GROVY_NOTIFY_CMD`, and plugins' `notify` callbacks, hence Web
   Push. After the link was down, a session that now waits on you and didn't before gets one "needs you (while the
-  link was down)" notification, read from the peer's state. At most 20 per peer per minute are passed on (the rest are
-  dropped and logged), and a peer removed or replaced in peers.json delivers nothing more, even from a stream that was
+  link was down)" notification, read from the peer's state. At most 20 per peer per minute of each class are passed
+  on (the rest are dropped and logged): "needs you" has a budget of its own, so a burst of "finished" can never
+  swallow a permission request; and a peer removed or replaced in peers.json delivers nothing more, even from a stream that was
   still connecting.
 * **UI.** A peer's session shows its machine as a small label before its name (list, sidebar, switcher, title bar);
   the home screen says which peers are offline or connecting; ＋ asks which machine (when peers exist) and lists that
@@ -896,7 +900,8 @@ socket ownership checks, the tunnel's ssh argv, its remote script (run by a real
 `--no-prepare`, and that nothing changes without peers.json. `TestHostilePeer` plays a peer that sends what grovy
 never would: path-traversing and newline-ended ids, wrong types everywhere, a refresher that throws, lists failing on
 a live stream (`stale`), a lost hint (periodic resync), a refresh in flight when the link drops (generation guard),
-the pre-login `/s/` route, upload errors, notification floods and a closed peer.
+the pre-login `/s/` route, upload errors, notification floods and a closed peer. `TestPeerRound2`: a "finished" flood followed by a
+permission request, the clock-based resync under steady hints, a non-list list, no retry loop while the link is down.
 
 **Peers by hand** (no second machine needed): two scratch daemons (`--port 7397` hub, `7398` "pc", own state and
 config dirs), `grovy peer token` (pc) piped into `grovy peer add pc --socket HUBSTATE/peers/pc.sock` (hub), and

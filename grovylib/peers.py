@@ -220,7 +220,8 @@ class Peer:
         self.conn = None            # the event stream's connection, closed by close() to end its read at once
         self.linked = False         # the stream is subscribed (said hello) and hasn't dropped since
         self.failures = 0           # list refreshes failed in a row on a live stream
-        self.notified, self.throttled = collections.deque(), False
+        self.notified, self.throttled = {}, set()   # notification class -> recent times; classes over budget
+        self.full_at = None         # monotonic time of the last full refresh that worked
 
     # -- requests
     def connection(self, timeout=REQUEST_TIMEOUT):
@@ -413,7 +414,7 @@ class Peer:
         n = msg.get("notify")
         if isinstance(n, dict):
             s, kind, text = n.get("session"), n.get("kind"), n.get("text")
-            if core.valid_name(s) and kind in KINDS and isinstance(text, str) and self._may_notify():
+            if core.valid_name(s) and kind in KINDS and isinstance(text, str) and self._may_notify(kind):
                 self.hub.notify(join(self.name, s), kind, core.norm(text)[:300])
             return
         if "session" in msg:
@@ -427,22 +428,24 @@ class Peer:
                     return
             self.wake.set()
 
-    def _may_notify(self):
-        """At most NOTIFY_MAX notifications per NOTIFY_WINDOW seconds from one peer (a peer gone haywire can't
-        flood your phone); the rest are dropped, and that is logged once per window."""
+    def _may_notify(self, kind):
+        """Flood protection, per peer: at most NOTIFY_MAX notifications per NOTIFY_WINDOW seconds of each class, "needs
+        you" (input) apart from the rest, so a burst of "finished" can never swallow a permission request. The rest
+        are dropped, and that is logged once per burst."""
+        cls = "input" if kind == "input" else "other"
         t = time.monotonic()
         with self.lock:
-            while self.notified and t - self.notified[0] > NOTIFY_WINDOW:
-                self.notified.popleft()
-            if len(self.notified) >= NOTIFY_MAX:
-                first = not self.throttled
-                self.throttled = True
-            else:
-                self.notified.append(t)
-                self.throttled = False
+            q = self.notified.setdefault(cls, collections.deque())
+            while q and t - q[0] > NOTIFY_WINDOW:
+                q.popleft()
+            if len(q) < NOTIFY_MAX:
+                q.append(t)
+                self.throttled.discard(cls)
                 return True
+            first = cls not in self.throttled
+            self.throttled.add(cls)
         if first:
-            log(f"{self.name}: too many notifications, dropping some")
+            log(f"{self.name}: too many {'needs-you' if cls == 'input' else ''} notifications, dropping some")
         return False
 
     def _offline(self, why):
@@ -458,39 +461,44 @@ class Peer:
 
     def _refresh_loop(self):
         while not self.stop.is_set():
-            woken = self.wake.wait(RESYNC_EVERY)
+            self.wake.wait(RESYNC_EVERY)
             self.wake.clear()
             if self.stop.is_set():
                 return
+            with self.lock:
+                gen = self.gen
             try:
-                self._refresh(woken)
+                self._refresh()
             except Exception as e:   # never let the thread die with the state frozen
                 log(f"{self.name}: refresh error: {e!r}")
-                self._failed(None, set(), True, f"unexpected answer ({type(e).__name__})")
-                if self.stop.wait(1):
-                    return
-                self.wake.set()
+                self._failed(gen, set(), True, f"unexpected answer ({type(e).__name__})")
 
     def _failed(self, gen, names, full, why):
-        """A refresh that didn't work on a link that is still up: retried; after STALE_AFTER in a row the sessions
-        show `unknown` with the reason (the stream being up proves nothing about the lists)."""
+        """A refresh that didn't work. On the same, still subscribed link it is retried, backing off (1s, 2s, … 30s);
+        after STALE_AFTER in a row the sessions show `unknown` with the reason (the stream being up proves nothing
+        about the lists). On a link that dropped or changed meanwhile it is forgotten: the next hello re-fetches all."""
         stale = False
         with self.lock:
-            if gen is not None and gen != self.gen:
+            if gen != self.gen or not self.linked:
                 return
             self.dirty |= names
             self.full = self.full or full
             self.error = why
             self.failures += 1
-            if self.failures >= STALE_AFTER and self.state == "online":
+            n = self.failures
+            if n >= STALE_AFTER and self.state == "online":
                 self.state, stale = "stale", True
         if stale:
             log(f"{self.name}: not answering ({why})")
             self.hub.publish(None)
+        if not self.stop.wait(min(2 ** (n - 1), BACKOFF_MAX)):
+            self.wake.set()
 
-    def _refresh(self, woken):
+    def _refresh(self):
         with self.lock:
-            if not woken and self.linked:   # a periodic full resync repairs a hint the peer's stream dropped
+            # A full resync every RESYNC_EVERY seconds, by the clock (hints arriving all the time mustn't put it off):
+            # it repairs a hint the peer's stream dropped.
+            if self.linked and (self.full_at is None or time.monotonic() - self.full_at >= RESYNC_EVERY):
                 self.full = True
             gen, names, full = self.gen, self.dirty, self.full
             self.dirty, self.full = set(), False
@@ -501,19 +509,21 @@ class Peer:
             pcode, pg = self.call("GET", "/api/pages")
             if code != 200 or pcode != 200:
                 raise PeerError(f"its session and page lists answered HTTP {code} and {pcode}")
-        except PeerError as e:
+            if not isinstance(got.get("sessions"), list) or not isinstance(pg.get("pages"), list):
+                raise Malformed("its session or page list isn't a list")   # never "online with no sessions"
+        except (PeerError, Malformed) as e:
             self._failed(gen, names, full, str(e))
-            if not self.stop.wait(1):
-                self.wake.set()
             return
-        sessions = [s for s in _list(got.get("sessions")) if summary_ok(s)]
-        page_list = [p for p in _list(pg.get("pages")) if isinstance(p, dict) and is_id(p.get("id"))]
+        sessions = [s for s in got["sessions"] if summary_ok(s)]
+        page_list = [p for p in pg["pages"] if isinstance(p, dict) and is_id(p.get("id"))]
         with self.lock:
             if gen != self.gen or self.stop.is_set():   # the link dropped (or reconnected) meanwhile: maybe stale
                 return
             before, was = self.sessions, self.state
             self.sessions, self.pages = sessions, page_list
             self.failures = 0
+            if full:
+                self.full_at = time.monotonic()
             if full or was == "stale":
                 self.state, self.error = "online", None
         if full or was == "stale":
@@ -534,7 +544,7 @@ class Peer:
             return (isinstance(n, int) and n > 0) or s.get("state") == "needs_input"
         old = {s["name"]: waiting(s) for s in before}
         for s in after:
-            if waiting(s) and not old.get(s["name"]) and self._may_notify():
+            if waiting(s) and not old.get(s["name"]) and self._may_notify("input"):
                 self.hub.notify(join(self.name, s["name"]), "input", "needs you (while the link was down)")
 
     # -- what the hub shows

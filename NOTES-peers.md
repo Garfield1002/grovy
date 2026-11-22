@@ -15,7 +15,7 @@ Branch `peers` (from `https`). Not merged, not pushed: the user reviews and merg
   attachments of peer sessions, open_in fix), `extensions/widgets.js` (peer images/files).
 - Docs: DESIGN "Other machines (peers)", failure modes, limitations, tests; README "Another computer"; module map;
   CLAUDE.md files table.
-- Tests: `tests/test_peers.py` (51 tests). Full suite green.
+- Tests: `tests/test_peers.py` (55 tests). Full suite green.
 
 ## E2E done (2026-11-22, scratch daemons in a private tmux server via TMUX_TMPDIR, all cleaned up)
 hub :7397 + pc :7398, forwarder socket -> pc; list, view, prompt, permission allow/deny through the hub (fake
@@ -33,6 +33,12 @@ automatic reconnect; real `ssh -G` accepts the argv. Screenshots of list/detail/
 - Honest trust docs + `--no-prepare`; restricted authorized_keys entry verified against a private OpenSSH 10.0 sshd
   (no shell; -L blocked only with a permitopen; -R unix NOT limited by path and can replace sockets with
   StreamLocalBindUnlink yes). Real-ssh e2e of the tunnel (restricted key + --no-prepare, and plain key) passed.
+
+## Review round 2 (fixed)
+- Notification budget split: "needs you" (input, incl. the reconnect catch-up) has its own, so "done" floods can't
+  drop it. Full resync is time-based (`full_at`), not "the wait timed out". A non-list sessions/pages answer is a
+  failure (-> stale), not an empty machine. Failed refreshes respect the generation and the link (no requeue while
+  down) and back off 1s..30s.
 
 ## Next steps / ideas
 - Adversarial review before merge (user's rule).

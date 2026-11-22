@@ -616,6 +616,58 @@ class TestHostilePeer(PeerLink):
         conn.request.assert_not_called()
 
 
+class TestPeerRound2(PeerLink):
+    """Second review: each of these failed on the code before the fix."""
+
+    def test_a_flood_of_finished_never_swallows_needs_you(self):
+        pc = self.pc()
+        for i in range(peers.NOTIFY_MAX + 5):
+            pc._message({"notify": {"session": "a", "kind": "done", "text": f"n{i}"}})
+        pc._message({"notify": {"session": "a", "kind": "input", "text": "permission: Bash"}})
+        kinds = [k for _, k, _ in self.hub.notifier.sent]
+        self.assertEqual(kinds.count("done"), peers.NOTIFY_MAX)   # the flood is still cut
+        self.assertEqual(kinds.count("input"), 1)
+        with pc.lock:   # the catch-up after an outage uses the "needs you" budget too
+            pc.sessions = [{"name": "b", "state": "idle"}]
+        pc._missed(pc.sessions, [{"name": "b", "state": "needs_input"}])
+        self.assertEqual([x[:2] for x in self.hub.notifier.sent][-1], ("pc:b", "input"))
+
+    def test_full_resync_happens_under_steady_hints(self):
+        pc = self.pc()
+        q = self.subscribe()
+        with pc.lock:
+            pc.full_at = time.monotonic() - peers.RESYNC_EVERY - 1   # the last full refresh is a minute old
+        self.peer.ingest("a", ev("UserPromptSubmit", prompt="go"))     # a hint, which also wakes the refresher
+        self.assertTrue(wait_for(lambda: any(json.loads(m).get("session") is None for m in list(q))), list(q))
+
+    def test_a_list_that_isnt_one_is_a_failure(self):
+        pc = self.pc()
+        with mock.patch.object(pc, "call", return_value=(200, {"sessions": 5, "pages": []})):
+            with pc.lock:
+                pc.full = True
+            pc.wake.set()
+            self.assertTrue(wait_for(lambda: pc.status()["state"] == "stale"))
+            self.assertIn("isn't a list", pc.status()["error"])
+            self.assertEqual(pc.listed()[0]["state"], "unknown")   # never "online with no sessions"
+
+    def test_failed_refresh_on_a_dropped_link_does_not_spin(self):
+        pc = self.pc()
+        self.fwd.stop()
+        self.assertTrue(wait_for(lambda: pc.status()["state"] == "offline"))
+        calls = []
+
+        def boom(*a, **k):
+            calls.append(1)
+            raise RuntimeError("boom")
+        # (the stream thread's reconnect attempts reset the queue when they fail: keep them out of the measurement)
+        with mock.patch.object(pc, "call", side_effect=boom), mock.patch.object(pc, "_offline"):
+            with pc.lock:
+                pc.dirty.add("a")
+            pc.wake.set()
+            time.sleep(2.5)
+        self.assertEqual(len(calls), 1)   # the next hello re-fetches everything; no retry loop meanwhile
+
+
 class TestNoPeers(unittest.TestCase):
     def test_nothing_changes_without_peers_json(self):
         with mock.patch.object(sessions, "registry", lambda: {}):
