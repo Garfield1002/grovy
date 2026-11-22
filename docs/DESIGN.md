@@ -653,7 +653,9 @@ session can publish pages but can't make one public.
 ## Other machines (peers)
 
 One grovy (the **hub**) can show and command the sessions of grovy daemons on other machines (**peers**, e.g. a PC
-with no public address) next to its own. All of it is `grovylib/peers.py`.
+with no public address) next to its own. All of it is `grovylib/peers.py`. Its state (each link, the peer's last
+session and page lists) is not `Store` state: it lives in `Peers`/`Peer` under their own locks, and they call
+`store.publish` / `store._notify` only without holding them, never under `Store.lock`.
 
 ```
 PC: grovyd (127.0.0.1:7333) ◄── ssh -R ──── hub: ~/.local/state/grovy/peers/pc.sock ◄── HTTP ── hub grovyd ◄── phone
@@ -667,7 +669,7 @@ PC: grovyd (127.0.0.1:7333) ◄── ssh -R ──── hub: ~/.local/state/gr
   forever: over ssh it first runs `sh -c '…'` on the hub to make the socket's folder (0700), remove a stale socket
   (sshd only binds over one with `StreamLocalBindUnlink yes`, which it usually lacks) and print the socket's absolute
   path; then `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes
-  -R SOCK:localhost:PORT HOST`; when ssh ends it waits 2s, 4s, … up to 60s (reset after a minute up) and starts again.
+  -R SOCK:127.0.0.1:PORT HOST`; when ssh ends it waits 2s, 4s, … up to 60s (reset after a minute up) and starts again.
   Argument arrays throughout; the script is `shlex`-quoted for the remote shell, `~/` becomes `"$HOME"/`, a host that
   starts with `-` is refused. It's a **Unix socket, not a TCP port**: the hub is shared with other users, and a
   loopback port would be open to all of them; sshd creates the socket 0600 (`StreamLocalBindMask` 0177). The default

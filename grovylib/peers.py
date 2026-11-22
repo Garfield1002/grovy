@@ -425,7 +425,7 @@ class Peer:
                 code, got = self.call("GET", "/api/sessions")
                 pcode, pg = self.call("GET", "/api/pages")
                 if code != 200 or pcode != 200:
-                    raise PeerError(f"its session list answered HTTP {code}")
+                    raise PeerError(f"its session and page lists answered HTTP {code} and {pcode}")
             except PeerError as e:
                 with self.lock:
                     if gen == self.gen:   # still the same link: try again shortly
@@ -937,6 +937,8 @@ def cmd_add(a):
     conf, problems = read_config()
     if problems and any("readable by others" in p for p in problems):
         core.die(problems[0])
+    for p in problems:
+        print(f"dropping an unusable entry: {p}", file=sys.stderr)
     conf[a.name] = entry
     write_config(conf)
     print(f"added {a.name}: the hub reaches it through {sock}\n"
@@ -990,8 +992,9 @@ def prepare_argv(host, name, remote=None, ssh="ssh"):
     return [ssh, *SSH_OPTS, "--", host, "sh -c " + shlex.quote(prepare_script(name, remote))]
 
 
-def tunnel_argv(host, sock, port, ssh="ssh"):
-    return [ssh, *SSH_OPTS, *TUNNEL_OPTS, "-R", f"{sock}:localhost:{port}", "--", host]
+def tunnel_argv(host, sock, port, ssh="ssh", local="127.0.0.1"):
+    # 127.0.0.1, not "localhost" (which may resolve to ::1 first, where grovy doesn't listen by default)
+    return [ssh, *SSH_OPTS, *TUNNEL_OPTS, "-R", f"{sock}:{local}:{port}", "--", host]
 
 
 def check_remote_socket(path):
@@ -1002,7 +1005,7 @@ def check_remote_socket(path):
 
 
 def run_tunnel(host, name, port, remote=None, ssh="ssh", run=subprocess.run, popen=subprocess.Popen,
-               sleep=time.sleep, clock=time.monotonic, rounds=None, out=sys.stderr):
+               sleep=time.sleep, clock=time.monotonic, rounds=None, out=sys.stderr, local="127.0.0.1"):
     """Keep the reverse tunnel up: prepare, connect, wait for ssh to end, back off, repeat (forever unless rounds)."""
     def say(msg):
         print(f"grovy peer tunnel: {msg}", file=out, flush=True)
@@ -1021,8 +1024,8 @@ def run_tunnel(host, name, port, remote=None, ssh="ssh", run=subprocess.run, pop
                 return 2
             else:
                 sock = lines[-1]
-                say(f"forwarding {host}:{sock} -> localhost:{port}")
-                p = popen(tunnel_argv(host, sock, port, ssh), stdin=subprocess.DEVNULL)
+                say(f"forwarding {host}:{sock} -> {local}:{port}")
+                p = popen(tunnel_argv(host, sock, port, ssh, local), stdin=subprocess.DEVNULL)
                 try:
                     code = p.wait()
                 except KeyboardInterrupt:
@@ -1049,13 +1052,15 @@ def cmd_tunnel(a):
     rs = a.remote_socket
     if rs is not None and (not rs.startswith(("/", "~/")) or re.search(r"[\s:]", rs)):
         core.die("--remote-socket: an absolute path (or ~/...), with no spaces or ':'")
+    if not re.fullmatch(r"[0-9a-fA-F.:]{2,45}|localhost", a.local_host):
+        core.die("--local-host: an IP address (where this machine's grovy listens)")
     try:
-        socket.create_connection(("127.0.0.1", a.port), timeout=2).close()
+        socket.create_connection((a.local_host, a.port), timeout=2).close()
     except OSError:
-        print(f"grovy peer tunnel: warning: nothing answers on localhost:{a.port} yet (is grovy serving here?)",
+        print(f"grovy peer tunnel: warning: nothing answers on {a.local_host}:{a.port} yet (is grovy serving here?)",
               file=sys.stderr)
     try:
-        return run_tunnel(a.host, a.name, a.port, a.remote_socket)
+        return run_tunnel(a.host, a.name, a.port, a.remote_socket, local=a.local_host)
     except KeyboardInterrupt:
         return 0
 
@@ -1078,4 +1083,5 @@ def add_parser(sub):
     x.add_argument("--name", default="pc", help="this machine's name on the hub (default: pc)")
     x.add_argument("--remote-socket", help="socket path on the hub (default: ~/.local/state/grovy/peers/NAME.sock)")
     x.add_argument("--port", type=int, default=core.env_int("PORT", 7333), help="this machine's grovy port")
+    x.add_argument("--local-host", default="127.0.0.1", help="the address this machine's grovy listens on")
     x.set_defaults(fn=cmd_tunnel)

@@ -598,7 +598,7 @@ class TestTunnel(unittest.TestCase):
         self.assertIn("ExitOnForwardFailure=yes", argv)
         self.assertIn("ServerAliveInterval=30", argv)
         self.assertIn("BatchMode=yes", argv)
-        self.assertEqual(argv[argv.index("-R") + 1], "/home/me/.local/state/grovy/peers/pc.sock:localhost:7333")
+        self.assertEqual(argv[argv.index("-R") + 1], "/home/me/.local/state/grovy/peers/pc.sock:127.0.0.1:7333")
         self.assertEqual(argv[-2:], ["--", "me@hub"])
         self.assertIn("-N", argv)
 
@@ -643,7 +643,7 @@ class TestTunnel(unittest.TestCase):
                                 sleep=sleeps.append, clock=lambda: next(clock), rounds=3, out=out)
         self.assertEqual(code, 0)
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0][calls[0].index("-R") + 1], "/h/.local/state/grovy/peers/pc.sock:localhost:7333")
+        self.assertEqual(calls[0][calls[0].index("-R") + 1], "/h/.local/state/grovy/peers/pc.sock:127.0.0.1:7333")
         self.assertEqual(sleeps, [2, 4])
         self.assertIn("Connection refused", out.getvalue())
 
@@ -656,7 +656,8 @@ class TestTunnel(unittest.TestCase):
 
     def test_cli_refuses_option_like_host(self):
         with self.assertRaises(SystemExit):
-            peers.cmd_tunnel(types.SimpleNamespace(host="-oProxyCommand=x", remote_socket=None, port=7333, name="pc"))
+            peers.cmd_tunnel(types.SimpleNamespace(host="-oProxyCommand=x", remote_socket=None, port=7333, name="pc",
+                                                   local_host="127.0.0.1"))
 
 
 if __name__ == "__main__":
