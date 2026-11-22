@@ -35,6 +35,11 @@ KEEP = {
 }
 
 
+def session_order(s):
+    """How the session list is sorted: waiting on you first, then by state, then the most recently active."""
+    return (states.STATE_RANK.get(s["state"], 9) if not s["pending_permissions"] else -1, -(s["last_event"] or 0))
+
+
 def _owner(r):
     """Session name of a stored record; records written before the rename used the key "ccs"."""
     return r.get("session", r.get("ccs"))
@@ -68,6 +73,7 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
         self.live_new = {}      # name -> deque of creation times (rate limit)
         self._pub_at, self._pub_timer = {}, {}
         self.plugins = None     # plugins.Plugins once grovyd has loaded the user's plugins
+        self.peers = None       # peers.Peers in grovyd: other machines' sessions (empty without peers.json)
         self.issues_path = os.path.join(sdir, "issues.json")
         self.issues = {}        # session name -> {root, base, branch, worktree, created} (issues.py)
         self.issue_lock = threading.Lock()
@@ -201,6 +207,13 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
             q.wake.set()
 
     def _notify(self, name, kind, text):
+        # A hub following this daemon (grovylib/peers.py) asked for these on its event stream (?notify=1).
+        msg = None
+        for q in list(self.subscribers):
+            if getattr(q, "notify", False):
+                msg = msg or json.dumps({"notify": {"session": name, "kind": kind, "text": str(text)[:300]}})
+                q.append(msg)
+                q.wake.set()
         if self.notifier:
             self.notifier.send(name, kind, text)
         if self.plugins:
@@ -395,8 +408,7 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
     def list_sessions(self):
         with self.lock:
             out = [self.summary(n) for n in self.sessions]
-        out.sort(key=lambda s: (states.STATE_RANK.get(s["state"], 9) if not s["pending_permissions"] else -1,
-                                -(s["last_event"] or 0)))
+        out.sort(key=session_order)
         return out
 
     def detail(self, name, limit=100):

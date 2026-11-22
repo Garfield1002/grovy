@@ -345,5 +345,7 @@ def main(argv=None):
     s.set_defaults(fn=cmd_tail)
     sub.add_parser("doctor", help="check dependencies and connectivity").set_defaults(fn=install.cmd_doctor)
     sub.add_parser("url", help="print the web UI link(s), including the login token").set_defaults(fn=install.cmd_url)
+    from . import peers   # imported here: hooks never load it
+    peers.add_parser(sub)
     a = p.parse_args(argv)
     return a.fn(a)

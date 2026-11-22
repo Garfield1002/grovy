@@ -9,6 +9,7 @@ One RLock guards all in-memory state. Nothing here is the parent of a Claude pro
 import base64
 import hashlib
 import hmac
+import http.client
 import http.server
 import ipaddress
 import json
@@ -25,7 +26,7 @@ from collections import deque
 from html import escape as html_escape
 from urllib.parse import urlsplit, parse_qs, unquote
 
-from grovylib import claude, client, commands, core, newproject, notify, oom, pages, plugins
+from grovylib import claude, client, commands, core, newproject, notify, oom, pages, peers, plugins
 from grovylib.store import Store
 
 
@@ -68,6 +69,8 @@ class SockHandler(socketserver.StreamRequestHandler):
                          "claude": shutil.which(claude.claude_cmd())})
         elif t == "refresh":
             store.reconcile()
+        elif t == "peers":   # `grovy peer ls`
+            self._reply(store.peers.status() if store.peers is not None else {"peers": [], "problems": []})
         elif t == "statusline":
             name = msg.get("session")
             if core.valid_name(name) and isinstance(msg.get("data"), dict):
@@ -460,16 +463,28 @@ class Http(http.server.BaseHTTPRequestHandler):
             if not got:
                 return self._send(404, b"Not found (this page is no longer shared).", "text/plain")
             return self._send(200, got[1], "text/html", [("Content-Security-Policy", pages.PAGE_CSP)])
+        if self.server.store.peers:   # a peer's shared page (/s/pc:TOKEN): the link is the credential there too
+            got = self.server.store.peers.shared(path)
+            if got:
+                return self._peer_reply(got)
         if not self._authed():
             if path == "/":
                 return self._send(401, LOGIN_PAGE, "text/html")
             return self._err(401, "token required: open /?token=...")
         store = self.server.store
+        if store.peers:   # a peer's session, id or file (pc:...): proxied to it (grovylib/peers.py)
+            got = store.peers.handle_get(path, url.query, self.headers.get("X-Grovy") == "1")
+            if got:
+                return self._peer_reply(got)
         if path == "/":
             self.server.refresh_index()
             index, csp = self.server.page   # one read: a reload in between can't pair a page with another's CSP
             return self._send(200, index, "text/html", [("Content-Security-Policy", csp)])
         if path == "/api/sessions":
+            if store.peers:   # other machines' sessions too, and whether each is reachable
+                return self._send(200, {"sessions": store.peers.merge_sessions(store.list_sessions()), "now": time.time(),
+                                        "host": socket.gethostname().split(".")[0],
+                                        "peers": store.peers.status()["peers"]})
             return self._send(200, {"sessions": store.list_sessions(), "now": time.time()})
         if path == "/api/permissions":
             return self._send(200, {"permissions": store.permissions()})
@@ -520,6 +535,8 @@ class Http(http.server.BaseHTTPRequestHandler):
             return self._send(200, pages.with_bridge(html), "text/html",
                               [("Content-Security-Policy", pages.PAGE_CSP)], frame="SAMEORIGIN")
         if path == "/api/pages":
+            if store.peers:
+                return self._send(200, {"pages": store.peers.merge_pages(store.list_pages())})
             return self._send(200, {"pages": store.list_pages()})
         m = PLUGIN_PATH.fullmatch(path)
         if m and store.plugins is None and plugins_on():
@@ -553,7 +570,7 @@ class Http(http.server.BaseHTTPRequestHandler):
             return self._err(403, "cross-origin request rejected")
         m = re.fullmatch(r"/api/sessions/([^/]+)/attachments", urlsplit(self.path).path)
         if m:   # a raw file body, streamed to disk; octet-stream still forces a CORS preflight
-            return self._upload(m.group(1))
+            return self._upload(m.group(1), urlsplit(self.path).path)
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
             return self._err(415, "Content-Type must be application/json")
         try:
@@ -593,8 +610,72 @@ class Http(http.server.BaseHTTPRequestHandler):
             return self._err(503, "the original request is still running")
         return self._send(*entry["res"])
 
-    def _upload(self, name):
+    def _peer_reply(self, got):
+        """Send what grovylib/peers.py made of a request for a peer (see Peers.handle_get)."""
+        kind = got[0]
+        if kind == "json":
+            return self._send(got[1], got[2])
+        if kind == "raw":
+            return self._send(got[1], got[3], got[2], got[4])
+        if kind == "page":   # a peer's page: sandboxed by this hub's own PAGE_CSP, whatever the peer sent
+            return self._send(200, got[1], "text/html", [("Content-Security-Policy", pages.PAGE_CSP)], frame="SAMEORIGIN")
+        if kind == "shared":
+            return self._send(200, got[1], "text/html", [("Content-Security-Policy", pages.PAGE_CSP)])
+        if kind == "stream":
+            return self._relay_download(got[1], got[2])
+        return self._err(500, "internal error")
+
+    def _relay_download(self, conn, resp):
+        """A file a peer offered (/xfile/pc:TOKEN), streamed through as a download with the same headers as
+        _send_file: never rendered here, whatever type the peer claims."""
+        try:
+            m = re.search(r'filename="([^"]*)"', resp.getheader("Content-Disposition") or "")
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", m.group(1) if m else "").strip("._-")[:120] or "file"
+            try:
+                size = int(resp.getheader("Content-Length") or "")
+            except ValueError:
+                size = None
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            if size is not None and size >= 0:
+                self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f'attachment; filename="{safe}"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy", "default-src 'none'")
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.end_headers()
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        except (OSError, http.client.HTTPException):
+            pass   # either side went away: Connection: close ends the download short, and the browser says so
+        finally:
+            conn.close()
+
+    def _upload(self, name, path):
         self.close_connection = True   # an error leaves the body unread
+        store = self.server.store
+        if store.peers:
+            try:
+                target = store.peers.upload_target(path)
+            except peers.Answer as a:
+                return self._send(a.code, a.body)
+            if target:
+                if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/octet-stream":
+                    return self._err(415, "Content-Type must be application/octet-stream")
+                try:
+                    n = int(self.headers.get("Content-Length", ""))
+                except ValueError:
+                    return self._err(411, "Content-Length required")
+                if n < 0:
+                    return self._err(400, "bad Content-Length")
+                return self._send(*target[0].upload(target[1], self.headers.get("X-Filename", ""), self.rfile.read, n))
         if not core.valid_name(name):
             return self._err(404, "no such session")
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/octet-stream":
@@ -610,6 +691,11 @@ class Http(http.server.BaseHTTPRequestHandler):
     def _route_post(self, path, body):
         """Run one POST action; returns (status, JSON body). Never sends anything itself."""
         store = self.server.store
+        if store.peers:   # an action on a peer's session or id (pc:...): proxied to it (grovylib/peers.py)
+            rid = self.headers.get("X-Request-Id", "")
+            got = store.peers.handle_post(path, body, rid if REQ_ID_RE.fullmatch(rid) else None)
+            if got:
+                return got
         wrap = lambda code, res: (code, {"status": res} if code == 200 else {"error": res})  # noqa: E731
         m = re.fullmatch(r"/api/sessions/([^/]+)/prompts", path)
         if m and core.valid_name(m.group(1)):
@@ -684,6 +770,10 @@ class Http(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         q = Subscriber(maxlen=100)
         q.client = self.client_address[0]
+        if parse_qs(urlsplit(self.path).query).get("notify") == ["1"]:
+            # A hub following this daemon (grovylib/peers.py): it also gets the notifications, and it is counted apart
+            # from the browsers at the same address (through the SSH tunnel that's 127.0.0.1, like a local browser).
+            q.notify, q.client = True, ("peer", q.client)
         store = self.server.store
         try:  # a phone that sleeps or changes network never sends FIN: abort once data goes unacknowledged 30s
             self.connection.setsockopt(socket.IPPROTO_TCP, getattr(socket, "TCP_USER_TIMEOUT", 18), 30000)
@@ -853,6 +943,8 @@ def serve(bind, port):
     url = f"http://{bind}:{port}/"
     sock.url = url
 
+    st.peers = peers.Peers(st)
+    st.peers.reload()   # other machines' grovy, from ~/.config/grovy/peers.json (none: nothing changes)
     st.reconcile()
     threading.Thread(target=sock.serve_forever, daemon=True).start()
 
@@ -873,6 +965,10 @@ def serve(bind, port):
                 st.flush_live()
             except Exception as e:  # keep the daemon alive; surface the problem
                 print(f"grovyd: reconcile error: {e}", file=sys.stderr)
+            try:
+                st.peers.reload()
+            except Exception as e:
+                print(f"grovyd: peers reload error: {e}", file=sys.stderr)
 
     threading.Thread(target=loop, daemon=True).start()
     if not loopback and not httpd.enforce:
