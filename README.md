@@ -84,6 +84,42 @@ grovy url                      # the phone link again (also on the phone: ⋯ �
 grovy doctor                   # check that everything is in order
 ```
 
+## Another computer
+
+One grovy (the *hub*, say your server) can also show the sessions of another computer (say your PC, even one with
+no public address), next to its own. Each computer runs its own grovy as usual and keeps working on its own; the PC
+connects to the hub over SSH, so it needs no open port. Its sessions show as `pc:NAME` with a small "pc" label, and
+＋ asks which machine to start on.
+
+1. On the PC: install grovy (`grovy setup`; it can listen on this computer only). Check that `ssh HUB` works from
+   the PC with a key and no password prompt.
+2. Give the hub the PC's login token (from the PC):
+   `grovy peer token | ssh HUB '~/.local/bin/grovy peer add pc'`
+   (or run `grovy peer token` on the PC, then `grovy peer add pc` on the hub and paste it).
+3. On the PC, connect: `grovy peer tunnel HUB`. It reconnects by itself whenever the connection drops. To keep it
+   running, either in tmux (`tmux new -d -s grovy-tunnel grovy peer tunnel HUB`) or as a service:
+
+   ```ini
+   # ~/.config/systemd/user/grovy-tunnel.service, then: systemctl --user enable --now grovy-tunnel
+   [Unit]
+   Description=grovy: show this computer's sessions on the hub
+   After=network-online.target
+
+   [Service]
+   ExecStart=%h/.local/bin/grovy peer tunnel HUB --name pc
+   Restart=always
+   RestartSec=10
+
+   [Install]
+   WantedBy=default.target
+   ```
+
+   (A service has no ssh-agent: use a key without a passphrase for it, or set `SSH_AUTH_SOCK`.)
+
+`grovy peer ls` on the hub says whether the PC is online; `grovy peer rm pc` removes it. While the PC is off, its
+sessions show as "unknown" and the home screen says so. What works on the hub only (new issues, new projects) and
+other limits are in `docs/DESIGN.md` ("Other machines").
+
 ## Make it yours
 
 - **Extensions:** ⋯ → Extensions on the home screen switches built-in parts on or off (math, widgets, git, issues...)
@@ -124,6 +160,8 @@ grovy doctor                   # check that everything is in order
 | "claude not found" when starting from the phone | rerun `grovy setup` from a terminal where `claude` works |
 | "killed by the out-of-memory killer" | the computer ran out of memory, usually because of a big job; Resume continues. Start heavy jobs with a cap, e.g. `systemd-run --user --scope -p MemoryMax=40G …` |
 | "state unknown" | Claude did something the page couldn't follow (e.g. you answered in the terminal); the next send asks first |
+| "pc is offline: no tunnel" | on the PC, check that `grovy peer tunnel HUB` runs and what it prints; `grovy peer ls` on the hub |
+| `grovy peer tunnel` says "remote port forwarding failed" | the hub's sshd forbids it (`AllowStreamLocalForwarding`), or the socket path is wrong: compare with `grovy peer ls` on the hub |
 | anything else | `grovy doctor`, then `journalctl --user -u grovy` |
 
 **Uninstall:** `systemctl --user disable --now grovy`, then delete `~/.config/systemd/user/grovy.service`,

@@ -44,6 +44,7 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 | widgets | `WIDGET_GUIDE` in `grovylib/claude.py` (what Claude is told, via the SessionStart hook) and `extensions/widgets.js` (renderers, registered with `grovy.widget`; `index.html` only draws the frame and the error). Change both together; every renderer validates its input and throws a readable `Error` |
 | live widgets | client library in `grovylib/scriptlib.py` (`track`, `progress`, `note`, `log`, `show`, re-exported by `grovy.py`; CLI `tail`/`progress`/`note`/`show`) → socket `live` → `Store.live_update` (`live.py`) → `Live` event, rendered by `liveNode`. User scripts import this: it must stay import-cheap, and those functions must never raise or block |
 | `tests/test_grovy.py` | unit tests that drive `Store` with fake tmux/paste callables, plus real-tmux integration tests on a private server |
+| peers | `grovylib/peers.py`: other machines' grovyd shown as `pc:NAME` (proxy, event stream, `grovy peer ...`), tested by `tests/test_peers.py` with a real peer daemon behind a Unix-socket forwarder. Without `~/.config/grovy/peers.json` nothing may change |
 
 ## Rules
 

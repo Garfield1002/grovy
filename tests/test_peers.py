@@ -6,6 +6,7 @@ small forwarder from a Unix socket to it, which the tests stop and restart to cu
 import io
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -570,6 +571,24 @@ class TestRewrite(unittest.TestCase):
     def test_conversations(self):
         d = peers.rewrite_conversations("pc", {"conversations": [{"open_in": "grovy:foo"}, {"open_in": "terminal"}]})
         self.assertEqual([c["open_in"] for c in d["conversations"]], ["grovy:pc:foo", "terminal"])
+
+
+class TestPage(unittest.TestCase):
+    def test_open_in_prefix(self):
+        """Regression: "Open session y:NAME": open_in is "grovy:NAME" (6 characters before the name, not 4)."""
+        with open(os.path.join(base.ROOT, "index.html")) as f:
+            html = f.read()
+        self.assertNotIn("open_in.slice(4)", html)
+        self.assertIn('c.open_in.slice("grovy:".length)', html)
+
+    def test_route_accepts_peer_names(self):
+        with open(os.path.join(base.ROOT, "index.html")) as f:
+            html = f.read()
+        m = re.search(r"const m = hash\.match\((/.*/)\);", html)
+        js = f"const r = {m.group(1)}; console.log(JSON.stringify(['#/s/pc:foo', '#/s/foo', '#/s/a:b:c', '#/s/PC:x']" \
+             ".map(h => (h.match(r) || [])[1] || null)))"
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout
+        self.assertEqual(json.loads(out), ["pc:foo", "foo", None, None])
 
 
 class TestTunnel(unittest.TestCase):

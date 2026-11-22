@@ -15,7 +15,7 @@ claude ──hooks──► grovy hook NAME ──unix socket──► grovyd �
 | `extensions/` | built-in extensions of the page, written against `window.grovy` like a user's `custom.js` (see "Making it yours") |
 | `grovylib/` | the rest, one file per topic (CLI, hook adapter, tmux, registry, and the daemon's `Store`, assembled from one class per feature); `grovylib/__init__.py` maps it |
 | `index.html` | the whole UI (vanilla JS, no innerHTML); a map of its parts opens its script |
-| `tests/test_grovy.py` | unit + tmux integration tests (`python3 -m unittest discover -s tests`) |
+| `tests/test_grovy.py`, `tests/test_peers.py` | unit + tmux integration tests (`python3 -m unittest discover -s tests`) |
 | `examples/` | systemd unit, Telegram notify script, the generated hook config |
 | `assets/` | icon sizes and the home-screen backdrop, from [grove](https://github.com/Garfield1002/grove); served without the token from an allowlist (`ASSETS` in `grovyd.py`) |
 
@@ -650,6 +650,92 @@ shows. **Stop sharing** (`grovy page unshare NAME`) revokes it; sharing again is
 revokes it too. Sharing exists **only on the phone**: there is no CLI or socket command for it, so a Claude
 session can publish pages but can't make one public.
 
+## Other machines (peers)
+
+One grovy (the **hub**) can show and command the sessions of grovy daemons on other machines (**peers**, e.g. a PC
+with no public address) next to its own. All of it is `grovylib/peers.py`.
+
+```
+PC: grovyd (127.0.0.1:7333) ◄── ssh -R ──── hub: ~/.local/state/grovy/peers/pc.sock ◄── HTTP ── hub grovyd ◄── phone
+     grovy peer tunnel HUB      (the PC dials out)          (0600, folder 0700)        token of the PC
+```
+
+* **Every machine runs its own, unchanged grovyd.** Sessions, hooks, permissions, containers stay where they run, and
+  a peer keeps working when the link is down (its own phone link included). Nothing peer-specific runs on the peer
+  except the tunnel and `?notify=1` below.
+* **Transport.** `grovy peer tunnel HOST [--name pc] [--remote-socket PATH] [--port 7333]`, run on the peer, loops
+  forever: over ssh it first runs `sh -c '…'` on the hub to make the socket's folder (0700), remove a stale socket
+  (sshd only binds over one with `StreamLocalBindUnlink yes`, which it usually lacks) and print the socket's absolute
+  path; then `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes
+  -R SOCK:localhost:PORT HOST`; when ssh ends it waits 2s, 4s, … up to 60s (reset after a minute up) and starts again.
+  Argument arrays throughout; the script is `shlex`-quoted for the remote shell, `~/` becomes `"$HOME"/`, a host that
+  starts with `-` is refused. It's a **Unix socket, not a TCP port**: the hub is shared with other users, and a
+  loopback port would be open to all of them; sshd creates the socket 0600 (`StreamLocalBindMask` 0177). The default
+  socket is `${XDG_STATE_HOME:-~/.local/state}/grovy/peers/NAME.sock`, the same formula `grovy peer add` uses; paths
+  over 100 bytes are refused (AF_UNIX).
+* **Configuration.** `~/.config/grovy/peers.json`, `{"pc": {"socket": "/abs/pc.sock", "token": "…", "tls": false}}`,
+  written by `grovy peer add NAME [--socket P] [--tls]` (the token is read from stdin, never argv: `ps` is visible to
+  other users; on the peer `grovy peer token` prints it), `grovy peer rm`, `grovy peer ls` (with live state from the
+  daemon, socket message `peers`). The file must be 0600 or it is refused whole. Names: `[a-z0-9][a-z0-9_-]{0,15}`.
+  grovyd re-reads it every 10s (its reconcile loop), starting and stopping links; no restart needed. Without the file
+  (or with no usable entry) `store.peers` is empty and **every route behaves exactly as before**.
+* **Talking to a peer.** HTTP/1.1 over the socket (`http.client` with a Unix-socket connection; `tls: true` wraps it
+  unverified for a peer that serves HTTPS: ssh already secures the link), `Authorization: Bearer <peer token>`,
+  `Host: localhost`, as the phone would. Before connecting, the socket must be a socket owned by this user in a folder
+  others can't write to (unless sticky): otherwise another user could stand in for the peer and be handed its token.
+  The peer's token is only ever sent to the peer: the hub builds every request itself and forwards none of the
+  phone's headers except `X-Request-Id` (so the peer's own retry protection applies too).
+* **Names and ids.** The peer's session `foo` is `pc:foo` on the hub; `:` is not valid in a session name, so it can't
+  collide with a local one, and a name without `:` never goes to a peer. The ids the phone acts on are prefixed the
+  same way: permission requests and queued prompts (`pc:<hex>`), pages (`/p/pc:<hex>`, the `Page` event's
+  `data.page`, the keys of `detail.pages`), share links (`/s/pc:<hex>`), offered downloads (`/xfile/pc:<hex>`).
+  Routing is therefore stateless: the prefix says where to go. Rewriting is explicit per answer shape
+  (`rewrite_detail`, `rewrite_event`, …): event ids stay numbers (history paging), and nothing inside a tool's input or
+  a message is touched, so what the phone shows for approval is exactly what the peer sent. URL segments are
+  percent-decoded first (`encodeURIComponent` sends `pc%3Afoo`).
+* **What is proxied** (`Peers.handle_get` / `handle_post`, called first in `do_GET` / `_route_post` only when peers
+  exist): a session's detail, history, pages and commands; prompts, interrupt, rename (within its machine), restart,
+  resume, kill, forget; permission and question answers; prompt cancel; page view/share/delete and shared pages;
+  attachment and image thumbnails (only `image/png|jpeg|gif|webp`, re-served with `default-src 'none'`); uploads
+  (streamed to the peer, never held in memory); offered downloads (streamed, re-served as `attachment`
+  octet-stream); an issue's status/finish/discard; plugin routes whose `session` (query or body) is a peer's (sent to
+  the peer's plugin of the same name; GETs still need `X-Grovy`); new sessions (`POST /api/sessions` with name
+  `pc:NAME`), with `/api/projects?peer=pc` and `/api/conversations?…&peer=pc` for the ＋ sheet. A peer's answer keeps
+  its status code, its error text gets `pc: ` in front; a peer that refuses the token gives 502 (never 401, which the
+  phone would take for its own login), an unreachable one 502 `pc is offline (last seen …): no tunnel (is grovy peer
+  tunnel running on pc?)`. Answers are capped at 16 MB. Requests time out after 20s.
+* **Pages from a peer** are served by the hub with the hub's own `PAGE_CSP` (and `X-Frame-Options: SAMEORIGIN`), only
+  if the peer says `text/html`; the peer's headers are dropped. Shared ones (`/s/pc:<hex>`) need no login, exactly
+  like the hub's own, and work while the peer is reachable.
+* **Live updates.** grovy's event stream carries no events, only "session X changed" hints (`{"session": X}`), and the
+  page re-fetches; so there are no event ids, and nothing to replay (`Last-Event-ID` doesn't apply). Per peer the hub
+  holds one stream, `GET /api/events?notify=1`, and a refresher thread. A hint marks the session dirty; the refresher
+  fetches the peer's session and page lists (hints arriving meanwhile coalesce into the next fetch), stores them,
+  and only then tells the phones `pc:X` changed, so a phone that re-fetches sees the new state. When the stream says
+  `hello` (it is subscribed: nothing after this can be missed), the hub re-fetches everything and then publishes
+  `null` (phones re-fetch everything). A generation counter, bumped on every connect and disconnect, drops a fetch
+  that started on an older link, so a list fetched just before a drop can't bring sessions back as idle. The stream
+  times out after 45s without data (the peer pings every 15s); it reconnects after 1s, 2s, … up to 30s.
+* **Reachability.** Each peer is `connecting` (no fresh list since the link came up), `online` or `offline` (with the
+  reason and when it last answered). `/api/sessions` gains `host` (this machine's short name) and `peers`
+  (`{name, state, last_seen, error}`), only when peers exist. Unless `online`, a peer's last known sessions are listed
+  with state **`unknown`**, `accepts_input: false`, no pending count, and "pc is offline (last seen 3 min ago)" as their
+  activity: never `idle`. Its detail and actions answer 502.
+* **Notifications.** On the peer, a stream opened with `?notify=1` (a hub) also receives `{"notify": {session, kind,
+  text}}` at each `Store._notify` (browsers' streams never do, so they are unchanged); it is counted apart from the
+  browsers at the same address in the per-client stream cap (through the tunnel that address is 127.0.0.1). The hub
+  passes each one to its own `_notify` as `pc:NAME`: `GROVY_NOTIFY_CMD`, and plugins' `notify` callbacks, hence Web
+  Push. After the link was down, a session that now waits on you and didn't before gets one "needs you (while the
+  link was down)" notification, read from the peer's state.
+* **UI.** A peer's session shows its machine as a small label before its name (list, sidebar, switcher, title bar);
+  the home screen says which peers are offline or connecting; ＋ asks which machine (when peers exist) and lists that
+  machine's trusted folders and conversations. Rename keeps the machine. The route accepts `#/s/pc:NAME` (and its
+  percent-encoded form, which notifications use). `grovy.session` is `pc:NAME` there; `extensions/widgets.js` sends a
+  peer's images and files to the peer.
+* **Trust.** Everything from a peer is untrusted input, like Claude's output: listed names must be valid (others are
+  dropped), states unknown to grovy become `unknown`, counts must be numbers. The link only goes one way: the hub
+  connects to the peer, never the reverse, so a peer can't reach the hub's sessions, files or plugins.
+
 ## Out of memory
 
 systemd-oomd kills a whole cgroup once memory pressure in your user manager (`user@UID.service`, limit 50% for 20s
@@ -693,6 +779,12 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
 | truncated event log | bad lines skipped; a newline is added so the next record isn't corrupted |
 | duplicate hook delivery | identical payloads are deduplicated (except permission requests, which are each a live hook) |
 | you type in the terminal while the page is open | hooks report it like any other prompt; the page follows |
+| a peer's tunnel drops (PC asleep, network change) | its sessions show `unknown`, "pc is offline (last seen …)" on the home screen, actions answer 502; the PC keeps working on its own; the tunnel and the hub reconnect by themselves and the hub re-fetches everything |
+| a peer's grovyd restarts | the stream ends: offline, then online with a fresh list once it's back |
+| the hub's grovyd restarts | the peer is unaffected; the hub reconnects at start (peers.json is read then) |
+| stale socket left on the hub | removed by `grovy peer tunnel` before each connect |
+| a peer's token changed | stream answers 401: offline with "wrong token?"; actions say to run `grovy peer token` / `grovy peer add` again |
+| peers.json readable by others | refused whole (logged, and shown by `grovy peer ls`) |
 
 ## Known limitations
 
@@ -713,6 +805,19 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
 * Not every dialog emits `PermissionRequest` (e.g. MCP elicitations, plan approval). Those show as
   "needs input in terminal" at best. The page doesn't pretend to handle them.
 * Events emitted while the daemon is down are not replayed.
+* **Peers** (other machines, see "Other machines"):
+  * ⋯ → New issue and ⋯ → New project work on the hub only (an issue session that already exists on a peer can be
+    finished or discarded from the hub). ⋯ → Extensions, the login link, `custom.css`/`custom.js` are the hub's.
+  * The hub's plugins see peers' sessions only through `notify` (so Web Push works); `grovy.on("event")`,
+    `grovy.on("state")`, `grovy.sessions()`, `grovy.session()` and `grovy.send()` cover local sessions only. The hub's
+    `grovy` command (`ls`, `attach`, `logs`, `kill`, ...) is local too: the terminal of a peer's session is on the peer.
+  * Notifications sent while the link is down are lost; on reconnect only "needs you" is made up for (from the peer's
+    state). A "finished" or "failed" during the gap shows in the list, not as a notification.
+  * Timestamps are the peer's: the clocks are assumed in sync (NTP). The phone keeps the hub's clock offset.
+  * A peer running an older grovy works, without its notifications (it ignores `?notify=1`).
+  * A peer's shared page link goes through the hub and works only while the peer is reachable.
+  * No TLS on the hop from the hub's socket to the peer's grovyd: ssh carries it; `tls: true` is for a peer whose grovyd
+    only serves HTTPS, unverified.
 * Only the final assistant message per turn is shown (`Stop.last_assistant_message`), with no streaming. While
   Claude works, the page shows a typing indicator with the current tool and an elapsed timer, which turns grey after
   60s without events. `MessageDisplay` exists in current Claude Code and could add live text later.
@@ -746,6 +851,20 @@ persistence, throttling, the client library's no-op/failure/exit behaviour, and 
 validation/CSRF/token/SSE. The integration tests run a fake `claude` in **real tmux** on a private
 server (`tmux -L`) to check lifecycle, literal delivery of quotes, `$()`, backticks, unicode and multiline text,
 isolation between sessions, and that an unrelated look-alike session is never touched.
+
+`tests/test_peers.py` links a hub to a real peer daemon (fake tmux) through a Unix-socket forwarder standing in for
+the SSH tunnel, and cuts and restores it: list, detail, history, prompts, queued-prompt cancel, permission answers,
+interrupt/kill/resume/create, rename, live hints, notifications, offline `unknown` state and 502s, recovery with the
+"needs you" catch-up, stale-fetch protection, pages under the hub's CSP and shared links, streamed uploads and
+thumbnails, plugin routes, a wrong token, hostile names from a peer, removing a peer, peers.json validation and mode,
+socket ownership checks, the tunnel's ssh argv, its remote script (run by a real `sh`, quoting included) and backoff,
+and that nothing changes without peers.json.
+
+**Peers by hand** (no second machine needed): two scratch daemons (`--port 7397` hub, `7398` "pc", own state and
+config dirs), `grovy peer token` (pc) piped into `grovy peer add pc --socket HUBSTATE/peers/pc.sock` (hub), and
+instead of ssh a forwarder from that socket to 127.0.0.1:7398 (or `grovy peer tunnel` with a fake `ssh` on `PATH`
+that runs the remote script locally and the forwarder for `-R`). Drive hooks on the pc with
+`GROVY_STATE_DIR=… grovy hook NAME < payload.json`; stop the forwarder to go offline.
 
 ### Manual end-to-end procedure (real Claude Code)
 

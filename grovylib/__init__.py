@@ -39,4 +39,8 @@ Daemon state (Store, in store.py, is assembled from one class per feature; all s
   newproject.py  new projects: a blank repo or a clone in ~/dev, and Claude's trust question answered on your say
   notify.py      GROVY_NOTIFY_CMD
   plugins.py     daemon plugins: the built-in ones (plugins/) and the user's (~/.config/grovy/plugins/*.py)
+
+Other machines:
+  peers.py       peers: another machine's grovyd shown here (pc:NAME) over an SSH reverse tunnel's Unix socket;
+                 peers.json, proxying, the per-peer event stream; `grovy peer add/rm/ls/token/tunnel`
 """
