@@ -24,6 +24,7 @@ Command line:
   install.py     setup, doctor, url, tls init
   cleanup.py     `grovy cleanup`: undoes setup (from its record, setup.json)
   tls.py         optional HTTPS: which certificate the daemon serves; the one `grovy tls init` makes
+  tui.py         the terminal UI setup and cleanup use: colours, step lines, arrow-key menus (stdlib only)
   qr.py          a tiny byte-mode QR encoder, for the scannable login code `grovy setup` ends with
   scriptlib.py   track/progress/note/log/show for scripts running inside a session
 
