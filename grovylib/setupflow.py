@@ -70,10 +70,30 @@ def _systemctl(*args):
 
 def _linger_on():
     try:
-        return subprocess.run(["loginctl", "show-user", os.environ.get("USER", ""), "-p", "Linger"],
+        return subprocess.run(["loginctl", "show-user", str(os.getuid()), "-p", "Linger"],
                               capture_output=True, text=True, timeout=10).stdout.strip() == "Linger=yes"
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def current(rec):
+    """The answers to preselect: the record, or for an install older than the record (or a unit edited by hand), what
+    its service file says. Without either, nothing: the defaults apply."""
+    rec = dict(rec)
+    try:
+        with open(UNIT) as f:
+            unit = f.read()
+    except OSError:
+        return rec
+    env = dict(re.findall(r"^Environment=(GROVY_[A-Z_]+)=(.*)$", unit, re.M))
+    if "GROVY_BIND" in env and not rec.get("bind"):
+        rec["bind"] = env["GROVY_BIND"]
+    if env.get("GROVY_PORT", "").isdigit() and not rec.get("port"):
+        rec["port"] = int(env["GROVY_PORT"])
+    if "https" not in rec:   # HTTPS is on when there is a certificate and the unit doesn't turn it off
+        rec["https"] = os.path.exists(tls.own_cert()) and env.get("GROVY_TLS") != "off"
+    rec.setdefault("role", "graft" if os.path.exists(graft.UNIT) else "trunk")
+    return rec
 
 
 # --- the questions ------------------------------------------------------------------------------------------------
@@ -125,6 +145,9 @@ def ask_bind(rec):
         opts.append({"label": names[kind], "value": a, "hint": a})
     opts.append({"label": "Everywhere", "value": "0.0.0.0", "hint": "0.0.0.0  every network"})
     values = [o["value"] for o in opts]
+    if rec.get("bind") and rec["bind"] not in values:   # e.g. a VPN that is down right now: keep it, don't fall back
+        opts.insert(1, {"label": "Current address", "value": rec["bind"], "hint": f"{rec['bind']}  (not up right now)"})
+        values = [o["value"] for o in opts]
     default = values.index(rec["bind"]) if rec.get("bind") in values else 0
     return tui.select("Who can reach grovy?", opts, default=default)
 
@@ -133,7 +156,7 @@ def ask_port(bind, rec, own_port):
     """The port, checked: one something else already listens on is refused once (typing it again uses it anyway,
     for this run only). Our own running daemon's port is never 'taken'."""
     want = rec.get("port") or core.env_int("PORT", 7333)
-    probe = "127.0.0.1" if bind == "0.0.0.0" else bind
+    probe = bind   # 0.0.0.0 also catches a listener on any one address, as the daemon's own bind would
 
     def busy(p):
         return p != own_port and install._port_busy(probe, p)
@@ -199,6 +222,9 @@ def plan_trunk(bind, port, https, systemd, rec, role="trunk"):
         steps.append((f"your grovy home {tui.short(core.config_dir())} (custom.css, custom.js) and a login token", do_files))
     if https:
         names = cert_names(bind)
+        if not names:
+            core.die("HTTPS needs an address or host name for the certificate, and this computer has neither: pick a "
+                     "specific address, or set it up with grovy tls init --name NAME")
         have = set(tls.cert_names(tls.own_cert())) if os.path.exists(tls.own_cert()) else set()
         if not set(names) <= have:
             steps.append((f"an HTTPS certificate for {', '.join(names)}", lambda: tls.init(names)))
@@ -231,11 +257,18 @@ def plan_trunk(bind, port, https, systemd, rec, role="trunk"):
         if not _linger_on():
             def do_linger():
                 r = subprocess.run(["loginctl", "enable-linger"], capture_output=True, text=True, timeout=30)
-                if r.returncode:
-                    raise RuntimeError((r.stderr.strip() or "loginctl enable-linger failed") +
-                                       ": without it grovy starts when you log in")
+                if r.returncode:   # not worth stopping for: grovy then starts when you log in
+                    tui.warn(f"linger: {r.stderr.strip() or 'loginctl enable-linger failed'} (grovy starts when you "
+                             "log in instead)")
+                    return
                 install.update_record(linger=True)
             steps.append(("keep running after you log out (linger)", do_linger))
+    g = rec.get("graft") if isinstance(rec.get("graft"), dict) else {}
+    if role == "trunk" and (g.get("trunk") or os.path.exists(graft.UNIT)):
+        def do_leave():
+            graft.leave(g, "now a trunk")
+            install.update_record(graft=None)
+        steps.append((f"stop the tunnel to {g.get('trunk') or 'the trunk'} and take this computer off it", do_leave))
     if (old["bind"], old["port"], bool(old["https"])) != (bind, port, https) or rec.get("role") != role:
         steps.append((None,   # not shown: grovy's own note of the answers, for cleanup and the next setup
                       lambda: install.update_record(role=role, bind=bind, port=port, https=https,
@@ -246,16 +279,20 @@ def plan_trunk(bind, port, https, systemd, rec, role="trunk"):
 def review_and_apply(title, steps, dry):
     tui.say()
     if not any(label for label, _ in steps):
-        for _, action in steps:   # only grovy's own record: nothing on the computer changes
-            action()
+        if not dry:
+            for _, action in steps:   # only grovy's own record: nothing on the computer changes
+                action()
         tui.ok("Nothing to change: it's already set up like that.")
-        return True
+        return not dry
     tui.say(tui.paint(title, "bold"))
     for label, _ in steps:
         if label:
             tui.say(f"  • {label}")
     if dry:
         tui.note("(dry run: nothing changed)")
+        return False
+    if not tui.AUTO and not tui.interactive():
+        tui.note("(no terminal to ask: nothing changed; run it in a terminal, or with -y to apply this)")
         return False
     if not tui.confirm("Apply?", True):
         tui.say("Nothing changed.")
@@ -293,12 +330,18 @@ def finish_trunk(bind, port, systemd):
         tui.say("grovy isn't answering yet; once it is, grovy url prints the login link.")
         return
     tui.say()
+    live = daemon_status().get("url", "")
+    if f"{bind}:{port}" not in live:   # a daemon outside the service still runs the old settings
+        tui.warn(f"the grovy running now listens on {live or 'something else'}, not {bind}:{port}: stop it, then "
+                 "systemctl --user start grovy (sessions keep running)")
+        next_steps()
+        return
     if all(install._is_local(b) for b in bases):
         tui.say(tui.paint("grovy is running on this computer only.", "bold"))
         tui.say(f"  {links[0]}")
         opener = shutil.which("xdg-open") or (shutil.which("open") if sys.platform == "darwin" else None)
         graphical = sys.platform == "darwin" or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-        if opener and graphical and tui.confirm("Open it in your browser now?", True):
+        if opener and graphical and tui.interactive() and tui.confirm("Open it in your browser now?", True):
             subprocess.Popen([opener, links[0]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         tui.note("To open it from other devices too, run grovy setup again and pick another address.")
     else:
@@ -331,14 +374,20 @@ def cmd_setup(a):
     tui.AUTO = bool(a.yes)
     try:
         return _setup(a)
+    except KeyboardInterrupt:
+        tui.say()
+        tui.say("Stopped. What was already applied stays (grovy setup again finishes it, grovy cleanup undoes it).")
+        return 130
     finally:
         tui.AUTO = False
 
 
 def _setup(a):
-    rec = install.read_record()
+    rec = current(install.read_record())
     set_up = bool(rec.get("role")) or os.path.exists(UNIT)
-    flags = a.bind or a.port or a.role or a.trunk
+    if a.port is not None and not 1 <= a.port <= 65535:
+        core.die("--port: 1-65535")
+    flags = a.bind or a.port or a.role or a.trunk or a.name or a.https is not None or a.no_service
     welcome()
     if set_up and not flags and tui.interactive():
         tui.say()
@@ -367,7 +416,8 @@ def _setup(a):
     tui.step(3, total, "Network")
     bind = a.bind or ask_bind(rec)
     try:
-        ipaddress.ip_address(bind)
+        if ipaddress.ip_address(bind).version != 4:
+            core.die("grovy listens on IPv4 addresses only")
     except ValueError:
         core.die(f"{bind!r} is not an IP address")
     port = a.port if a.port is not None else ask_port(bind, rec, _own_port())

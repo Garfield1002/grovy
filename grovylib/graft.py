@@ -42,7 +42,7 @@ After=network-online.target grovy.service
 
 [Service]
 ExecStart={exe} peer tunnel {trunk} --name {name} --port {port} --identity {key}
-Environment=PATH={path}
+Environment="PATH={path}"
 Restart=always
 RestartSec=10
 
@@ -52,7 +52,7 @@ WantedBy=default.target
 
 
 def tunnel_unit(trunk, name, port, path=None):
-    q = lambda v: str(v).replace("%", "%%")   # noqa: E731  systemd expands %-specifiers
+    q = lambda v: str(v).replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')   # noqa: E731
     path = path if path is not None else os.environ.get("PATH", "/usr/bin:/bin")
     return TUNNEL_UNIT.format(trunk=q(trunk), name=name, port=int(port), key=q(KEY), path=q(path),
                               exe=q(os.path.join(core.HERE, "grovy")))
@@ -79,11 +79,18 @@ def _cm_opts():
             "-o", "ConnectTimeout=20"]
 
 
+def clean(text):
+    """Remote text made safe to print: no terminal escape sequences or other control characters."""
+    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "?", (text or "").strip())
+
+
 def ssh(host, script, input=None, timeout=180, run=None):
-    """Run a sh script on the trunk with your usual ssh login (it may ask for a password, on the terminal).
-    Returns the CompletedProcess."""
+    """Run a sh script on the trunk with your usual ssh login (it may ask for a password: ssh asks on the terminal
+    itself). Returns the CompletedProcess."""
     run = run or subprocess.run
     argv = ["ssh", *_cm_opts(), "--", host, "sh -c " + shlex.quote(script)]
+    if input is None:
+        return run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
     return run(argv, input=input, capture_output=True, text=True, timeout=timeout)
 
 
@@ -91,19 +98,19 @@ FIND_GROVY = ('g="$HOME/.local/bin/grovy"; [ -x "$g" ] || g="$(command -v grovy)
               'if [ -z "$g" ]; then echo NOGROVY; exit 0; fi; ')
 
 
-def probe(host, run=None):
+def probe(host, run=None, timeout=120):
     """(peer names already on the trunk, None) or (None, why it won't do). Checks ssh works and that the trunk has a
     grovy with peers."""
     if not peers.HOST_RE.fullmatch(host) or host.startswith("-"):
         return None, f"{host!r} isn't an ssh destination (user@host, or a name from ~/.ssh/config)"
     try:
         r = ssh(host, FIND_GROVY + '"$g" peer -h >/dev/null 2>&1 || { echo OLDGROVY; exit 0; }; echo OK; '
-                '"$g" peer ls 2>/dev/null; true', run=run, timeout=120)
+                '"$g" peer ls 2>/dev/null; true', run=run, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"ssh {host}: {e}"
     out = r.stdout or ""
     if r.returncode or not out.strip():
-        return None, f"ssh {host} failed: {(r.stderr or '').strip()[-300:] or f'exit {r.returncode}'}"
+        return None, f"ssh {host} failed: {clean(r.stderr)[-300:] or f'exit {r.returncode}'}"
     if "NOGROVY" in out:
         return None, f"grovy isn't installed on {host}: set the trunk up first (grovy setup there)"
     if "OLDGROVY" in out:
@@ -175,14 +182,36 @@ def ask_name(rec, taken, given=None):
     if check(name):
         core.die(f"name: {check(name)}")
     if name in taken and name != old:
-        tui.warn(f"the trunk already has a graft named {name}: this computer replaces it")
+        tui.warn(f"the trunk already has a graft named {name}: this computer replaces it (its tunnel key line is "
+                 "removed there too)")
     return name
 
 
 # --- the changes --------------------------------------------------------------------------------------------------
 
+# Rewrites ~/.ssh/authorized_keys without the lines grovy owns for this key or this name, plus an optional new line.
+# Careful because a mistake locks the user out: fields are compared exactly (awk on bytes, LC_ALL=C, so no line is
+# dropped for not being valid UTF-8), the new file is made in ~/.ssh and only put in place if every other line is
+# still there (line counts), and any failure leaves the file untouched. A symlinked file is written through.
+EDIT_KEYS = r"""
+edit_keys() {
+  a="$HOME/.ssh/authorized_keys"; body="$1"; line="$2"
+  [ -n "$body" ] || { echo "no key received" >&2; return 5; }
+  [ -f "$a" ] || { [ -n "$line" ] || return 0; : > "$a"; }
+  t=$(mktemp "$HOME/.ssh/.authorized_keys.grovy.XXXXXX") || { echo "can't make a temporary file in ~/.ssh" >&2; return 6; }
+  n=$(LC_ALL=C awk -v body="$body" -v tag="grovy-tunnel:@NAME@" '
+    { drop = ($NF == tag); for (i = 1; i <= NF; i++) if ($i == body) drop = 1 }
+    drop { n++; next } { print } END { print n + 0 > "/dev/stderr" }' "$a" 2>&1 >"$t") || { rm -f "$t"; echo "awk failed" >&2; return 7; }
+  if [ -n "$line" ]; then printf '%s\n' "$line" >> "$t" || { rm -f "$t"; return 8; }; fi
+  total=$(LC_ALL=C awk 'END { print NR }' "$a"); kept=$(LC_ALL=C awk 'END { print NR }' "$t")
+  want=$((total - n)); if [ -n "$line" ]; then want=$((want + 1)); fi
+  [ "$kept" = "$want" ] || { rm -f "$t"; echo "authorized_keys not changed: lines don't add up ($kept, expected $want)" >&2; return 9; }
+  if [ -L "$a" ]; then cat "$t" > "$a" && rm -f "$t"; else chmod 600 "$t" && mv -f "$t" "$a"; fi
+}
+"""
+
 # Runs on the trunk. stdin: this grovy's token, then the tunnel's public key. Prints SOCKET=path.
-ADD_SCRIPT = FIND_GROVY + r'''
+ADD_SCRIPT = FIND_GROVY + EDIT_KEYS + r"""
 set -e
 read -r tok; read -r key
 d="${XDG_STATE_HOME:-$HOME/.local/state}/grovy/peers"
@@ -190,26 +219,21 @@ mkdir -p "$d"; chmod 700 "$d"
 s="$d/@NAME@.sock"
 case "$s" in *[!A-Za-z0-9/._-]*) echo "the socket path $s has characters grovy won't put in authorized_keys" >&2; exit 4;; esac
 umask 077
-mkdir -p "$HOME/.ssh"; a="$HOME/.ssh/authorized_keys"; touch "$a"
+mkdir -p "$HOME/.ssh"
 body=$(printf '%s\n' "$key" | cut -d' ' -f2)
-[ -n "$body" ] || { echo "no key received" >&2; exit 5; }   # an empty pattern would match, and drop, every line
-t=$(mktemp)
-grep -vF -- "$body" "$a" > "$t" || true
-printf 'restrict,port-forwarding,permitopen="127.0.0.1:9",command="rm -f %s; echo %s" %s grovy-tunnel:@NAME@\n' "$s" "$s" "$key" >> "$t"
-cat "$t" > "$a"; rm -f "$t"
+edit_keys "$body" "$(printf 'restrict,port-forwarding,permitopen="127.0.0.1:9",permitlisten="127.0.0.1:9",command="rm -f %s; echo %s" %s grovy-tunnel:@NAME@' "$s" "$s" "$key")"
 @RMOLD@
 printf '%s\n' "$tok" | "$g" peer add @NAME@ --socket "$s" >/dev/null
 printf 'SOCKET=%s\n' "$s"
-'''
+"""
 
-REMOVE_SCRIPT = FIND_GROVY + r'''
+REMOVE_SCRIPT = FIND_GROVY + EDIT_KEYS + r"""
 read -r key
 body=$(printf '%s\n' "$key" | cut -d' ' -f2)
-a="$HOME/.ssh/authorized_keys"
-if [ -n "$body" ] && [ -f "$a" ]; then t=$(mktemp); grep -vF -- "$body" "$a" > "$t" || true; cat "$t" > "$a"; rm -f "$t"; fi
+edit_keys "${body:-grovy-no-key}" "" || exit $?
 "$g" peer rm @NAME@ >/dev/null 2>&1 || true
 echo REMOVED
-'''
+"""
 
 
 def public_key():
@@ -235,6 +259,9 @@ def plan(trunk, name, port, systemd, rec):
                 raise RuntimeError(r.stderr.strip() or "ssh-keygen failed")
             install.update_record(graft={**(install.read_record().get("graft") or {}), "key": KEY})
         steps.append((f"a key for the tunnel only, {tui.short(KEY)} (no passphrase)", do_key))
+    if old.get("trunk") and old["trunk"] != trunk and old.get("name"):
+        steps.append((f"on {old['trunk']}: remove this computer ({old['name']}), now grafted onto {trunk}",
+                      lambda: leave(old, f"moved to {trunk}")))
     if new_key or (old.get("trunk"), old.get("name")) != (trunk, name):
         def do_trunk():
             rm_old = (f'"$g" peer rm {old["name"]} >/dev/null 2>&1 || true'
@@ -246,7 +273,9 @@ def plan(trunk, name, port, systemd, rec):
             r = ssh(trunk, script, input=f"{tok}\n{public_key()}\n")
             sock = next((ln[7:] for ln in (r.stdout or "").splitlines() if ln.startswith("SOCKET=")), None)
             if r.returncode or not sock:
-                raise RuntimeError((r.stderr or "").strip()[-300:] or f"ssh exit {r.returncode}")
+                raise RuntimeError(clean(r.stderr)[-300:] or f"ssh exit {r.returncode}")
+            if not SAFE_PATH.fullmatch(sock):
+                raise RuntimeError(f"the trunk gave an unexpected socket path {clean(sock)!r}")
             install.update_record(graft={"trunk": trunk, "name": name, "socket": sock, "key": KEY})
         steps.append((f"on {trunk}: add this computer as {name}, with the tunnel key (restricted to the tunnel)",
                       do_trunk))
@@ -267,6 +296,26 @@ def plan(trunk, name, port, systemd, rec):
     return steps
 
 
+def leave(g, why):
+    """Take this computer off the trunk it was grafted to (`g`, the record's graft entry): stop and remove the tunnel
+    service, remove its line and peer entry there, delete the key. If the trunk can't be reached, say so and keep
+    the record's entry, so that grovy cleanup can try again; the key stays then, as the trunk still accepts it."""
+    subprocess.run(["systemctl", "--user", "disable", "--now", "grovy-tunnel"], capture_output=True, timeout=60)
+    for p in (UNIT, os.path.expanduser("~/.config/systemd/user/default.target.wants/grovy-tunnel.service")):
+        if os.path.lexists(p):
+            os.unlink(p)
+    try:
+        remove_on_trunk(g)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        tui.warn(f"{e} ({why}; grovy cleanup tries again)")
+        install.update_record(old_grafts=[*install.read_record().get("old_grafts", []), g])
+        return
+    if why == "now a trunk":
+        for p in (KEY, KEY + ".pub"):
+            if os.path.exists(p):
+                os.unlink(p)
+
+
 def tunnel_command(trunk, name, port):
     return (f"tmux new -d -s grovy-tunnel '{os.path.join(core.HERE, 'grovy')} peer tunnel {trunk} --name {name} "
             f"--port {port} --identity {KEY}'")
@@ -276,7 +325,7 @@ def wait_online(trunk, name, tries=15, sleep=None):
     """Whether the trunk sees this graft online, asked over setup's shared ssh connection."""
     sleep = sleep or time.sleep
     for _ in range(tries):
-        names, _why = probe(trunk)
+        names, _why = probe(trunk, timeout=20)
         if names and names.get(name, "").startswith("online"):
             return True
         sleep(2)
@@ -294,6 +343,6 @@ def remove_on_trunk(graft):
         key = ""
     r = ssh(trunk, REMOVE_SCRIPT.replace("@NAME@", name), input=key + "\n")
     if r.returncode or "REMOVED" not in (r.stdout or ""):
-        raise RuntimeError(f"couldn't reach {trunk} ({(r.stderr or '').strip()[-200:] or r.returncode}); there, run: "
+        raise RuntimeError(f"couldn't reach {trunk} ({clean(r.stderr)[-200:] or r.returncode}); there, run: "
                            f"grovy peer rm {name}, and delete the line ending in grovy-tunnel:{name} from "
                            "~/.ssh/authorized_keys")

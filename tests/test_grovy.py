@@ -883,7 +883,8 @@ class TestCleanup(unittest.TestCase):
         unit = os.path.join(self.home, ".config", "systemd", "user", "grovy.service")
         os.makedirs(os.path.dirname(unit))
         for p in (unit, unit + ".bak"):
-            open(p, "w").close()
+            with open(p, "w") as f:
+                f.write(f"[Service]\nExecStart={os.path.join(core.HERE, 'grovy')} serve\n")
         install.update_record(role="trunk", link=link)
         rc, out = self.run_cleanup("-y")
         self.assertEqual(rc, 0, out)
@@ -927,6 +928,64 @@ class TestCleanup(unittest.TestCase):
             rc, out = self.run_cleanup("-y")
         self.assertTrue(os.path.isdir(plain))
 
+    def unit(self, exe):
+        unit = os.path.join(self.home, ".config", "systemd", "user", "grovy.service")
+        os.makedirs(os.path.dirname(unit), exist_ok=True)
+        with open(unit, "w") as f:
+            f.write(f"[Service]\nExecStart={exe} serve\n")
+        return unit
+
+    def test_refuses_a_service_that_runs_another_grovy(self):
+        """Review: from a scratch checkout, cleanup removed the live service of ~/dev/grovy and its shared state."""
+        unit = self.unit("/somewhere/else/grovy")
+        with self.assertRaises(SystemExit):
+            self.run_cleanup("-y")
+        self.assertTrue(os.path.exists(unit) and os.path.isdir(self.state))
+        self.assertEqual(cleanup.unit_owner(self.unit("%h/dev/grovy/grovy")), os.path.join(self.home, "dev", "grovy"))
+
+    def test_a_failed_step_keeps_the_record_for_the_rerun(self):
+        """Review: the trunk step failed, then the state folder (holding the record) was removed anyway, so the rerun
+        said "Done" and the trunk kept the entry; the key was deleted too."""
+        os.makedirs(os.path.dirname(graft.KEY), exist_ok=True)
+        open(graft.KEY, "w").close()
+        install.update_record(linger=True, graft={"trunk": "u@t", "name": "pc", "key": graft.KEY})
+        with mock.patch.object(graft, "remove_on_trunk", side_effect=RuntimeError("unreachable")):
+            rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.exists(install.record_path()) and os.path.exists(graft.KEY))
+        self.assertIn("skipped", out)
+
+    def test_linger_off_failing_is_a_failure(self):
+        install.update_record(linger=True)
+        with mock.patch.object(cleanup.subprocess, "run",
+                               lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "denied")):
+            rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 1)
+        self.assertIn("denied", out)
+        self.assertTrue(install.read_record()["linger"])          # still recorded, so a rerun tries again
+
+    def test_a_daemon_that_wont_stop_stops_everything(self):
+        with mock.patch.object(client, "sock_request", lambda *a, **k: {"url": "x", "pid": 4242}), \
+                mock.patch.object(cleanup, "_stop_pid", side_effect=RuntimeError("didn't stop")):
+            rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.isdir(self.state))               # not removed under a daemon still running
+
+    def test_dry_run_on_a_clean_computer_leaves_no_folder(self):
+        shutil.rmtree(self.state)
+        rc, out = self.run_cleanup("--dry-run")
+        self.assertFalse(os.path.exists(self.state), out)
+        self.assertIn("Nothing to remove", out)
+
+    def test_a_trailing_slash_doesnt_see_through_a_link(self):
+        target = os.path.join(self.home, "real-grovy")
+        os.makedirs(target)
+        open(os.path.join(target, "keep"), "w").close()
+        link = os.path.join(self.home, "link-grovy")
+        os.symlink(target, link)
+        self.assertFalse(cleanup.safe_to_remove(link + "/"))
+        self.assertFalse(cleanup.safe_to_remove(link))
+
     def test_refuses_inside_a_grovy_session(self):
         with mock.patch.dict(os.environ, {"GROVY_SESSION": "me"}), self.assertRaises(SystemExit):
             self.run_cleanup("-y")
@@ -957,7 +1016,7 @@ class TestCleanup(unittest.TestCase):
         with mock.patch.object(shutil, "which", lambda x: "/bin/true"), \
                 mock.patch.object(install, "cmd_url", lambda a: None), mock.patch.object(setupflow.time, "sleep"), \
                 redirect_stdout(io.StringIO()):
-            rc = grovy.main(["setup", "--bind", "127.0.0.1", "--port", "7399", "--no-service"])
+            rc = grovy.main(["setup", "-y", "--bind", "127.0.0.1", "--port", "7399", "--no-service"])
         self.assertEqual(rc, 0)
         rec = install.read_record()
         self.assertEqual((rec["role"], rec["bind"], rec["port"]), ("trunk", "127.0.0.1", 7399))
@@ -1011,6 +1070,74 @@ class TestSetupFlow(unittest.TestCase):
         steps = setupflow.plan_trunk("100.64.1.2", 7390, False, True, install.read_record())
         self.assertTrue(any(l and "100.64.1.2:7390" in l and "(was 127.0.0.1:7390)" in l for l, _ in steps))
 
+    def test_an_install_older_than_the_record_keeps_its_settings(self):
+        """Review: a main-era install (unit, no setup.json) rerun with -y was rebound to 127.0.0.1 with HTTPS off."""
+        with open(setupflow.UNIT, "w") as f:
+            f.write(install.service_unit("100.64.1.2", 7444))
+        os.makedirs(os.path.dirname(tls.own_cert()), exist_ok=True)
+        open(tls.own_cert(), "w").close()
+        rec = setupflow.current({})
+        self.assertEqual((rec["bind"], rec["port"], rec["https"], rec["role"]), ("100.64.1.2", 7444, True, "trunk"))
+        with mock.patch.object(tui, "interactive", lambda: False):
+            self.assertEqual(setupflow.ask_bind(rec), "100.64.1.2")
+            self.assertTrue(setupflow.ask_https("100.64.1.2", rec))
+
+    def test_a_recorded_address_thats_down_stays_the_default(self):
+        """Review: with the VPN down, -y rebound the service to 127.0.0.1."""
+        with mock.patch.object(tui, "interactive", lambda: False), mock.patch.object(setupflow, "addresses", lambda: []):
+            self.assertEqual(setupflow.ask_bind({"bind": "100.64.9.9"}), "100.64.9.9")
+
+    def test_dry_run_and_no_terminal_change_nothing(self):
+        """Review: a dry run with only the record to update wrote it; without a terminal or -y, setup applied
+        defaults (and could cut the phone off)."""
+        install.update_record(role="graft", bind="127.0.0.1", port=7390)
+        before = open(install.record_path()).read()
+        steps = [(None, lambda: install.update_record(role="trunk"))]
+        self.assertFalse(setupflow.review_and_apply("t", steps, True))
+        self.assertEqual(open(install.record_path()).read(), before)
+        ran = []
+        with mock.patch.object(tui, "interactive", lambda: False):
+            self.assertFalse(setupflow.review_and_apply("t", [("x", lambda: ran.append(1))], False))
+        self.assertEqual(ran, [])
+        with mock.patch.object(tui, "AUTO", True):
+            self.assertTrue(setupflow.review_and_apply("t", [("x", lambda: ran.append(1))], False))
+        self.assertEqual(ran, [1])
+
+    def test_linger_failing_is_only_a_warning(self):
+        def run(argv, **kw):
+            if argv[:2] == ["loginctl", "enable-linger"]:
+                return subprocess.CompletedProcess(argv, 1, "", "denied by polkit")
+            return subprocess.CompletedProcess(argv, 0, "Linger=no\n" if "show-user" in argv else "inactive\n", "")
+        with mock.patch.object(setupflow.subprocess, "run", run):
+            steps = setupflow.plan_trunk("127.0.0.1", 7390, False, True, {})
+            linger = next(a for l, a in steps if l and "linger" in l)
+            linger()                                       # no exception: setup goes on to the record and the link
+        self.assertFalse(install.read_record().get("linger"))
+
+    def test_becoming_a_trunk_takes_the_graft_down(self):
+        """Review: a graft switched to trunk kept tunnelling into its old trunk, which could still drive it."""
+        rec = {"role": "graft", "bind": "127.0.0.1", "port": 7390, "graft": {"trunk": "hub", "name": "pc"}}
+        steps = setupflow.plan_trunk("127.0.0.1", 7390, False, False, rec)
+        leave = [a for l, a in steps if l and "stop the tunnel to hub" in l]
+        self.assertEqual(len(leave), 1)
+        with mock.patch.object(graft, "leave") as lv:
+            leave[0]()
+        lv.assert_called_once_with({"trunk": "hub", "name": "pc"}, "now a trunk")
+        self.assertIsNone(install.read_record()["graft"])
+
+    def test_https_without_any_name_is_refused(self):
+        with mock.patch.object(setupflow, "addresses", lambda: []), mock.patch.object(tls, "default_names", lambda: []):
+            with self.assertRaises(SystemExit):
+                setupflow.plan_trunk("0.0.0.0", 7390, True, False, {})
+
+    def test_the_port_check_probes_the_address_itself(self):
+        """Review: for 0.0.0.0 it probed 127.0.0.1 and missed a listener on one specific address."""
+        seen = []
+        with mock.patch.object(install, "_port_busy", lambda b, p: seen.append(b) or False), \
+                mock.patch.object(tui, "interactive", lambda: False):
+            setupflow.ask_port("0.0.0.0", {}, None)
+        self.assertEqual(seen, ["0.0.0.0"])
+
     def test_https_off_is_written_into_the_unit(self):
         self.assertIn("Environment=GROVY_TLS=off", install.service_unit("1.2.3.4", 1, tls_off=True))
         self.assertNotIn("GROVY_TLS", install.service_unit("1.2.3.4", 1))
@@ -1060,7 +1187,8 @@ class TestGraft(unittest.TestCase):
             f.write('#!/bin/sh\nif [ "$1 $2" = "peer -h" ]; then exit 0; fi\n'
                     'printf "%s|%s\\n" "$*" "$(cat)" >> "$HOME/grovy.log"\n')
         os.chmod(fake, 0o755)
-        env = {"HOME": home, "PATH": "/usr/bin:/bin"}
+        env = {"HOME": home, "PATH": "/usr/bin:/bin",
+               **{k: os.environ[k] for k in ("LANG", "LC_ALL") if k in os.environ}}   # a trunk's locale reaches it
         return subprocess.run(["sh", "-c", script], input=stdin, capture_output=True, text=True, env=env, timeout=20)
 
     def keypair(self):
@@ -1085,7 +1213,7 @@ class TestGraft(unittest.TestCase):
         self.assertIn("SOCKET=" + sock, r.stdout)
         lines = open(ak).read().splitlines()
         self.assertEqual(lines[0], "ssh-ed25519 AAAAothersothersothersothers me@laptop")
-        self.assertEqual(lines[1:], [f'restrict,port-forwarding,permitopen="127.0.0.1:9",'
+        self.assertEqual(lines[1:], [f'restrict,port-forwarding,permitopen="127.0.0.1:9",permitlisten="127.0.0.1:9",'
                                      f'command="rm -f {sock}; echo {sock}" {pub} grovy-tunnel:pc'])
         self.assertEqual(os.stat(os.path.join(trunk, ".local", "state", "grovy", "peers")).st_mode & 0o777, 0o700)
         log = open(os.path.join(trunk, "grovy.log")).read()
@@ -1093,6 +1221,65 @@ class TestGraft(unittest.TestCase):
         out = subprocess.run(["ssh-keygen", "-l", "-f", ak], capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)                   # OpenSSH reads our line, options and all
         self.assertIn("grovy-tunnel:pc", out.stdout)
+
+    def trunk_with(self, content):
+        trunk = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(trunk, ".ssh"))
+        ak = os.path.join(trunk, ".ssh", "authorized_keys")
+        with open(ak, "wb") as f:
+            f.write(content)
+        return trunk, ak
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_add_script_keeps_lines_that_arent_utf8_and_replaces_the_names_old_key(self):
+        """Review: in a UTF-8 locale grep silently dropped a line with a Latin-1 comment; a NUL byte dropped the
+        rest; and another computer's line under the same name stayed, so both tunnels fought over one socket."""
+        pub = self.keypair()
+        other = b'restrict,command="x" ssh-ed25519 AAAAotherpcotherpcotherpc grovy-tunnel:pc\n'
+        content = (b"ssh-ed25519 AAAAlatin1latin1latin1latin1 jos\xe9@laptop\n" + other +
+                   b"ssh-ed25519 AAAAnulnulnulnulnulnul a\x00b\nssh-ed25519 AAAAlastlastlastlastlast last-no-newline")
+        trunk, ak = self.trunk_with(content)
+        env_utf8 = {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+        with mock.patch.dict(os.environ, env_utf8):
+            r = self.run_remote(graft.ADD_SCRIPT.replace("@NAME@", "pc").replace("@RMOLD@", ":"), f"T\n{pub}\n", trunk)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = open(ak, "rb").read().split(b"\n")
+        self.assertIn(b"ssh-ed25519 AAAAlatin1latin1latin1latin1 jos\xe9@laptop", got)
+        self.assertIn(b"ssh-ed25519 AAAAnulnulnulnulnulnul a\x00b", got)
+        self.assertIn(b"ssh-ed25519 AAAAlastlastlastlastlast last-no-newline", got)
+        self.assertNotIn(other.rstrip(b"\n"), got)                     # the name's previous key is replaced
+        self.assertEqual(sum(1 for x in got if x.endswith(b"grovy-tunnel:pc")), 1)
+        self.assertEqual(oct(os.stat(ak).st_mode & 0o777), "0o600")
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_scripts_leave_the_file_alone_when_anything_fails(self):
+        """Review: when mktemp failed, the remove script emptied authorized_keys and still said REMOVED."""
+        pub = self.keypair()
+        content = f"ssh-ed25519 AAAAkeepkeepkeepkeepkeep me\nrestrict {pub} grovy-tunnel:pc\n".encode()
+        trunk, ak = self.trunk_with(content)
+        bad = os.path.join(trunk, "badbin")
+        os.makedirs(bad)
+        with open(os.path.join(bad, "awk"), "w") as f:
+            f.write("#!/bin/sh\nexit 2\n")
+        os.chmod(os.path.join(bad, "awk"), 0o755)
+        fake = os.path.join(trunk, ".local", "bin", "grovy")
+        for script in (graft.REMOVE_SCRIPT.replace("@NAME@", "pc"),
+                       graft.ADD_SCRIPT.replace("@NAME@", "pc").replace("@RMOLD@", ":")):
+            self.run_remote("true", "", trunk)   # makes the fake grovy
+            r = subprocess.run(["sh", "-c", script], input=f"T\n{pub}\n" if "SOCKET" in script else pub + "\n",
+                               capture_output=True, text=True, timeout=20,
+                               env={"HOME": trunk, "PATH": f"{bad}:/usr/bin:/bin"})
+            self.assertNotIn("REMOVED", r.stdout)
+            self.assertNotIn("SOCKET=", r.stdout)
+            self.assertEqual(open(ak, "rb").read(), content)
+        os.chmod(os.path.join(trunk, ".ssh"), 0o500)                      # no temporary file can be made there
+        try:
+            r = self.run_remote(graft.REMOVE_SCRIPT.replace("@NAME@", "pc"), pub + "\n", trunk)
+        finally:
+            os.chmod(os.path.join(trunk, ".ssh"), 0o700)
+        self.assertNotIn("REMOVED", r.stdout)
+        self.assertEqual(open(ak, "rb").read(), content)
+        self.assertTrue(os.path.exists(fake))
 
     def test_add_script_refuses_an_empty_key(self):
         """An empty pattern would make `grep -v` drop every line of authorized_keys."""
@@ -1189,7 +1376,7 @@ class TestSetupAndCustomCss(unittest.TestCase):
         u = install.service_unit("100.1.2.3", 7333, path="/a:/b:/a:/x%y")
         self.assertIn("KillMode=process", u)              # restarting the daemon must not kill tmux
         self.assertIn("Environment=GROVY_BIND=100.1.2.3", u)
-        self.assertIn("Environment=PATH=/a:/b:/x%%y\n", u)  # de-duplicated, % escaped for systemd
+        self.assertIn('Environment="PATH=/a:/b:/x%%y"\n', u)  # de-duplicated, % escaped, quoted for systemd
         self.assertIn(os.path.join(core.HERE, "grovy") + " serve", u)
 
     def test_pick_port_prompts_and_avoids_a_taken_port(self):
@@ -1251,7 +1438,7 @@ class TestSetupAndCustomCss(unittest.TestCase):
         with mock.patch.dict(os.environ, env), mock.patch.object(shutil, "which", lambda x: "/bin/true"), \
                 mock.patch.object(client, "sock_request",
                                   lambda *a, **k: {"url": "http://10.0.0.5:7333"}), redirect_stdout(out):
-            rc = grovy.main(["setup", "--bind", "10.0.0.5", "--no-service"])
+            rc = grovy.main(["setup", "-y", "--bind", "10.0.0.5", "--no-service"])
         self.assertEqual(rc, 0)
         self.assertIn("Scan it, or open the link, once on each device", out.getvalue())
         self.assertIn("▀", out.getvalue())                       # the half-block the QR is drawn with

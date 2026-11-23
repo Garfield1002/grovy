@@ -113,9 +113,15 @@ def cmd_doctor(_):
     return 0 if ok else 1
 
 
+def state_path():
+    """The state folder, without making it (core.state_dir() does): cleanup and dry runs only look."""
+    return core.env("STATE_DIR") or os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                                                 "grovy")
+
+
 def record_path():
     """What `grovy setup` changed on this computer, so `grovy cleanup` can undo exactly that."""
-    return os.path.join(core.state_dir(), "setup.json")
+    return os.path.join(state_path(), "setup.json")
 
 
 def read_record():
@@ -134,6 +140,7 @@ def update_record(**changes):
             v = sorted(set(rec.get("services", [])) | set(v))
         rec[k] = v
     rec["version"] = 1
+    os.makedirs(state_path(), mode=0o700, exist_ok=True)
     core.atomic_write_json(record_path(), rec)
 
 
@@ -147,8 +154,8 @@ Description=grovy - Claude Code session manager daemon
 ExecStart={exe} serve
 Environment=GROVY_BIND={bind}
 Environment=GROVY_PORT={port}
-{tls}# The PATH of the shell that ran setup: claude (and the Claude sessions' Bash tool) need it.
-Environment=PATH={path}
+{tls}{dirs}# The PATH of the shell that ran setup: claude (and the Claude sessions' Bash tool) need it.
+Environment="PATH={path}"
 Restart=on-failure
 RestartSec=2
 # Essential: if this daemon starts the tmux server (first session from the phone), tmux is in this
@@ -163,9 +170,11 @@ WantedBy=default.target
 def service_unit(bind, port, path=None, tls_off=False):
     path = path if path is not None else os.environ.get("PATH", "/usr/bin:/bin")
     path = ":".join(dict.fromkeys(p for p in path.split(":") if p))   # de-duplicated, order kept
-    q = lambda v: str(v).replace("%", "%%")   # noqa: E731  systemd expands %-specifiers
+    q = lambda v: str(v).replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')   # noqa: E731  systemd: % specifiers, quotes
+    dirs = "".join(f'Environment="{k}={q(v)}"\n' for k, v in (("GROVY_HOME", core.home_env()),
+                                                               ("GROVY_STATE_DIR", core.env("STATE_DIR"))) if v)
     return SERVICE_UNIT.format(exe=q(os.path.join(core.HERE, "grovy")), bind=q(bind), port=int(port), path=q(path),
-                               tls="Environment=GROVY_TLS=off\n" if tls_off else "")
+                               tls="Environment=GROVY_TLS=off\n" if tls_off else "", dirs=dirs)
 
 
 def _port_busy(bind, port):

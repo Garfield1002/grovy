@@ -134,16 +134,28 @@ it, linger. Each change is recorded in `$STATE/setup.json` (role, address, port,
 wrote, `linger: true` if it turned linger on; that flag survives reruns). On a computer already set up, it first
 offers: change settings (the recorded answers preselected), show the login link, or remove (= `grovy cleanup`).
 It ends with the login link: a QR code and the link when other devices can reach grovy, else the link and an offer
-to open it in the browser. Without a terminal, or with `-y`, every question takes its default (`tui.AUTO`); flags
+to open it in the browser (only when asked in person); if the daemon answering still runs other settings (one
+outside the service), it says so instead. A failing `enable-linger` is a warning (grovy then starts at login), not
+a failure. Answers are preselected from the record, or for an install older than it from the unit itself
+(`GROVY_BIND`, `GROVY_PORT`, `GROVY_TLS`; HTTPS on when `server.pem` exists and isn't turned off); a recorded address
+that isn't up right now stays offered and the default. With `-y`, every question takes its default (`tui.AUTO`)
+and it applies; without a terminal and without `-y` it shows the plan and changes nothing. HTTPS with no address or
+host name to put in the certificate is refused. The unit carries `GROVY_HOME`/`GROVY_STATE_DIR` when they are set,
+and `PATH` quoted. Ctrl-C stops it with a line saying what stays; flags
 (`--role`, `--bind`, `--port`, `--https/--no-https`, `--no-service`, `--dry-run`) answer questions up front.
 
 `grovy cleanup` (`grovylib/cleanup.py`) plans first, shows the list, and applies it on a yes (`-y` without asking,
-`--dry-run` only shows). It stops and removes the `grovy` and `grovy-tunnel` services and unit files (and `.bak`),
+`--dry-run` only shows; looking makes no folder: one created by the look itself is removed). It refuses to start when
+a `grovy`/`grovy-tunnel` unit runs another grovy folder (its `ExecStart`, `%h` expanded): that grovy shares the
+state. Steps that stop something (a service, a daemon) stop cleanup if they fail; steps that remove what a rerun
+needs (the state with its record, the tunnel key) are skipped once anything failed, so `grovy cleanup` again retries
+exactly what's left. A hand-started daemon's pid is checked again just before it is stopped. It stops and removes the `grovy` and `grovy-tunnel` services and unit files (and `.bak`),
 stops a daemon running outside the service (by the `pid` the daemon reports in `status`; a daemon too old to report
 one makes cleanup stop before changing anything), removes the link only if it points to this grovy folder, turns
 linger off only if the record says setup turned it on, and removes the state folder, the ccs symlink and the
 attachments folder. The grovy home is kept unless asked (`--remove-home`), and running sessions are ended only on a yes
-(`--end-sessions`); they keep running in plain tmux otherwise. Without a record (installs older than it), it removes
+(`--end-sessions`); they keep running in plain tmux otherwise (until the user manager exits at the last logout, once the
+service and linger are gone; their hooks recreate an empty state folder). Without a record (installs older than it), it removes
 what it finds in those places. A folder is only ever deleted when it is named for grovy (or ccs), is not the home
 folder, `/` or one of the home's parents, and doesn't hold the grovy code: a mistyped `GROVY_STATE_DIR=~` can't
 wipe a home. It refuses to run inside a grovy session, which it would cut off. The grovy folder is never touched.
@@ -775,16 +787,26 @@ asks the name (the short host name by default), and plans the graft's own grovy 
 dedicated key `~/.ssh/grovy_tunnel` (ed25519, no passphrase: the service has no agent), one ssh run on the trunk
 (`graft.ADD_SCRIPT`: this grovy's token and the public key on stdin, never in argv; it replaces any line holding the
 same key in `~/.ssh/authorized_keys` and appends
-`restrict,port-forwarding,permitopen="127.0.0.1:9",command="rm -f SOCK; echo SOCK" KEY grovy-tunnel:NAME`, makes
-the socket's folder 0700, runs `grovy peer add NAME --socket SOCK`, prints the path; it refuses an empty key, since
-an empty `grep -v` pattern would drop every line, and a socket path with characters outside `[A-Za-z0-9/._-]`), and
+`restrict,port-forwarding,permitopen="127.0.0.1:9",permitlisten="127.0.0.1:9",command="rm -f SOCK; echo SOCK" KEY
+grovy-tunnel:NAME` (`permitlisten` stops the key opening TCP listeners on the trunk; a Unix-socket `-R` isn't limited
+by it, see "Trust"), makes the socket's folder 0700, runs `grovy peer add NAME --socket SOCK`, prints the path. The
+file is edited by `edit_keys` (shared with the removal): it drops the lines holding this key, or ending in
+`grovy-tunnel:NAME` (another computer that had the name), comparing awk fields exactly on bytes (`LC_ALL=C`: grep
+in a UTF-8 locale silently dropped lines that weren't valid UTF-8), writes a temporary file in `~/.ssh`, and puts it
+in place (`mv`, or written through a symlink) only if the line counts add up; any failure leaves the file as it was.
+An empty key, and a socket path outside `[A-Za-z0-9/._-]`, are refused. Then the
 the `grovy-tunnel` user service (`grovy peer tunnel TRUNK --name NAME --port PORT --identity KEY`, `Restart=always`).
 The forced command *is* the tunnel's preparation for that one socket (remove a stale one, print the path), so the
 normal `grovy peer tunnel` works with the restricted key whatever the trunk's `StreamLocalBindUnlink`. Setup's own
 logins share one ssh connection (`ControlMaster`, a private temporary `ControlPath`, closed at exit), so a password
 is asked once. It ends by polling `grovy peer ls` on the trunk until the graft shows online (30s), else it says where
 to look. `grovy cleanup` on the graft runs `graft.REMOVE_SCRIPT` on the trunk (drops the key's line, `grovy peer rm
-NAME`; best effort, printing what to run there by hand if the trunk can't be reached) and deletes the key it made.
+NAME`; if the trunk can't be reached it says what to run there, and keeps the record and the key for a rerun) and
+deletes the key it made. Pointing a graft at another trunk takes it off the old one first; setup as a trunk on a
+former graft stops and removes the tunnel and takes it off its trunk (`graft.leave`). A trunk that can't be reached
+then is kept in the record (`old_grafts`) for cleanup. Limits: the trunk's login shell must be sh-like (a csh can't
+parse the multi-line `sh -c '…'`); with `ProxyJump`, `--identity` doesn't reach the jump host and the service has no
+agent, so the tunnel fails even though setup worked.
 Checked against OpenSSH 10.0 (a private sshd, default `StreamLocalBindUnlink no`): a command asked for over the key
 runs the forced command instead, `-L` is refused, and the tunnel comes up over a stale socket.
 

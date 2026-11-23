@@ -50,7 +50,7 @@ def interactive():
 
 
 def width():
-    return max(40, shutil.get_terminal_size((80, 24)).columns)
+    return max(10, shutil.get_terminal_size((80, 24)).columns)
 
 
 def short(path):
@@ -110,9 +110,13 @@ def _read_key(fd):
     ch = os.read(fd, 1)
     if ch == b"\x1b":
         seq = b""
-        while len(seq) < 2 and _select.select([fd], [], [], 0.05)[0]:
+        while len(seq) < 8 and _select.select([fd], [], [], 0.05)[0]:
             seq += os.read(fd, 1)
-        return {b"[A": "up", b"OA": "up", b"[B": "down", b"OB": "down"}.get(seq, "esc")
+            if len(seq) >= 2 and 0x40 <= seq[-1] <= 0x7e:   # the final byte of an escape sequence
+                break
+        if seq[:1] in (b"[", b"O") and seq[-1:] in (b"A", b"B"):   # ↑/↓, with or without modifiers
+            return "up" if seq[-1:] == b"A" else "down"
+        return "esc"
     if ch in (b"\r", b"\n"):
         return "enter"
     if ch == b"\x03":
@@ -182,7 +186,7 @@ def select(question, options, default=0, keys=None, out=None):
     restore = None
     if keys is None:
         keys, restore = _terminal_keys()
-    w, drawn = width() - 1, 0
+    w, drawn, chosen = width() - 1, 0, False
     try:
         for key in itertools.chain([None], keys):   # None: draw it once before the first key
             if key == "up":
@@ -198,6 +202,7 @@ def select(question, options, default=0, keys=None, out=None):
             elif key == "ctrl-d":
                 raise EOFError
             elif key == "enter":
+                chosen = True
                 break
             elif key is not None:
                 continue
@@ -210,7 +215,8 @@ def select(question, options, default=0, keys=None, out=None):
     finally:
         if drawn:   # collapse the menu into one line saying what was chosen
             out.write(f"\x1b[{drawn}A\x1b[J")
-            out.write(_cut(paint("✓ ", "green") + question + " " + paint(options[cur]["label"], "cyan"), w) + "\n")
+            out.write(_cut((paint("✓ ", "green") + question + " " + paint(options[cur]["label"], "cyan")) if chosen
+                           else paint("✗ ", "red") + question + " " + paint("(stopped)", "dim"), w) + "\n")
             out.flush()
         if restore:
             restore()
