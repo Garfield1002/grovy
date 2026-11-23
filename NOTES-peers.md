@@ -1,6 +1,6 @@
 # Peers (multi-machine) — working notes
 
-Branch `peers` (from `https`). Not merged, not pushed: the user reviews and merges.
+Merged into `main` (rebased off `https`, without its HTTPS/push commits).
 
 ## What exists (all committed)
 - `grovylib/peers.py`: peers.json (0600, validated), HTTP over the tunnel's Unix socket (`UnixHTTPConnection`,

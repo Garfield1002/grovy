@@ -737,8 +737,7 @@ PC: grovyd (127.0.0.1:7333) ◄── ssh -R ──── hub: ~/.local/state/gr
 * **Notifications.** On the peer, a stream opened with `?notify=1` (a hub) also receives `{"notify": {session, kind,
   text}}` at each `Store._notify` (browsers' streams never do, so they are unchanged); it is counted apart from the
   browsers at the same address in the per-client stream cap (through the tunnel that address is 127.0.0.1). The hub
-  passes each one to its own `_notify` as `pc:NAME`: `GROVY_NOTIFY_CMD`, and plugins' `notify` callbacks, hence Web
-  Push. After the link was down, a session that now waits on you and didn't before gets one "needs you (while the
+  passes each one to its own `_notify` as `pc:NAME`: `GROVY_NOTIFY_CMD`, and plugins' `notify` callbacks. After the link was down, a session that now waits on you and didn't before gets one "needs you (while the
   link was down)" notification, read from the peer's state. At most 20 per peer per minute of each class are passed
   on (the rest are dropped and logged): "needs you" has a budget of its own, so a burst of "finished" can never
   swallow a permission request; and a peer removed or replaced in peers.json delivers nothing more, even from a stream that was
@@ -847,7 +846,7 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
 * **Peers** (other machines, see "Other machines"):
   * ⋯ → New issue and ⋯ → New project work on the hub only (an issue session that already exists on a peer can be
     finished or discarded from the hub). ⋯ → Extensions, the login link, `custom.css`/`custom.js` are the hub's.
-  * The hub's plugins see peers' sessions only through `notify` (so Web Push works); `grovy.on("event")`,
+  * The hub's plugins see peers' sessions only through `notify`; `grovy.on("event")`,
     `grovy.on("state")`, `grovy.sessions()`, `grovy.session()` and `grovy.send()` cover local sessions only. The hub's
     `grovy` command (`ls`, `attach`, `logs`, `kill`, ...) is local too: the terminal of a peer's session is on the peer.
   * Notifications sent while the link is down are lost; on reconnect only "needs you" is made up for (from the peer's

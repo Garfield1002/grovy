@@ -17,8 +17,8 @@ Live updates. grovy's event stream only says "session X changed" (no event ids: 
 one stream per peer (/api/events?notify=1), refreshes its copy of the peer's session and page lists when it says
 something changed, then tells the phones `pc:X` changed. On every (re)connect it re-fetches everything, so nothing
 can be missed silently: a hint lost while the link was down is replaced by the fresh state. `notify=1` also carries
-the peer's notifications (needs you / finished / failed), which the hub sends on through its own notifier and plugins
-(Web Push). Until a fresh list has arrived, and whenever the link is down, the peer's sessions show `unknown`.
+the peer's notifications (needs you / finished / failed), which the hub sends on through its own notifier and plugins.
+Until a fresh list has arrived, and whenever the link is down, the peer's sessions show `unknown`.
 
 Everything a peer sends is untrusted input, like Claude's output: names and ids are checked before use, answers are
 size-capped, pages keep the hub's PAGE_CSP, downloads are re-served as downloads. Through grovy itself the link only

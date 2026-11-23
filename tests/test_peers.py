@@ -310,7 +310,7 @@ class TestPeerLink(PeerLink):
         self.peer.ingest("a", ev("Stop", last_assistant_message="all done"))
         self.assertTrue(wait_for(lambda: self.hub.notifier.sent))
         self.assertEqual(self.hub.notifier.sent[0][:2], ("pc:a", "done"))
-        self.assertIn(("notify", "pc:a", "done", self.hub.notifier.sent[0][2]), seen)   # Web Push is a plugin
+        self.assertIn(("notify", "pc:a", "done", self.hub.notifier.sent[0][2]), seen)   # plugins' notify callbacks see it
 
     def test_offline_then_recovery(self):
         q = self.subscribe()
