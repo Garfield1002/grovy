@@ -1,12 +1,8 @@
-<img src="assets/logo.png" alt="" width="84" align="left" />
+<h1><img src="assets/logo.png" alt="" width="44" align="top" /> grovy</h1>
 
-<h1>grovy</h1>
-
-**Your agents. One tab away.**<br/>
+**Your Claude sessions, in any browser.**<br/>
 <a href="#install">install</a> · <a href="docs/guide.md">guide</a> · <a href="docs/setup.md">setup</a> ·
 <a href="docs/customize.md">make it yours</a> · <a href="docs/troubleshooting.md">troubleshooting</a>
-
-<br clear="left"/>
 
 <p align="center">
   <img src="docs/img/desktop.png" alt="grovy on a computer: sessions in a sidebar, a conversation with a chart, a published page and a live progress card" height="400" />
