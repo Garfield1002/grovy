@@ -11,8 +11,8 @@ grovy.extension("git", grovy => {
   grovy.css(`
 code.gitref { cursor:pointer; text-decoration:underline dotted; text-underline-offset:3px; color:var(--acc);
   overflow-wrap:anywhere; }
-code.gitref .gstart { white-space:nowrap; }
-code.gitref svg.gi { width:.95em; height:.95em; vertical-align:-.12em; margin-right:.25em; fill:none; stroke:currentColor;
+code.gitref .gstart { white-space:nowrap; }   /* the icon is moved with top, not vertical-align: it can't shift the text */
+code.gitref svg.gi { width:.95em; height:.95em; position:relative; top:.12em; margin-right:.25em; fill:none; stroke:currentColor;
   stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 .gg-head { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; margin:2px 0 10px; font-size:13px; color:var(--mut); }
 .gg-head b { color:var(--fg); font-family:ui-monospace,monospace; font-weight:600; }

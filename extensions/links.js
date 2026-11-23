@@ -1,4 +1,4 @@
-// Links: web links in replies stand out a little. Each gets a small link icon; a bare address is shortened to its
+// Links: web links in replies look like git's links to branches and commits (git.js). Each gets a small link icon; a bare address is shortened to its
 // site and its path, faint (the full address shows on hover); and an address written as `code` becomes a link.
 //
 // A built-in extension that uses only window.grovy. Only http(s) addresses are touched, read with URL() (never as
@@ -7,11 +7,11 @@
 grovy.extension("links", grovy => {
   const {h} = grovy;
   grovy.css(`
-a.lk { text-decoration:none; border-radius:5px; padding:0 3px; margin:0 -1px;
-  background:color-mix(in srgb, var(--acc) 9%, transparent); overflow-wrap:anywhere; }
-a.lk:hover { background:color-mix(in srgb, var(--acc) 17%, transparent); }
-a.lk svg { width:.8em; height:.8em; vertical-align:-.04em; margin-right:.28em; fill:none; stroke:currentColor;
-  stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; }
+a.lk { color:var(--acc); text-decoration:underline dotted; text-underline-offset:3px; overflow-wrap:anywhere; }
+a.lk.bare { font:.88em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background:var(--code); padding:.1em .35em;
+  border-radius:5px; }   /* an address, shown like code; a named link keeps the sentence's font */
+a.lk svg { width:.95em; height:.95em; position:relative; top:.12em; margin-right:.25em; fill:none; stroke:currentColor;
+  stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }   /* as git's links (git.js): the same size and look */
 a.lk .lp { opacity:.65; }`);
   const NS = "http://www.w3.org/2000/svg";
   const icon = () => {   // two chain links
@@ -35,13 +35,16 @@ a.lk .lp { opacity:.65; }`);
     for (const c of node.querySelectorAll("code")) {   // `https://…` in a reply: a link
       if (c.closest("pre, a, button") || c.children.length) continue;
       const t = c.textContent.trim(), u = /^https?:\/\/\S+$/.test(t) && web(t);
-      if (u) c.replaceWith(h("a", {href: u.href, target: "_blank", rel: "noopener noreferrer"}, t));
+      if (u) c.replaceWith(h("a", {href: u.href, target: "_blank", rel: "noopener noreferrer"}, u.href));
     }
     for (const a of node.querySelectorAll("a[href]")) {
       if (a.closest("pre") || a.classList.contains("lk") || !a.closest(".md")) continue;
       const u = web(a.getAttribute("href"));
       if (!u) continue;
-      if (a.textContent === a.getAttribute("href") || a.textContent === u.href) a.replaceChildren(...short(u).filter(Boolean));
+      if (a.textContent === a.getAttribute("href") || a.textContent === u.href) {
+        a.replaceChildren(...short(u).filter(Boolean));
+        a.classList.add("bare");
+      }
       a.title = u.href;
       a.classList.add("lk");
       a.prepend(icon());
