@@ -2240,6 +2240,37 @@ class TestSetupAndCustomCss(unittest.TestCase):
             srv.refresh_index()
             self.assertIn(b"/* dawn */", srv.index)
 
+    def test_an_empty_user_theme_blanks_the_built_in(self):
+        """Second review: the fallback for a broken user theme also caught an empty file, written to blank one."""
+        cfg = tempfile.mkdtemp(dir=TMP)
+        with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": cfg}):
+            os.makedirs(os.path.join(cfg, "themes"))
+            open(os.path.join(cfg, "themes", "nature.css"), "w").close()
+            self.assertEqual(grovyd.theme_css("nature"), b"")
+
+    def test_page_follows_index_html_replaced_within_one_clock_tick(self):
+        """Second review: index.html itself was compared by mtime only; a checkout replacing it within one tick
+        kept the old page."""
+        d = tempfile.mkdtemp(dir=TMP)
+        path = os.path.join(d, "index.html")
+        with open(os.path.join(ROOT, "index.html"), "rb") as f:
+            src = f.read()
+        with open(path, "wb") as f:
+            f.write(src)
+        with mock.patch.object(grovyd, "INDEX_PATH", path), \
+                mock.patch.dict(os.environ, {"GROVY_STATE_DIR": tempfile.mkdtemp(dir=TMP)}):
+            srv = grovyd.HttpServer.__new__(grovyd.HttpServer)
+            srv.index_mtime = None
+            srv.refresh_index()
+            st = os.stat(path)
+            new = src.replace(b"<title>", b"<title>X", 1)
+            with open(path + ".new", "wb") as f:
+                f.write(new)
+            os.replace(path + ".new", path)
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+            srv.refresh_index()
+            self.assertIn(b"<title>X", srv.index)
+
     def test_a_broken_user_theme_falls_back_to_the_built_in(self):
         """Review: a dangling link (or a refused file) named like a built-in theme hid the built-in: the default look."""
         cfg = tempfile.mkdtemp(dir=TMP)
@@ -5706,7 +5737,8 @@ const link = (href, text) => h("a", {href, target: "_blank", rel: "noopener nore
 
     def test_a_shortened_address_still_quotes_and_copies_in_full(self):
         """Review: the short form replaced the link's text, so Quote (innerText) and copying a selection handed on
-        "github.com/o/r/blob/main/s…/file.py#L120": no scheme, a literal "…"."""
+        "github.com/o/r/blob/main/s…/file.py#L120": no scheme, a literal "…". (Checked here on the DOM's text; that
+        it stays inline for innerText is test_the_full_address_stays_inline.)"""
         url = "https://github.com/owner/repo/blob/main/src/very/long/path/to/the/file.py#L120"
         r = self.run_links("""
 const a = link(%s), named = link("https://docs.python.org/3/", "the docs"), c = h("code", {}, "https://www.example.com/x");
@@ -5721,6 +5753,14 @@ console.log(JSON.stringify({text: a.textContent, host: ls.attrs["data-host"], pa
         self.assertEqual(r["path"], "/owner/repo/blob/main/sr…the/file.py#L120")
         self.assertEqual((r["named"], r["namedBare"]), ("the docs", False))   # a named link keeps its words
         self.assertEqual((r["code"], r["codeHost"]), ("https://www.example.com/x", "example.com"))
+
+    def test_the_full_address_stays_inline(self):
+        """Second review: the hidden full address was position:absolute, a block, and innerText (what Quote reads)
+        put line breaks around it: Quote split "See <link> for details." into three quoted lines."""
+        with open(os.path.join(ROOT, "extensions", "links.js"), encoding="utf-8") as f:
+            rule = re.search(r"a\.lk \.lf \{([^}]*)\}", f.read()).group(1)
+        self.assertNotIn("position:absolute", rule)
+        self.assertIn("display:inline-block", rule)
 
     def test_short_form_reads_like_the_address(self):
         r = self.run_links("""

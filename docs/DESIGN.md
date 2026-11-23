@@ -20,7 +20,7 @@ claude ──hooks──► grovy hook NAME ──unix socket──► grovyd �
 | `themes/` | built-in themes for ⋯ → Theme (`nature.css`), CSS like a user's own (see "Making it yours") |
 | `tests/test_grovy.py`, `tests/test_peers.py` | unit + tmux integration tests (`python3 -m unittest discover -s tests`) |
 | `examples/` | systemd unit, Telegram notify script, the generated hook config |
-| `assets/` | icon sizes, the home-screen backdrop and the README's `logo.png`, from [grove](https://github.com/Garfield1002/grove); served without the token from an allowlist (`ASSETS` in `grovyd.py`) |
+| `assets/` | icon sizes and the home-screen backdrop, from [grove](https://github.com/Garfield1002/grove), served without the token from an allowlist (`ASSETS` in `grovyd.py`); `logo.png` is only for the README, not served |
 
 > **Renamed from `ccs`.** On first run, `~/.local/state/ccs` moves to `~/.local/state/grovy`, and a symlink is
 > left behind for sessions started before the rename. `CCS_*` environment variables are still accepted.
@@ -260,7 +260,8 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   off an extension whose daemon plugin stays on (git, push) only hides its page side.
 * **Themes** (⋯ → Theme, home menu) are CSS files: built-in ones in `themes/` in the grovy folder (`nature.css`), the
   user's in `~/.config/grovy/themes/NAME.css` (NAME `[a-z0-9][a-z0-9_-]{0,31}`; one with a built-in's name replaces
-  it, unless it can't be used, e.g. a dangling link or a refused file: then the built-in shows). `POST /api/theme {theme}` (a listed name, or `null` for the default look) saves the choice to `theme.json` in
+  it, unless it can't be used, e.g. a dangling link or a refused file: then the built-in shows; an empty file is used,
+  so it blanks the built-in). `POST /api/theme {theme}` (a listed name, or `null` for the default look) saves the choice to `theme.json` in
   the state dir (under a lock: the temp file of `atomic_write_json` is per process), for every device; the page then reloads. `load_index()` adds the chosen theme as
   `<style id="theme-css">` right after the built-in styles (so before extension styles and `custom.css`, which keep
   the last word), read with the same rules as `custom.css`, and lists the themes and the choice in a

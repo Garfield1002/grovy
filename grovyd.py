@@ -292,7 +292,7 @@ def theme_css(name):
         path = os.path.join(d, name + ".css")
         if os.path.lexists(path):
             css = page_file(path, CUSTOM["custom.css"])
-            if css:
+            if css or (os.path.isfile(path) and os.path.getsize(path) == 0):   # an empty file blanks the theme on purpose
                 return css
     return b""
 
@@ -1183,7 +1183,8 @@ class HttpServer(http.server.ThreadingHTTPServer):
         """Pick up edits to index.html, extensions/, custom.css, custom.js and themes (the files, which exist, and
         the choice) without a daemon restart (CSP hashes included)."""
         try:
-            m = [os.stat(INDEX_PATH).st_mtime_ns]
+            c = os.stat(INDEX_PATH)
+            m = [(c.st_mtime_ns, c.st_size, c.st_ino)]
         except OSError:
             return
         for path in ([custom_path(name) for name in CUSTOM] + builtin_extensions() + [extensions_off_path(), theme_path()]

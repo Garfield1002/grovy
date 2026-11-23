@@ -15,9 +15,10 @@ a.lk svg { width:.95em; height:.95em; position:relative; top:.12em; margin-right
   stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }   /* as git's links (git.js): the same size and look */
 /* a bare address: its short form is drawn from data- attributes, so Quote and copying a selection still get the
    real address, kept as the link's (visually hidden) text */
-a.lk.bare { position:relative; }
 a.lk .ls::before { content:attr(data-host); } a.lk .ls::after { content:attr(data-path); opacity:.65; }
-a.lk .lf { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }`);
+/* inline, not position:absolute: innerText puts line breaks around a block, and Quote split the sentence there */
+a.lk .lf { display:inline-block; vertical-align:bottom; width:1px; height:1px; overflow:hidden; clip-path:inset(50%);
+  white-space:nowrap; }`);
   const NS = "http://www.w3.org/2000/svg";
   const icon = () => {   // two chain links
     const s = document.createElementNS(NS, "svg");
