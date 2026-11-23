@@ -2188,6 +2188,22 @@ class TestSetupAndCustomCss(unittest.TestCase):
                 f.write("[1]")
             self.assertIsNone(grovyd.current_theme())
 
+    def test_a_wrong_grain_value_only_loses_the_texture(self):
+        """Review: `background:var(--grain) var(--bg)` is invalid at computed time when a theme sets --grain to a colour,
+        and the header, composer and panels went transparent. The texture and the colour are set apart."""
+        with open(os.path.join(ROOT, "index.html"), encoding="utf-8") as f:
+            css = re.search(r"<style>(.*?)</style>", f.read(), re.S).group(1)
+        self.assertNotRegex(css, r"background:[^;]*var\(--grain\)")
+        self.assertIn("background-image:var(--grain)", css)
+
+    def test_session_names_stay_on_one_line(self):
+        """Review: the badge and time are centred on the name; a long name wrapped onto two lines and they floated
+        between the lines. A name is one line, cut with an ellipsis (as in the sidebar)."""
+        with open(os.path.join(ROOT, "index.html"), encoding="utf-8") as f:
+            css = re.search(r"<style>(.*?)</style>", f.read(), re.S).group(1)
+        rule = re.search(r"(?m)^\.sess \.name \{([^}]*)\}", css).group(1)
+        self.assertIn("white-space:nowrap", rule)
+
     def test_theme_saves_from_two_requests_at_once_both_succeed(self):
         """Review: set_theme wrote without a lock; atomic_write_json's temp file is per process, so two requests at
         once (a double tap, two devices) shared it: one got FileNotFoundError, a 500."""
