@@ -241,7 +241,10 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
 
 * **Built-in extensions** are `extensions/*.js` in the grovy folder, loaded in file-name order right after grovy's own
   script. They are ordinary features written against `window.grovy` only: `context-bar.js` (the line above the message
-  box, see "Status info"), `git.js` (see "Git"), `issues.js` (see "Issues"), `math.js` (see "Math"), `swatch.js` (a dot of the colour in front of inline code that is exactly a hex colour,
+  box, see "Status info"), `git.js` (see "Git"), `issues.js` (see "Issues"), `links.js` (http(s) links in replies get an icon and a tint; a bare address shows as
+  its host in bold and its path, the middle of a long one cut, the full address as the title; inline code that is
+  exactly an address becomes a link, `target=_blank` and `rel=noopener noreferrer` like markdown's; the address is read
+  with `URL()` and only http(s) is touched), `math.js` (see "Math"), `swatch.js` (a dot of the colour in front of inline code that is exactly a hex colour,
   `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`: the only thing put in its `style`, after that check; code blocks are left
   alone) and `widgets.js` (the widget types, see "Widgets"). Each registers with `grovy.extension(name, setup, {about})`; the setups run at start-up,
   after `custom.js`, so `grovy.disable(name)` there turns one off (or replace it: disable it and copy it under another
