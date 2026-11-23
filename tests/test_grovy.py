@@ -3,6 +3,7 @@
 No API key needed: integration tests use a fake `claude` (a shell loop) inside real tmux,
 on a private tmux server socket (-L) so your own tmux sessions are never touched.
 """
+import atexit
 import base64
 import collections
 import io
@@ -29,6 +30,9 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 TMP = tempfile.mkdtemp(prefix="grovy-test-", dir="/tmp")  # short path: AF_UNIX limit
+# Removed when the run ends, pass or fail: each run leaves thousands of files, and /tmp is a tmpfs with few inodes
+# (189 leftover runs once filled it, and every test that writes a file failed). A kill -9 still leaves it behind.
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)
 os.environ["GROVY_STATE_DIR"] = os.path.join(TMP, "state")
 # Never let a test reach the real ~/.local/state (default_state_dir() migrates ~/.local/state/ccs on first use).
 os.environ["XDG_STATE_HOME"] = os.path.join(TMP, "xdg")
@@ -50,6 +54,16 @@ setupflow.UNIT = os.path.join(TMP, "home-units", "grovy.service")
 
 def ev(name, **kw):
     return {"hook_event_name": name, "session_id": kw.pop("sid", "S1"), **kw}
+
+
+class TestRunCleanup(unittest.TestCase):
+    def test_the_runs_temporary_folder_is_removed_at_exit(self):
+        code = "import test_grovy, os; open(os.path.join(test_grovy.TMP, 'f'), 'w').close(); print(test_grovy.TMP)"
+        r = subprocess.run([sys.executable, "-c", code], cwd=os.path.dirname(os.path.abspath(__file__)),
+                           capture_output=True, text=True, timeout=60)
+        tmp = r.stdout.strip().splitlines()[-1]
+        self.assertTrue(tmp.startswith("/tmp/grovy-test-"), r.stderr)
+        self.assertFalse(os.path.exists(tmp))
 
 
 class StoreCase(unittest.TestCase):
