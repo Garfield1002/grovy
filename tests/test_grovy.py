@@ -9,6 +9,7 @@ import collections
 import io
 import ipaddress
 import json
+import random
 import re
 import os
 import shutil
@@ -2186,6 +2187,50 @@ class TestSetupAndCustomCss(unittest.TestCase):
             with open(grovyd.theme_path(), "w") as f:
                 f.write("[1]")
             self.assertIsNone(grovyd.current_theme())
+
+    def test_theme_saves_from_two_requests_at_once_both_succeed(self):
+        """Review: set_theme wrote without a lock; atomic_write_json's temp file is per process, so two requests at
+        once (a double tap, two devices) shared it: one got FileNotFoundError, a 500."""
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": tempfile.mkdtemp(dir=TMP)}):
+            codes = []
+            def hammer():
+                for _ in range(150):
+                    codes.append(grovyd.set_theme(random.choice(["nature", None]))[0])
+            threads = [threading.Thread(target=hammer) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(set(codes), {200})
+            self.assertIn(grovyd.current_theme(), ("nature", None))
+
+    def test_page_follows_a_theme_change_within_one_clock_tick(self):
+        """Review: the reload check compared mtime and size only; two names of the same length saved within one
+        mtime tick looked like no change, and the page kept the old theme."""
+        cfg = tempfile.mkdtemp(dir=TMP)
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": tempfile.mkdtemp(dir=TMP), "GROVY_CONFIG_DIR": cfg}):
+            os.makedirs(os.path.join(cfg, "themes"))
+            for name in ("dusk", "dawn"):
+                with open(os.path.join(cfg, "themes", name + ".css"), "w") as f:
+                    f.write(f"/* {name} */")
+            srv = grovyd.HttpServer.__new__(grovyd.HttpServer)
+            srv.index_mtime = None
+            grovyd.set_theme("dusk")
+            st = os.stat(grovyd.theme_path())
+            srv.refresh_index()
+            self.assertIn(b"/* dusk */", srv.index)
+            grovyd.set_theme("dawn")
+            os.utime(grovyd.theme_path(), ns=(st.st_atime_ns, st.st_mtime_ns))   # the same tick, the same size
+            srv.refresh_index()
+            self.assertIn(b"/* dawn */", srv.index)
+
+    def test_a_broken_user_theme_falls_back_to_the_built_in(self):
+        """Review: a dangling link (or a refused file) named like a built-in theme hid the built-in: the default look."""
+        cfg = tempfile.mkdtemp(dir=TMP)
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": tempfile.mkdtemp(dir=TMP), "GROVY_CONFIG_DIR": cfg}):
+            os.makedirs(os.path.join(cfg, "themes"))
+            os.symlink(os.path.join(cfg, "nowhere.css"), os.path.join(cfg, "themes", "nature.css"))
+            self.assertIn(b"--title-font", grovyd.theme_css("nature"))
 
     def test_page_sizes_boxes_with_their_padding(self):
         """The themes rework dropped `* { box-sizing:border-box }` with the colour block above it: every width:100%
@@ -5605,6 +5650,72 @@ const box = new Box(), a = new Node("a"), b = new Node("b");
 paint(box, a, b); paint(box, b, "hi", a);
 console.log(JSON.stringify(box.childNodes.map(x => x.n)));""")
         self.assertEqual(r, ["b", "text:hi", "a"])
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestLinksExtension(unittest.TestCase):
+    """extensions/links.js, run in node on a minimal DOM: what a reply's links become."""
+    HARNESS = r"""
+class El { constructor(tag, attrs = {}) { this.tag = tag; this.attrs = {...attrs}; this.kids = []; this.parent = null;
+    this.cls = new Set((attrs.class || "").split(" ").filter(Boolean));
+    this.classList = {add: c => this.cls.add(c), contains: c => this.cls.has(c)}; }
+  get children() { return this.kids.filter(k => k instanceof El); }
+  get textContent() { return this.kids.map(k => typeof k === "string" ? k : k.textContent).join(""); }
+  getAttribute(k) { return this.attrs[k] ?? null; } setAttribute(k, v) { this.attrs[k] = String(v); }
+  set title(v) { this.attrs.title = v; }
+  append(...ks) { for (const k of ks) { if (k instanceof El) k.parent = this; this.kids.push(k); } }
+  prepend(k) { if (k instanceof El) k.parent = this; this.kids.unshift(k); }
+  replaceChildren(...ks) { this.kids = []; this.append(...ks); }
+  replaceWith(x) { const p = this.parent; p.kids[p.kids.indexOf(this)] = x; x.parent = p; }
+  matches(sel) { return sel.split(",").some(s => { s = s.trim();
+    const [, tag, cls] = /^([a-z]*)(?:\.([\w-]+))?/.exec(s); return (!tag || tag === this.tag) && (!cls || this.cls.has(cls)); }); }
+  closest(sel) { for (let e = this; e; e = e.parent) if (e.matches(sel)) return e; return null; }
+  querySelectorAll(sel) { const out = [], walk = e => { for (const k of e.children) {
+      if (sel === "a[href]" ? k.tag === "a" && "href" in k.attrs : k.tag === sel) out.push(k); walk(k); } };
+    walk(this); return out; } }
+const document = {createElementNS: (ns, tag) => new El(tag)};
+const h = (tag, attrs, ...kids) => { const e = new El(tag, attrs || {}); e.append(...kids.flat().filter(k => k != null)); return e; };
+let hook;
+const grovy = {h, css() {}, on: (name, fn) => { hook = fn; }, extension: (name, setup) => setup(grovy)};
+const md = h("div", {class: "md"});
+const link = (href, text) => h("a", {href, target: "_blank", rel: "noopener noreferrer"}, text ?? href);
+"""
+
+    def run_links(self, body):
+        with open(os.path.join(ROOT, "extensions", "links.js"), encoding="utf-8") as f:
+            src = f.read()
+        out = subprocess.run(["node", "-e", self.HARNESS + src + body], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_a_shortened_address_still_quotes_and_copies_in_full(self):
+        """Review: the short form replaced the link's text, so Quote (innerText) and copying a selection handed on
+        "github.com/o/r/blob/main/s…/file.py#L120": no scheme, a literal "…"."""
+        url = "https://github.com/owner/repo/blob/main/src/very/long/path/to/the/file.py#L120"
+        r = self.run_links("""
+const a = link(%s), named = link("https://docs.python.org/3/", "the docs"), c = h("code", {}, "https://www.example.com/x");
+md.append(a, named, c); hook(md);
+const ls = a.querySelectorAll("span").find(s => s.cls.has("ls"));
+const c2 = md.querySelectorAll("a[href]")[2];
+console.log(JSON.stringify({text: a.textContent, host: ls.attrs["data-host"], path: ls.attrs["data-path"],
+  named: named.textContent, namedBare: named.cls.has("bare"), code: c2.textContent, codeHost:
+  c2.querySelectorAll("span").find(s => s.cls.has("ls")).attrs["data-host"]}));""" % json.dumps(url))
+        self.assertEqual(r["text"], url)                         # what Quote and a copied selection read
+        self.assertEqual(r["host"], "github.com")                # what is drawn
+        self.assertEqual(r["path"], "/owner/repo/blob/main/sr…the/file.py#L120")
+        self.assertEqual((r["named"], r["namedBare"]), ("the docs", False))   # a named link keeps its words
+        self.assertEqual((r["code"], r["codeHost"]), ("https://www.example.com/x", "example.com"))
+
+    def test_short_form_reads_like_the_address(self):
+        r = self.run_links("""
+const out = {};
+for (const u of ["https://fr.wikipedia.org/wiki/%C3%89t%C3%A9", "https://www.com/", "https://good.com@evil.com/"]) {
+  const a = link(u); md.append(a); hook(md);
+  const ls = a.querySelectorAll("span").find(s => s.cls.has("ls")); out[u] = ls.attrs["data-host"] + ls.attrs["data-path"]; }
+console.log(JSON.stringify(out));""")
+        self.assertEqual(r["https://fr.wikipedia.org/wiki/%C3%89t%C3%A9"], "fr.wikipedia.org/wiki/Été")
+        self.assertEqual(r["https://www.com/"], "www.com")          # only a "www." before a real domain goes
+        self.assertEqual(r["https://good.com@evil.com/"], "evil.com")   # the host it really goes to
 
 
 @unittest.skipUnless(shutil.which("node"), "node not installed")

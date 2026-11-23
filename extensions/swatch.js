@@ -21,4 +21,4 @@ code.swatch .sw { display:inline-block; width:.8em; height:.8em; border-radius:5
       c.prepend(dot);
     }
   });
-}, {about: "A dot of the colour next to #rrggbb codes"});
+}, {about: "A dot of the colour next to hex colour codes"});

@@ -253,6 +253,7 @@ def set_extension(name, on):
 # choice is kept in the state dir, for every device; none (or a theme that is gone) means grovy's default look.
 THEMES_DIR = os.path.join(core.HERE, "themes")
 THEME_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+theme_lock = threading.Lock()   # atomic_write_json's temp file is per process, not per thread
 
 
 def theme_dirs():
@@ -283,13 +284,16 @@ def theme_files():
 
 
 def theme_css(name):
-    """The CSS of theme `name` (the user's file if there is one), or b"" (see page_file)."""
+    """The CSS of theme `name`: the user's file if there is a usable one, else the built-in, else b"" (see
+    page_file; a user's file that is refused, or a dangling link, falls back to the built-in of that name)."""
     if not name or not THEME_NAME.fullmatch(name):
         return b""
     for d in theme_dirs():
         path = os.path.join(d, name + ".css")
         if os.path.lexists(path):
-            return page_file(path, CUSTOM["custom.css"])
+            css = page_file(path, CUSTOM["custom.css"])
+            if css:
+                return css
     return b""
 
 
@@ -311,7 +315,8 @@ def set_theme(name):
     if name is not None and (not isinstance(name, str) or name not in themes()):
         return 400, {"error": "no such theme"}
     try:
-        core.atomic_write_json(theme_path(), {"theme": name})
+        with theme_lock:
+            core.atomic_write_json(theme_path(), {"theme": name})
     except OSError as e:
         return 500, {"error": f"couldn't save it: {e}"}
     return 200, {"theme": name}
@@ -1184,8 +1189,8 @@ class HttpServer(http.server.ThreadingHTTPServer):
         for path in ([custom_path(name) for name in CUSTOM] + builtin_extensions() + [extensions_off_path(), theme_path()]
                      + theme_files()):
             try:
-                c = os.stat(path)
-                m.append((path, c.st_mtime_ns, c.st_size))
+                c = os.stat(path)   # the inode too: a save replaces the file, maybe within one mtime tick, same size
+                m.append((path, c.st_mtime_ns, c.st_size, c.st_ino))
             except OSError:
                 m.append(None)
         if m != self.index_mtime:

@@ -17,9 +17,10 @@ claude ──hooks──► grovy hook NAME ──unix socket──► grovyd �
 | `index.html` | the whole UI (vanilla JS, no innerHTML); a map of its parts opens its script |
 | `sw.js` | the service worker, served at `/sw.js`: shows push notifications and opens their session; caches nothing |
 | `plugins/` | built-in daemon plugins (`git.py`, `push.py`), written against the plugin `Api` like a user's own |
+| `themes/` | built-in themes for ⋯ → Theme (`nature.css`), CSS like a user's own (see "Making it yours") |
 | `tests/test_grovy.py`, `tests/test_peers.py` | unit + tmux integration tests (`python3 -m unittest discover -s tests`) |
 | `examples/` | systemd unit, Telegram notify script, the generated hook config |
-| `assets/` | icon sizes and the home-screen backdrop, from [grove](https://github.com/Garfield1002/grove); served without the token from an allowlist (`ASSETS` in `grovyd.py`) |
+| `assets/` | icon sizes, the home-screen backdrop and the README's `logo.png`, from [grove](https://github.com/Garfield1002/grove); served without the token from an allowlist (`ASSETS` in `grovyd.py`) |
 
 > **Renamed from `ccs`.** On first run, `~/.local/state/ccs` moves to `~/.local/state/grovy`, and a symlink is
 > left behind for sessions started before the rename. `CCS_*` environment variables are still accepted.
@@ -259,15 +260,15 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   off an extension whose daemon plugin stays on (git, push) only hides its page side.
 * **Themes** (⋯ → Theme, home menu) are CSS files: built-in ones in `themes/` in the grovy folder (`nature.css`), the
   user's in `~/.config/grovy/themes/NAME.css` (NAME `[a-z0-9][a-z0-9_-]{0,31}`; one with a built-in's name replaces
-  it). `POST /api/theme {theme}` (a listed name, or `null` for the default look) saves the choice to `theme.json` in
-  the state dir, for every device; the page then reloads. `load_index()` adds the chosen theme as
+  it, unless it can't be used, e.g. a dangling link or a refused file: then the built-in shows). `POST /api/theme {theme}` (a listed name, or `null` for the default look) saves the choice to `theme.json` in
+  the state dir (under a lock: the temp file of `atomic_write_json` is per process), for every device; the page then reloads. `load_index()` adds the chosen theme as
   `<style id="theme-css">` right after the built-in styles (so before extension styles and `custom.css`, which keep
   the last word), read with the same rules as `custom.css`, and lists the themes and the choice in a
   `<meta name="grovy-theme">` tag. A choice whose file is gone or refused means the default look. The default look
   has a few tokens only themes need: `--title-font` (titles, session names, reply headings, widget titles, section
   labels), `--grain` (an image under the page and its bars), `--tree` and `--tree-opacity` (the backdrop). Themes
-  may restyle anything else too, but only the tokens are a stable API. The logo, the icons and the working dot are
-  grovy's own and not themed (the logo is a mask filled with `--fg`).
+  may restyle anything else too, but only the tokens are a stable API. The logo, the icons and the working dot keep
+  their shapes: they only take the theme's colours (the logo is a mask filled with `--fg`, the dot is `--busy`).
 * **`custom.css`** is added after the built-in styles (a later rule with the same selector wins).
 * **`custom.js`** is added after the built-in extensions, as its own inline `<script>`. It is documented in
   `examples/custom.js`. `window.grovy` is a frozen object defined in the "extensions" part of `index.html`:
@@ -339,7 +340,7 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   * A plugin that failed can't use its `Api` any more, even from a thread it left running.
   * A callback or route that raises is logged (a route answers 500), and the rest carries on.
 
-The daemon rereads `extensions/`, `custom.css`, `custom.js`, the theme folders and `theme.json` when they change (next page reload, no restart). Each
+The daemon rereads `extensions/`, `custom.css`, `custom.js`, the theme folders and `theme.json` when they change (mtime, size or inode: a save replaces the file; next page reload, no restart). Each
 script's CSP hash is computed from exactly the block grovyd inserts, so nothing is loosened: only that text runs.
 grovyd skips a file, with a line in the log, when it:
 * is not a regular file;

@@ -11,7 +11,7 @@
      --bad:#c2402f;   deny, errors         --busy:#3a6fd8; working
      --c1 … --c6:     chart series colours
      --title-font:inherit;  titles and headings     --grain:none;  a texture under the page (an image)
-     --tree:var(--faint);   the backdrop tree       --tree-opacity:.22; */
+     --tree:var(--faint);   the backdrop tree (dark: var(--mut))       --tree-opacity:.22; */
 }
 /* Dark theme (when the phone is in dark mode): */
 @media (prefers-color-scheme: dark) {
