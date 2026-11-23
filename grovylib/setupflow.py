@@ -460,7 +460,8 @@ def _setup_graft(a, rec, total):
     tui.say()
     if not systemd:
         tui.warn("no systemd user session here: start grovy and the tunnel yourself, e.g. in tmux:")
-        tui.say(f"    tmux new -d -s grovyd 'GROVY_PORT={port} {os.path.join(core.HERE, 'grovy')} serve'")
+        tui.say(f"    tmux new -d -s grovyd '{'GROVY_TERMINAL=on ' if term else ''}GROVY_PORT={port} "
+                f"{os.path.join(core.HERE, 'grovy')} serve'")
         tui.say(f"    {graft.tunnel_command(trunk, name, port)}")
     tui.note(f"  waiting for {trunk} to see this computer…")
     if graft.wait_online(trunk, name):

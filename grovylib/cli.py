@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 
 from . import cleanup, client, core, hook, install, projects, remote, scriptlib, sessions, setupflow, tmuxctl
@@ -15,13 +16,11 @@ def cmd_ls(a):
         kind, where = remote.resolve(machine.rstrip(":"))
         if kind == "trunk":
             return remote.on_trunk(where, ["ls"])
-        rows, notes = remote.peer_lines()
-        rows = [r for r in rows if r[0].startswith(machine.rstrip(":") + ":")]
+        rows, notes = remote.peer_lines(machine.rstrip(":"))
         for r in rows:
             print(f"{r[0]:<16} {r[1]:<12} {r[2]}")
         for n in notes:
-            if n.startswith(machine.rstrip(":") + ":"):
-                print(n, file=sys.stderr)
+            print(n, file=sys.stderr)
         return 0
     reg, live = sessions.registry(), tmuxctl.tmux_managed()
     try:
@@ -29,13 +28,11 @@ def cmd_ls(a):
     except (OSError, ValueError):
         status = None
     names = sorted(set(reg) | set(live))
-    rows, notes = remote.peer_lines()   # a trunk's grafts (none: nothing)
-    if not names and not rows:
-        print("no sessions")
-        for n in notes:
-            print(n, file=sys.stderr)
-        return 0
-    print(f"{'NAME':<16} {'STATE':<12} PATH")
+    got = {}
+    asking = threading.Thread(target=lambda: got.update(zip(("rows", "notes"), remote.peer_lines())), daemon=True)
+    asking.start()   # a trunk's grafts, asked while this machine's own sessions are printed
+    if names:
+        print(f"{'NAME':<16} {'STATE':<12} PATH")
     for n in names:
         if n not in live:
             st = "exited"
@@ -44,8 +41,15 @@ def cmd_ls(a):
         else:
             st = status.get(n, {}).get("state", "unknown")
         print(f"{n:<16} {st:<12} {reg.get(n, {}).get('cwd', '?')}")
+    sys.stdout.flush()
+    asking.join()
+    rows, notes = got.get("rows", []), got.get("notes", [])
+    if rows and not names:
+        print(f"{'NAME':<16} {'STATE':<12} PATH")
     for r in rows:
         print(f"{r[0]:<16} {r[1]:<12} {r[2]}")
+    if not names and not rows:
+        print("no sessions")
     for n in notes:
         print(n, file=sys.stderr)
     if status is None:

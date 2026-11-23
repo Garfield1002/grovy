@@ -928,8 +928,8 @@ class Http(http.server.BaseHTTPRequestHandler):
             return self._err(404, f"no live session {name!r} here")
         def num(h, d):
             v = self.headers.get(h, "")
-            return int(v) if v.isdigit() and 1 <= int(v) <= 1000 else d
-        term = self.headers.get("X-Term", "")
+            return int(v) if v.isascii() and v.isdigit() and 1 <= int(v) <= 1000 else d
+        rows, cols, term = num("X-Rows", 24), num("X-Cols", 80), self.headers.get("X-Term", "")
         self.close_connection = True
         self.send_response(101)
         self.send_header("Upgrade", terminal.UPGRADE)
@@ -938,10 +938,9 @@ class Http(http.server.BaseHTTPRequestHandler):
         self.wfile.flush()
         print(f"grovyd: terminal opened on {name}", file=sys.stderr, flush=True)
         try:
-            terminal.serve(self.connection, name, num("X-Rows", 24), num("X-Cols", 80),
-                           term if terminal.TERM_RE.fullmatch(term) else "xterm-256color")
-        except OSError:
-            pass
+            terminal.serve(self.connection, name, rows, cols, term)
+        except Exception as e:   # the stream is ours now: never a traceback into the handler
+            print(f"grovyd: terminal on {name} ended: {e}", file=sys.stderr, flush=True)
         print(f"grovyd: terminal closed on {name}", file=sys.stderr, flush=True)
 
     def _sse(self):

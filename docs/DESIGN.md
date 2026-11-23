@@ -787,14 +787,23 @@ session can publish pages but can't make one public.
 names never hold a colon). On a trunk, MACHINE is a graft from peers.json: `attach`, `logs`, `kill`, `resume`,
 `forget`, `rename`, `new` (no extra claude arguments, no `--fresh`) go straight to that graft's grovy through its
 tunnel socket with the token from peers.json (`peers.Peer` without a hub; the daemon isn't involved), and `grovy ls`
-lists every graft's sessions after the local ones (`grovy ls pc`: that graft's only; an offline graft is a line on
-stderr). On a graft, MACHINE is `trunk`: the command runs there as `ssh [-t] TRUNK sh -c 'exec grovy …'` with your
+lists every graft's sessions after the local ones, which it prints first: the grafts are asked at once, 4s each, so
+one asleep behind its tunnel can't stall it (`grovy ls pc`: that graft only; an unreachable graft, or a peers.json
+problem, is a line on stderr). What a graft says is untrusted, like Claude's output: names are checked, and states,
+folders, errors and `logs` text are stripped of control characters before they reach the terminal. `rename` can't
+move a session between machines; `new` needs an absolute folder (it is resolved on the other machine). On a graft, MACHINE is `trunk`: the command runs there as `ssh [-t] TRUNK sh -c 'exec grovy …'` with your
 usual ssh (the tunnel's key can't run commands). `logs` reads `GET /api/sessions/NAME/screen?lines=N` (X-Grovy).
 **attach** (`grovylib/terminal.py`): `POST /api/sessions/NAME/terminal` with the token, `X-Grovy: 1` and `Upgrade:
 grovy-terminal` (a browser can't send Upgrade) gets `101`, then the graft's grovyd runs `tmux attach-session -t
 =grovy-NAME` in a pseudo-terminal (TERM and size from `X-Term`/`X-Rows`/`X-Cols`) and relays it: its output as
 raw bytes; input as frames (type byte, 2-byte length; type 0 keys, type 1 rows+cols). Detaching (C-b d) or the
-session ending closes it; either side closing kills the attach. Only with `GROVY_TERMINAL=on` in the graft's
+session ending closes it; either side closing kills the attach. A TERM the graft has no terminfo entry for (kitty,
+ghostty...) becomes `xterm-256color` (tmux would refuse it). The child's environment and argv are built before the
+fork (`execvpe`); when the relay ends the pty is closed first and the tmux client gets SIGHUP, then SIGKILL after 3s
+(a hung tmux server can't keep the thread and its connection slot). On the trunk, `~.` at the start of a line ends
+it from there, as in ssh (`~~` sends a `~`); SIGTERM ends it cleanly; an end tmux didn't clean up after (`~.`, a
+dropped link, a signal) resets the terminal (alternate screen, mouse, bracketed paste, cursor) and says why. The
+size is the terminal's own (`os.get_terminal_size` on stdin). Only with `GROVY_TERMINAL=on` in the graft's
 environment (setup asks a graft, default yes, and writes it into the unit): it is a full terminal (tmux runs
 commands), so whoever holds the token, i.e. the trunk, can then run anything as you on the graft. Off, the trunk
 still lists, starts, stops and messages the sessions, as the phone does.

@@ -7,7 +7,10 @@
   * on a graft, MACHINE is `trunk`: the command runs on the trunk over your usual ssh (`ssh -t TRUNK grovy ...`).
 `grovy ls` on a trunk lists its grafts' sessions after its own; `grovy ls trunk` on a graft lists the trunk's.
 """
+import http.client
+import json
 import os
+import re
 import shlex
 import sys
 
@@ -54,18 +57,33 @@ def _call(peer, method, path, body=None):
     try:
         code, obj = peer.call(method, path, body)
     except peers.PeerError as e:
-        core.die(str(e))
+        core.die(terminal.clean(e))
     if code != 200:
-        core.die(f"{peer.name}: {obj.get('error') or f'HTTP {code}'}")
+        core.die(f"{peer.name}: {terminal.clean(obj.get('error') or f'HTTP {code}')}")
     return obj
 
 
 def run(a):
+    try:
+        return _run(a)
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
+
+
+def _run(a):
     """A COMMANDS command whose session is MACHINE:NAME."""
     machine, name = split(a.name)
     if not core.valid_name(name):
         core.die(f"bad session name {name!r}")
     kind, where = resolve(machine)
+    if a.cmd == "rename":
+        nm, new = split(a.new)
+        if nm not in (None, machine):
+            core.die(f"a session can't move between machines ({machine} -> {nm})")
+        a.new = new
+    if a.cmd == "new" and not a.path.startswith("/"):
+        core.die(f"give the folder on {machine} as an absolute path (it is resolved there, not here)")
     if kind == "trunk":
         argv = {"attach": ["attach", name], "logs": ["logs", name, "-n", str(getattr(a, "lines", 200))],
                 "kill": ["kill", name], "forget": ["forget", name],
@@ -80,8 +98,9 @@ def run(a):
             return terminal.attach(peer, name)
         except (RuntimeError, OSError) as e:
             core.die(str(e))
-    if a.cmd == "logs":
-        sys.stdout.write(_call(peer, "GET", f"{q}/screen?lines={int(a.lines)}").get("text", ""))
+    if a.cmd == "logs":   # the pane's text, cleaned of escape sequences (untrusted: it comes from another machine)
+        text = str(_call(peer, "GET", f"{q}/screen?lines={int(a.lines)}").get("text", ""))
+        sys.stdout.write(re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "?", text))
         return 0
     if a.cmd in ("kill", "forget"):
         _call(peer, "POST", f"{q}/{a.cmd}", {})
@@ -90,10 +109,10 @@ def run(a):
     if a.cmd == "resume":
         if a.fresh:
             core.die("--fresh works on the machine itself only (the API resumes the conversation)")
-        print(_call(peer, "POST", f"{q}/resume", {}).get("ok") or f"resumed {machine}:{name}")
+        print(terminal.clean(_call(peer, "POST", f"{q}/resume", {}).get("ok") or f"resumed {machine}:{name}"))
         return 0
     if a.cmd == "rename":
-        _, new = split(a.new)
+        new = a.new
         if not core.valid_name(new):
             core.die(f"bad session name {a.new!r}")
         _call(peer, "POST", f"{q}/rename", {"name": new})
@@ -108,21 +127,37 @@ def run(a):
     core.die(f"{a.cmd} doesn't work on another machine")
 
 
-def peer_lines():
-    """Rows for `grovy ls` on a trunk: each graft's sessions, or why it can't be listed."""
-    conf, _ = peers.read_config()
-    rows, notes = [], []
-    for name in sorted(conf):
+LS_TIMEOUT = 4   # seconds a graft gets to answer `grovy ls` (one that's asleep must not stall it)
+
+
+def peer_lines(only=None):
+    """Rows for `grovy ls` on a trunk: each graft's sessions, or why it can't be listed. The grafts are asked at
+    once, each with a short timeout; everything they say is cleaned before it is printed (it is untrusted)."""
+    import concurrent.futures
+    conf, problems = peers.read_config()
+    notes = [f"peers.json: {terminal.clean(p)}" for p in problems]
+    names = [n for n in sorted(conf) if only in (None, n)]
+
+    def one(name):
         p = peers.Peer(name, conf[name], None)
         try:
-            code, obj = p.call("GET", "/api/sessions")
-        except peers.PeerError as e:
-            notes.append(f"{name}: {e}")
-            continue
-        if code != 200 or not isinstance(obj.get("sessions"), list):
-            notes.append(f"{name}: {obj.get('error') or f'HTTP {code}'}")
-            continue
-        for s in obj["sessions"]:
-            if isinstance(s, dict) and core.valid_name(s.get("name")):
-                rows.append((f"{name}:{s['name']}", str(s.get("state", "unknown"))[:12], str(s.get("cwd", "?"))))
+            c, r = p.open("GET", "/api/sessions", timeout=LS_TIMEOUT)
+            try:
+                raw = r.read(peers.ANSWER_MAX + 1)
+            finally:
+                c.close()
+            obj = json.loads(raw)
+        except (peers.PeerError, OSError, ValueError, http.client.HTTPException) as e:
+            return [], [f"{name}: {terminal.clean(e)}"]
+        if r.status != 200 or not isinstance(obj, dict) or not isinstance(obj.get("sessions"), list):
+            err = obj.get("error") if isinstance(obj, dict) else None
+            return [], [f"{name}: {terminal.clean(err or f'HTTP {r.status}')}"]
+        return [(f"{name}:{s['name']}", terminal.clean(s.get("state", "unknown"))[:12], terminal.clean(s.get("cwd", "?")))
+                for s in obj["sessions"] if isinstance(s, dict) and core.valid_name(s.get("name"))], []
+    rows = []
+    if names:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(names))) as ex:
+            for r, n in ex.map(one, names):
+                rows += r
+                notes += n
     return rows, notes

@@ -532,6 +532,80 @@ class TestRemoteCli(PeerLink):
         with self.assertRaises(SystemExit):
             remote.resolve("nope")
 
+    def test_ls_doesnt_wait_on_a_graft_that_never_answers(self):
+        """Review: a graft asleep behind its tunnel (the socket accepts, nothing answers) made `grovy ls` wait 20s
+        per graft before printing even the local sessions."""
+        dead = os.path.join(self.dir, "dead.sock")
+        srv = socket.socket(socket.AF_UNIX)
+        old = os.umask(0o177)
+        srv.bind(dead)
+        os.umask(old)
+        srv.listen(8)
+        self.addCleanup(srv.close)
+        peers.write_config({"pc": {"socket": self.sock, "token": PEER_TOKEN, "tls": False},
+                            "sleepy": {"socket": dead, "token": PEER_TOKEN, "tls": False},
+                            "sleepy2": {"socket": dead, "token": PEER_TOKEN, "tls": False}}, self.conf)
+        t = time.monotonic()
+        rows, notes = remote.peer_lines()
+        self.assertLess(time.monotonic() - t, remote.LS_TIMEOUT + 2)    # in parallel, short timeout
+        self.assertIn("pc:a", [r[0] for r in rows])
+        self.assertEqual(sorted(n.split(":")[0] for n in notes), ["sleepy", "sleepy2"])
+        t = time.monotonic()
+        rows, notes = remote.peer_lines("pc")                        # one graft: only that one is asked
+        self.assertLess(time.monotonic() - t, 2)
+        self.assertEqual(notes, [])
+
+    def test_what_a_graft_says_is_cleaned_before_it_is_printed(self):
+        """Review: a hostile graft's cwd reached the trunk's terminal raw (OSC 52 could write the clipboard)."""
+        evil = "/x\x1b]52;c;cHduZWQ=\x07\x1b[2Kfake"
+        with mock.patch.object(peers.Peer, "open") as op:
+            r = mock.Mock(status=200)
+            r.read.return_value = json.dumps({"sessions": [{"name": "a", "state": "\x1b[31midle", "cwd": evil}]}).encode()
+            op.return_value = (mock.Mock(), r)
+            rows, _ = remote.peer_lines("pc")
+        self.assertNotIn("\x1b", "".join(rows[0]))
+        self.assertNotIn("\x07", "".join(rows[0]))
+
+    def test_an_unknown_term_falls_back(self):
+        """Review: a TERM the graft had no terminfo for (kitty, ghostty...) made tmux refuse, and attach said 0."""
+        self.assertEqual(terminal.pick_term("xterm-ghostty-nope"), "xterm-256color")
+        self.assertEqual(terminal.pick_term("bad/term"), "xterm-256color")
+        if terminal.has_terminfo("xterm"):
+            self.assertEqual(terminal.pick_term("xterm"), "xterm")
+
+    def test_tilde_dot_ends_it_from_here_and_resets_the_terminal(self):
+        out, code = self.attach_in_pty([b"\r~.", b""], b"")
+        self.assertEqual(code, 0, out[-300:])
+        self.assertIn(b"closed with ~.", out)
+        self.assertIn(terminal.RESET, out)
+
+    def test_odd_size_headers_dont_break_the_relay(self):
+        """Review: a latin-1 digit passed isdigit() but not int(), after the 101 was sent."""
+        with mock.patch.dict(os.environ, {"GROVY_TERMINAL": "on"}):
+            c = self.peerc.connection()
+            c.connect()
+            c.sock.sendall(("POST /api/sessions/t1/terminal HTTP/1.1\r\nHost: localhost\r\n"
+                            f"Authorization: Bearer {PEER_TOKEN}\r\nX-Grovy: 1\r\nUpgrade: grovy-terminal\r\n"
+                            "X-Rows: \xb2\r\nContent-Length: 0\r\n\r\n").encode("latin-1"))
+            got, end = b"", time.time() + 5
+            while time.time() < end and (b" 101 " not in got or len(got.partition(b"\r\n\r\n")[2]) < 10):
+                r, _, _ = select.select([c.sock], [], [], 0.2)
+                if r:
+                    d = c.sock.recv(4096)
+                    if not d:
+                        break
+                    got += d
+            c.close()
+        self.assertIn(b" 101 ", got)
+        self.assertGreater(len(got.partition(b"\r\n\r\n")[2]), 10)   # and then the terminal itself (tmux drew)
+
+    def test_rename_and_new_guard_against_machine_mixups(self):
+        """Review: `rename pc:a lap:b` quietly renamed on pc; `new pc:x .` was resolved on the other machine."""
+        with self.assertRaises(SystemExit):
+            remote.run(types.SimpleNamespace(cmd="rename", name="pc:a", new="lap:b"))
+        with self.assertRaises(SystemExit):
+            remote.run(types.SimpleNamespace(cmd="new", name="pc:x", path=".", claude_args=[]))
+
     def test_trunk_commands_go_over_ssh(self):
         with mock.patch.object(remote, "trunk_host", lambda: "me@hub"), mock.patch.object(os, "execvp") as ex:
             remote.run(types.SimpleNamespace(cmd="attach", name="trunk:Grovy"))
