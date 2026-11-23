@@ -35,11 +35,11 @@ os.environ["XDG_STATE_HOME"] = os.path.join(TMP, "xdg")
 os.environ.pop("CCS_STATE_DIR", None)
 # Nor the user's own custom.css / custom.js / instructions.md.
 os.environ["XDG_CONFIG_HOME"] = os.path.join(TMP, "xdg-config")
-for _k in ("GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
+for _k in ("GROVY_HOME", "CCS_HOME", "GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
     os.environ.pop(_k, None)
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
-from grovylib import plugins, claude, client, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tls, tmuxctl, uploads  # noqa: E402
+from grovylib import plugins, claude, cleanup, client, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tls, tmuxctl, uploads  # noqa: E402
 
 
 def ev(name, **kw):
@@ -843,6 +843,127 @@ class TestSecurityReview(StoreCase):
             grovy.main(["page", "share", "x"])
 
 
+class TestCleanup(unittest.TestCase):
+    """`grovy cleanup` undoes `grovy setup`, from its record or (older installs) from what it finds."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(dir=TMP)
+        self.state = os.path.join(self.home, "state", "grovy")
+        self.cfg = os.path.join(self.home, "cfg", "grovy")
+        os.makedirs(self.state)
+        os.makedirs(self.cfg)
+        env = {"HOME": self.home, "GROVY_STATE_DIR": self.state, "XDG_CONFIG_HOME": os.path.join(self.home, "cfg"),
+               "TMPDIR": os.path.join(self.home, "tmp"), "PATH": "/usr/bin:/bin"}
+        for k in ("GROVY_SESSION", "CCS_SESSION"):
+            env[k] = ""
+        self.runs = []
+        fake_run = lambda argv, **kw: (self.runs.append(argv), subprocess.CompletedProcess(argv, 0, "", ""))[1]  # noqa: E731
+        for p in (mock.patch.dict(os.environ, env), mock.patch.object(cleanup, "_have_systemd", lambda: False),
+                  mock.patch.object(cleanup, "_linger_on", lambda: False),
+                  mock.patch.object(cleanup.subprocess, "run", fake_run),
+                  mock.patch.object(tmuxctl, "tmux_managed", lambda: {}),
+                  mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_cleanup(self, *args):
+        out = io.StringIO()
+        with mock.patch.object(sys.stdin, "isatty", lambda: False), redirect_stdout(out):
+            rc = grovy.main(["cleanup", *args])
+        return rc, out.getvalue()
+
+    def link(self, target):
+        os.makedirs(os.path.join(self.home, ".local", "bin"), exist_ok=True)
+        link = os.path.join(self.home, ".local", "bin", "grovy")
+        os.symlink(target, link)
+        return link
+
+    def test_removes_state_link_and_unit_keeps_home_and_code(self):
+        link = self.link(os.path.join(core.HERE, "grovy"))
+        unit = os.path.join(self.home, ".config", "systemd", "user", "grovy.service")
+        os.makedirs(os.path.dirname(unit))
+        for p in (unit, unit + ".bak"):
+            open(p, "w").close()
+        install.update_record(role="trunk", link=link)
+        rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(os.path.lexists(link))
+        self.assertFalse(os.path.exists(self.state))
+        self.assertFalse(os.path.exists(unit) or os.path.exists(unit + ".bak"))
+        self.assertTrue(os.path.isdir(self.cfg))                       # the grovy home is kept by default
+        self.assertTrue(os.path.exists(os.path.join(core.HERE, "grovy")))
+        self.assertNotIn(["loginctl", "disable-linger"], self.runs)  # setup never turned linger on
+
+    def test_remove_home_and_linger_only_when_setup_turned_it_on(self):
+        install.update_record(linger=True)
+        install.update_record(linger=False)           # a later setup that found it on doesn't forget who did it
+        self.assertTrue(install.read_record()["linger"])
+        rc, out = self.run_cleanup("-y", "--remove-home")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(["loginctl", "disable-linger"], self.runs)
+        self.assertFalse(os.path.exists(self.cfg))
+
+    def test_a_link_to_another_grovy_is_left_alone(self):
+        link = self.link("/elsewhere/grovy")
+        rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(os.path.lexists(link))
+
+    def test_dry_run_changes_nothing(self):
+        link = self.link(os.path.join(core.HERE, "grovy"))
+        rc, out = self.run_cleanup("--dry-run", "--remove-home")
+        self.assertIn("remove " + link, out)
+        self.assertTrue(os.path.lexists(link) and os.path.isdir(self.state) and os.path.isdir(self.cfg))
+
+    def test_never_removes_a_folder_that_isnt_grovys(self):
+        self.assertFalse(cleanup.safe_to_remove(self.home))                  # GROVY_STATE_DIR=~ by mistake
+        self.assertFalse(cleanup.safe_to_remove("/"))
+        self.assertFalse(cleanup.safe_to_remove(os.path.dirname(self.home)))  # a parent of the home
+        self.assertFalse(cleanup.safe_to_remove(core.HERE))                    # the code
+        plain = tempfile.mkdtemp(dir=self.home, prefix="data")
+        self.assertFalse(cleanup.safe_to_remove(plain))
+        self.assertTrue(cleanup.safe_to_remove(self.state))
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": plain}):
+            rc, out = self.run_cleanup("-y")
+        self.assertTrue(os.path.isdir(plain))
+
+    def test_refuses_inside_a_grovy_session(self):
+        with mock.patch.dict(os.environ, {"GROVY_SESSION": "me"}), self.assertRaises(SystemExit):
+            self.run_cleanup("-y")
+        self.assertTrue(os.path.isdir(self.state))
+
+    def test_daemon_outside_the_service_is_stopped_and_an_old_one_refused(self):
+        with mock.patch.object(client, "sock_request", lambda *a, **k: {"url": "x", "pid": 4242}), \
+                mock.patch.object(cleanup, "_stop_pid") as stop:
+            rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 0, out)
+        stop.assert_called_once_with(4242)
+        os.makedirs(self.state, exist_ok=True)
+        with mock.patch.object(client, "sock_request", lambda *a, **k: {"url": "x"}), self.assertRaises(SystemExit):
+            self.run_cleanup("-y")
+        self.assertTrue(os.path.isdir(self.state))      # nothing removed under a daemon we can't stop
+
+    def test_sessions_are_ended_only_when_asked(self):
+        with mock.patch.object(tmuxctl, "tmux_managed", lambda: {"s1": "%1"}), \
+                mock.patch.object(tmuxctl, "tmux") as tm:
+            rc, out = self.run_cleanup("-y")
+            self.assertFalse(tm.called)
+            self.assertIn("keep running", out)
+            os.makedirs(self.state, exist_ok=True)
+            rc, out = self.run_cleanup("-y", "--end-sessions")
+            tm.assert_called_once_with("kill-session", "-t", "=grovy-s1", check=False)
+
+    def test_setup_writes_the_record(self):
+        with mock.patch.object(shutil, "which", lambda x: "/bin/true"), \
+                mock.patch.object(install, "cmd_url", lambda a: None), mock.patch.object(install.time, "sleep"), \
+                redirect_stdout(io.StringIO()):
+            rc = grovy.main(["setup", "--bind", "127.0.0.1", "--port", "7399", "--no-service"])
+        self.assertEqual(rc, 0)
+        rec = install.read_record()
+        self.assertEqual((rec["role"], rec["bind"], rec["port"]), ("trunk", "127.0.0.1", 7399))
+        self.assertEqual(rec["link"], os.path.join(self.home, ".local", "bin", "grovy"))
+
+
 class TestSetupAndCustomCss(unittest.TestCase):
     def test_service_unit(self):
         u = install.service_unit("100.1.2.3", 7333, path="/a:/b:/a:/x%y")
@@ -913,8 +1034,18 @@ class TestSetupAndCustomCss(unittest.TestCase):
     def test_config_dir_changes_the_fingerprint_only_when_set(self):
         base = claude.session_fingerprint("fp")
         with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": "/somewhere"}):
-            self.assertNotEqual(claude.session_fingerprint("fp"), base)
+            old = claude.session_fingerprint("fp")
+            self.assertNotEqual(old, base)
+        with mock.patch.dict(os.environ, {"GROVY_HOME": "/somewhere"}):   # the new name: same folder, same fingerprint
+            self.assertEqual(claude.session_fingerprint("fp"), old)
         self.assertEqual(claude.session_fingerprint("fp"), base)
+
+    def test_grovy_home_names_the_config_folder(self):
+        with mock.patch.dict(os.environ, {"GROVY_HOME": "/h", "GROVY_CONFIG_DIR": "/c"}):
+            self.assertEqual(core.config_dir(), "/h")        # the new name wins
+        with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": "/c"}):
+            self.assertEqual(core.config_dir(), "/c")        # the old one still works
+        self.assertEqual(core.config_dir(), os.path.join(os.environ["XDG_CONFIG_HOME"], "grovy"))
 
     def test_custom_css_is_served_and_reloaded(self):
         d = tempfile.mkdtemp(dir=TMP)
@@ -4182,13 +4313,15 @@ class TestTmuxIntegration(unittest.TestCase):
         sessions.kill_session("ow1")
 
     def test_config_dir_reaches_the_session(self):
-        """The hooks read instructions.md from the same config folder as the daemon that started the session."""
-        cfg = tempfile.mkdtemp(dir=TMP)
-        with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": cfg}):
-            sessions.start_session("cd1", self.proj)
-        out = tmuxctl.tmux("show-environment", "-t", "=grovy-cd1", "GROVY_CONFIG_DIR", check=False).stdout
-        self.assertEqual(out.strip(), "GROVY_CONFIG_DIR=" + cfg)
-        sessions.kill_session("cd1")
+        """The hooks read instructions.md from the same grovy home as the daemon that started the session, whether
+        it was given as GROVY_HOME or by its older name GROVY_CONFIG_DIR."""
+        for i, var in enumerate(("GROVY_HOME", "GROVY_CONFIG_DIR")):
+            cfg = tempfile.mkdtemp(dir=TMP)
+            with mock.patch.dict(os.environ, {var: cfg}):
+                sessions.start_session(f"cd{i}", self.proj)
+            out = tmuxctl.tmux("show-environment", "-t", f"=grovy-cd{i}", "GROVY_HOME", check=False).stdout
+            self.assertEqual(out.strip(), "GROVY_HOME=" + cfg)
+            sessions.kill_session(f"cd{i}")
 
     def test_instant_exit_reports_claude_error_not_tmux(self):
         """Regression: a claude (or GROVY_CLAUDE wrapper) that dies at once takes its tmux session

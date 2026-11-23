@@ -6,7 +6,7 @@ import re
 import sys
 import time
 
-from . import client, core, hook, install, projects, scriptlib, sessions, tmuxctl
+from . import cleanup, client, core, hook, install, projects, scriptlib, sessions, tmuxctl
 
 
 def cmd_ls(_):
@@ -349,6 +349,7 @@ def main(argv=None):
     ti.add_argument("--name", action="append", help="host name or IP address the phone opens grovy by (repeatable; "
                     "default: this machine's full host name)")
     ti.set_defaults(fn=install.cmd_tls)
+    cleanup.add_parser(sub)
     sub.add_parser("doctor", help="check dependencies and connectivity").set_defaults(fn=install.cmd_doctor)
     sub.add_parser("url", help="print the web UI link(s), including the login token").set_defaults(fn=install.cmd_url)
     from . import peers   # imported here: hooks never load it

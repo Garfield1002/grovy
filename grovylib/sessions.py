@@ -60,7 +60,7 @@ def start_session(name, cwd, extra_args=()):
                      "-e", f"GROVY_PERMISSION_TIMEOUT={core.PERMISSION_TIMEOUT}",
                      "-e", f"PYTHONPATH={claude.session_pythonpath()}",
                      *(["-e", f"GROVY_WIDGETS={core.env('WIDGETS')}"] if core.env("WIDGETS") is not None else []),
-                     *(["-e", f"GROVY_CONFIG_DIR={core.env('CONFIG_DIR')}"] if core.env("CONFIG_DIR") else []),
+                     *(["-e", f"GROVY_HOME={core.home_env()}"] if core.home_env() else []),
                      "--", *argv)
     pane = r.stdout.strip()
     try:

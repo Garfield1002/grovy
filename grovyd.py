@@ -68,7 +68,7 @@ class SockHandler(socketserver.StreamRequestHandler):
         elif t == "status":
             self._reply({"sessions": {s["name"]: s for s in store.list_sessions()}, "url": self.server.url,
                          "tls": self.server.tls_cert,
-                         "claude": shutil.which(claude.claude_cmd())})
+                         "claude": shutil.which(claude.claude_cmd()), "pid": os.getpid()})
         elif t == "refresh":
             store.reconcile()
         elif t == "peers":   # `grovy peer ls`

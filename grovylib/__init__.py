@@ -22,6 +22,7 @@ Claude sessions (used by the CLI and the daemon):
 Command line:
   cli.py         the `grovy` subcommands
   install.py     setup, doctor, url, tls init
+  cleanup.py     `grovy cleanup`: undoes setup (from its record, setup.json)
   tls.py         optional HTTPS: which certificate the daemon serves; the one `grovy tls init` makes
   scriptlib.py   track/progress/note/log/show for scripts running inside a session
 

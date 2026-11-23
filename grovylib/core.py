@@ -45,9 +45,15 @@ def default_state_dir():
     return new
 
 
+def home_env():
+    """The grovy home given in the environment: GROVY_HOME, or its older name GROVY_CONFIG_DIR. None if unset."""
+    return env("HOME") or env("CONFIG_DIR") or None
+
+
 def config_dir():
-    """Your own customizations (custom.css), kept out of the repo so `git pull` never conflicts with them."""
-    return env("CONFIG_DIR") or os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "grovy")
+    """Your grovy home: your own customizations (custom.css, custom.js, plugins, peers.json), kept out of the repo so
+    `git pull` never conflicts with them."""
+    return home_env() or os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "grovy")
 
 
 def state_dir():

@@ -99,6 +99,30 @@ def cmd_doctor(_):
     return 0 if ok else 1
 
 
+def record_path():
+    """What `grovy setup` changed on this computer, so `grovy cleanup` can undo exactly that."""
+    return os.path.join(core.state_dir(), "setup.json")
+
+
+def read_record():
+    got = core.read_json(record_path(), {})
+    return got if isinstance(got, dict) else {}
+
+
+def update_record(**changes):
+    """Merge into the setup record. A flag that says setup did something (linger) stays set across reruns: a later
+    setup that finds linger already on mustn't make cleanup forget who turned it on."""
+    rec = read_record()
+    for k, v in changes.items():
+        if k == "linger":
+            v = bool(v or rec.get("linger"))
+        elif k == "services":
+            v = sorted(set(rec.get("services", [])) | set(v))
+        rec[k] = v
+    rec["version"] = 1
+    core.atomic_write_json(record_path(), rec)
+
+
 SERVICE_UNIT = """\
 # Written by `grovy setup`; rerun it to change the address or port (or edit here, then
 # systemctl --user daemon-reload && systemctl --user restart grovy).
@@ -274,6 +298,7 @@ def cmd_setup(a):
         if not dry:
             os.makedirs(bindir, exist_ok=True)
             os.symlink(target, link)
+            update_record(link=link)
     if bindir not in os.environ.get("PATH", "").split(os.pathsep):
         print(f"note: {bindir} is not on your PATH; add it in your shell profile: export PATH=\"$HOME/.local/bin:$PATH\"")
     # 2. token, and the templates for your own styles and script (everything in them starts commented out)
@@ -298,6 +323,8 @@ def cmd_setup(a):
     except (OSError, ValueError):
         pass
     port = a.port if a.port is not None else _pick_port(bind, a.yes, own_port)
+    if not dry:
+        update_record(role="trunk", bind=bind, port=port, **({"home": core.home_env()} if core.home_env() else {}))
     unit = service_unit(bind, port)
     systemd = not a.no_service and shutil.which("systemctl") and subprocess.run(
         ["systemctl", "--user", "show-environment"], capture_output=True, timeout=10).returncode == 0
@@ -320,6 +347,7 @@ def cmd_setup(a):
                     shutil.copyfile(path, path + ".bak")
                 with open(path, "w") as f:
                     f.write(unit)
+                update_record(services=["grovy"])
         active = subprocess.run(["systemctl", "--user", "is-active", "grovy"], capture_output=True,
                                 text=True, timeout=10).stdout.strip() == "active"
         if running and not active:
@@ -337,8 +365,11 @@ def cmd_setup(a):
                                 capture_output=True, text=True, timeout=10).stdout.strip()
         if linger != "Linger=yes":
             step("enabling linger, so the daemon runs after a reboot without you logging in")
-            if not dry and subprocess.run(["loginctl", "enable-linger"], capture_output=True, timeout=30).returncode:
-                print("note: `loginctl enable-linger` failed; without it the daemon starts when you log in")
+            if not dry:
+                if subprocess.run(["loginctl", "enable-linger"], capture_output=True, timeout=30).returncode:
+                    print("note: `loginctl enable-linger` failed; without it the daemon starts when you log in")
+                else:
+                    update_record(linger=True)
     if dry:
         return 0
     # 4. the phone link
@@ -355,5 +386,5 @@ def cmd_setup(a):
     cmd_url(None)
     print("\nThen tap + to start a session. New projects: run `claude` once in the folder first, to accept its "
           "trust prompt.\nMake it yours in " + core.config_dir() + " (custom.css, custom.js); check everything with "
-          "`grovy doctor`.")
+          "`grovy doctor`.\nTo undo all of this: grovy cleanup.")
     return 0

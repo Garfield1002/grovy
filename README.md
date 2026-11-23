@@ -176,8 +176,8 @@ other limits are in `docs/DESIGN.md` ("Other machines").
 | `grovy peer tunnel` says "remote port forwarding failed" | the hub's sshd forbids it (`AllowStreamLocalForwarding`), or the socket path is wrong: compare with `grovy peer ls` on the hub |
 | anything else | `grovy doctor`, then `journalctl --user -u grovy` |
 
-**Uninstall:** `systemctl --user disable --now grovy`, then delete `~/.config/systemd/user/grovy.service`,
-`~/.local/bin/grovy`, `~/.config/grovy` and `~/.local/state/grovy`.
+**Uninstall:** `grovy cleanup` undoes what setup did, after showing you the list. It keeps your own files in
+`~/.config/grovy` unless you say otherwise, and running Claude sessions unless you ask it to end them.
 
 ## For developers
 

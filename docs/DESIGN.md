@@ -114,6 +114,23 @@ link still works in one tap; the Host check requires a numeric port and no IPv6 
 and, with grovy's own certificate, says to install `grovy.crt` first. It never sets a cookie or shows anything
 private. TLS reads that fail (a preconnect closed unused, a connection the deadline cut) end the connection quietly.
 
+## Setup and cleanup
+
+`grovy setup` (`install.cmd_setup`) links `~/.local/bin/grovy`, makes the token and the `custom.*` templates, writes
+the systemd user service and turns on linger. Each change it makes is recorded in `$STATE/setup.json` (role, address,
+port, the link it made, services it wrote, `linger: true` if it turned linger on; that flag survives reruns).
+
+`grovy cleanup` (`grovylib/cleanup.py`) plans first, shows the list, and applies it on a yes (`-y` without asking,
+`--dry-run` only shows). It stops and removes the `grovy` and `grovy-tunnel` services and unit files (and `.bak`),
+stops a daemon running outside the service (by the `pid` the daemon reports in `status`; a daemon too old to report
+one makes cleanup stop before changing anything), removes the link only if it points to this grovy folder, turns
+linger off only if the record says setup turned it on, and removes the state folder, the ccs symlink and the
+attachments folder. The grovy home is kept unless asked (`--remove-home`), and running sessions are ended only on a yes
+(`--end-sessions`); they keep running in plain tmux otherwise. Without a record (installs older than it), it removes
+what it finds in those places. A folder is only ever deleted when it is named for grovy (or ccs), is not the home
+folder, `/` or one of the home's parents, and doesn't hold the grovy code: a mistyped `GROVY_STATE_DIR=~` can't
+wipe a home. It refuses to run inside a grovy session, which it would cut off. The grovy folder is never touched.
+
 ## Configuration (environment variables)
 
 | var | default | |
@@ -125,6 +142,7 @@ private. TLS reads that fail (a preconnect closed unused, a connection the deadl
 | `GROVY_TLS` | on | `off` = plain HTTP even if there is a certificate |
 | `GROVY_AUTH` | `on` | `off` = don't require the token (enrollment only) |
 | `GROVY_STATE_DIR` | `$XDG_STATE_HOME/grovy` → `~/.local/state/grovy` | all state, mode 0700 |
+| `GROVY_HOME` | `$XDG_CONFIG_HOME/grovy` → `~/.config/grovy` | your own files: `custom.css`/`custom.js`, `instructions.md`, `plugins/`, `peers.json` (`GROVY_CONFIG_DIR` is the older name; `GROVY_HOME` wins). Passed on to sessions started from it |
 | `GROVY_PERMISSION_TIMEOUT` | `600` | seconds a permission waits for the phone (fixed per session at `grovy new`) |
 | `GROVY_CLAUDE` | `claude` | claude executable |
 | `GROVY_PROJECTS_DIR` | `~/dev` | where ⋯ → New project makes projects |
@@ -175,7 +193,7 @@ made and used with the `openssl` command (ES256 tokens, one per push service, re
 ## Making it yours
 
 grovy's page can be extended by scripts that use one documented object, `window.grovy`, the same way for grovy's own
-built-in extensions and for the user's. Everything personal lives in `~/.config/grovy/` (`GROVY_CONFIG_DIR`), outside
+built-in extensions and for the user's. Everything personal lives in `~/.config/grovy/`, the *grovy home* (`GROVY_HOME`, formerly `GROVY_CONFIG_DIR`, still accepted), outside
 the repo, so updates never conflict with it. `grovy setup` installs commented templates of `custom.css` and `custom.js`.
 
 * **Built-in extensions** are `extensions/*.js` in the grovy folder, loaded in file-name order right after grovy's own
