@@ -38,6 +38,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from urllib.parse import parse_qsl, quote, unquote, urlencode
@@ -1127,6 +1128,18 @@ SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 TUNNEL_OPTS = ["-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
                "-o", "StreamLocalBindMask=0177"]
 HOST_RE = re.compile(r"[A-Za-z0-9_.@%\[\]:-]{1,255}")
+# For a login that runs one command: none of the forwards or the RemoteCommand from your ~/.ssh/config (a
+# RemoteForward meant for your own logins, e.g. a gpg-agent socket, may fail or leak there; ssh refuses a command when
+# the config has a RemoteCommand).
+COMMAND_OPTS = ["-o", "ClearAllForwardings=yes", "-o", "RemoteCommand=none"]
+# What the tunnel leaves out of your ssh settings for the hub. Forwards: with ExitOnForwardFailure one that fails ends
+# the tunnel (ClearAllForwardings would drop the tunnel's own -R too), and a service has no business forwarding your
+# agent or ports. Connection sharing: it would ride an existing login instead of the tunnel key. A session, a tty or a
+# command: the tunnel has none (-N). Host: the file has no Host blocks, everything in it applies.
+TUNNEL_DROP = {"host", "localforward", "remoteforward", "dynamicforward", "forwardagent", "forwardx11",
+               "forwardx11trusted", "forwardx11timeout", "exitonforwardfailure", "clearallforwardings", "controlmaster",
+               "controlpath", "controlpersist", "remotecommand", "requesttty", "sessiontype", "stdinnull",
+               "forkafterauthentication", "permitlocalcommand", "localcommand", "tunnel", "tunneldevice", "proxyjump"}
 
 
 def prepare_script(name, remote=None):
@@ -1150,12 +1163,51 @@ def _key_opts(identity):
 def prepare_argv(host, name, remote=None, ssh="ssh", identity=None):
     # The remote login shell parses the command line: one sh -c with the script quoted, the same in sh, bash and zsh.
     # A key restricted by grovy setup runs its forced command instead, which does the same for its one socket.
-    return [ssh, *SSH_OPTS, *_key_opts(identity), "--", host, "sh -c " + shlex.quote(prepare_script(name, remote))]
+    return [ssh, *SSH_OPTS, *COMMAND_OPTS, *_key_opts(identity), "--", host,
+            "sh -c " + shlex.quote(prepare_script(name, remote))]
 
 
-def tunnel_argv(host, sock, port, ssh="ssh", local="127.0.0.1", identity=None):
+def tunnel_argv(host, sock, port, ssh="ssh", local="127.0.0.1", identity=None, config=None):
     # 127.0.0.1, not "localhost" (which may resolve to ::1 first, where grovy doesn't listen by default)
-    return [ssh, *SSH_OPTS, *_key_opts(identity), *TUNNEL_OPTS, "-R", f"{sock}:{local}:{port}", "--", host]
+    return [ssh, *(["-F", config] if config else []), *SSH_OPTS, *_key_opts(identity), *TUNNEL_OPTS,
+            "-R", f"{sock}:{local}:{port}", "--", host]
+
+
+def jump_command(ssh, jump):
+    """A ProxyCommand doing what ProxyJump JUMP does, but with your usual config for the jump hosts (ProxyJump would
+    hand them the tunnel's -F file, whose settings are the hub's)."""
+    hops = jump.split(",")
+    last = hops[-1]
+    if ":" in last.rsplit("]", 1)[-1]:   # user@host:port isn't a destination; the ssh:// form is
+        last = "ssh://" + last
+    argv = [ssh, *COMMAND_OPTS, *(["-J", ",".join(hops[:-1])] if len(hops) > 1 else []), "-W", "[%h]:%p", "--", last]
+    return " ".join(a if a == "[%h]:%p" else shlex.quote(a) for a in argv)
+
+
+def tunnel_config(host, ssh="ssh", identity=None, run=subprocess.run):
+    """Your ssh settings for host (`ssh -G`: HostName, User, Port, ProxyCommand, known hosts, Match blocks resolved)
+    as a config file, less TUNNEL_DROP (and your keys when the tunnel has its own). None if ssh -G fails: the tunnel
+    then reads your config as it is."""
+    try:
+        r = run([ssh, "-G", "--", host], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode or not (r.stdout or "").strip():
+        return None
+    drop = TUNNEL_DROP | ({"identityfile"} if identity else set())
+    lines, jump, proxy = [], None, False
+    for line in r.stdout.splitlines():
+        key, _, value = line.strip().partition(" ")
+        key = key.lower()
+        if key == "proxyjump" and value.strip().lower() != "none":
+            jump = value.strip()
+        if not key or key in drop:
+            continue
+        proxy = proxy or key == "proxycommand"
+        lines.append(line.strip())
+    if jump and not proxy:
+        lines.append("proxycommand " + jump_command(ssh, jump))
+    return "\n".join(lines) + "\n"
 
 
 def check_remote_socket(path):
@@ -1167,7 +1219,7 @@ def check_remote_socket(path):
 
 def run_tunnel(host, name, port, remote=None, ssh="ssh", run=subprocess.run, popen=subprocess.Popen,
                sleep=time.sleep, clock=time.monotonic, rounds=None, out=sys.stderr, local="127.0.0.1", prepare=True,
-               identity=None):
+               identity=None, config=tunnel_config):
     """Keep the reverse tunnel up: prepare, connect, wait for ssh to end, back off, repeat (forever unless rounds).
     prepare=False skips the remote shell (for a key restricted to forwarding): remote is then the absolute path, and
     a stale socket is the hub's sshd's business (StreamLocalBindUnlink yes)."""
@@ -1194,12 +1246,21 @@ def run_tunnel(host, name, port, remote=None, ssh="ssh", run=subprocess.run, pop
             else:
                 sock = lines[-1]
                 say(f"forwarding {host}:{sock} -> {local}:{port}")
-                p = popen(tunnel_argv(host, sock, port, ssh, local, identity), stdin=subprocess.DEVNULL)
+                text, path = config(host, ssh, identity), None
                 try:
-                    code = p.wait()
-                except KeyboardInterrupt:
-                    p.terminate()
-                    raise
+                    if text:
+                        fd, path = tempfile.mkstemp(prefix="grovy-tunnel-", suffix=".conf")
+                        with os.fdopen(fd, "w") as f:
+                            f.write(text)
+                    p = popen(tunnel_argv(host, sock, port, ssh, local, identity, path), stdin=subprocess.DEVNULL)
+                    try:
+                        code = p.wait()
+                    except KeyboardInterrupt:
+                        p.terminate()
+                        raise
+                finally:
+                    if path:
+                        os.unlink(path)
                 say(f"ssh ended (exit {code})")
         except (OSError, subprocess.SubprocessError) as e:
             say(f"ssh failed: {e}")

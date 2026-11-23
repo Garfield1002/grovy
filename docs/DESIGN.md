@@ -874,6 +874,14 @@ PC: grovyd (127.0.0.1:7333) ◄── ssh -R ──── hub: ~/.local/state/gr
   (sshd only binds over one with `StreamLocalBindUnlink yes`, which it usually lacks) and print the socket's absolute
   path; then `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes
   -R SOCK:127.0.0.1:PORT HOST`; when ssh ends it waits 2s, 4s, … up to 60s (reset after a minute up) and starts again.
+  The tunnel's ssh reads your settings for HOST through `ssh -G HOST` written to a temporary `-F` file, minus the
+  forwards (`RemoteForward`, `LocalForward`, `DynamicForward`, `ForwardAgent`, X11), connection sharing (`ControlMaster`/
+  `ControlPath`), `RemoteCommand`/`RequestTTY` and, with `--identity`, your `IdentityFile`s: a forward meant for your
+  own logins (a gpg-agent socket in `/run/user/…`) fails on the hub, and with `ExitOnForwardFailure` that ended every
+  connect (`ClearAllForwardings` can't be used: it drops the tunnel's own `-R` too). `ProxyJump` becomes a
+  `ProxyCommand` (`ssh -W`, your usual config for the jump hosts). If `ssh -G` fails, your config is used as it is.
+  The other logins that run one command (setup's, `prepare`, `trunk:NAME`) pass `ClearAllForwardings=yes` and
+  `RemoteCommand=none`.
   `--no-prepare` skips the remote shell entirely (needed with a key restricted to forwarding, below): then
   `--remote-socket` must be the absolute path, its folder made once by hand (`mkdir -p -m 700`), and a stale socket is
   left to the hub's sshd (`StreamLocalBindUnlink yes`, which sashimi has).

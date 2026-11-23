@@ -50,7 +50,7 @@ def on_trunk(host, argv, tty=False):
     if not peers.HOST_RE.fullmatch(host) or host.startswith("-"):
         core.die(f"bad trunk address {host!r} in the setup record")
     cmd = "sh -c " + shlex.quote(FIND_GROVY + " ".join(shlex.quote(a) for a in argv))
-    os.execvp("ssh", ["ssh", *(["-t"] if tty else []), "--", host, cmd])
+    os.execvp("ssh", ["ssh", *(["-t"] if tty else []), *peers.COMMAND_OPTS, "--", host, cmd])
 
 
 def _call(peer, method, path, body=None):

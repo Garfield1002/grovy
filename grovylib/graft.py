@@ -88,7 +88,7 @@ def ssh(host, script, input=None, timeout=180, run=None):
     """Run a sh script on the trunk with your usual ssh login (it may ask for a password: ssh asks on the terminal
     itself). Returns the CompletedProcess."""
     run = run or subprocess.run
-    argv = ["ssh", *_cm_opts(), "--", host, "sh -c " + shlex.quote(script)]
+    argv = ["ssh", *_cm_opts(), *peers.COMMAND_OPTS, "--", host, "sh -c " + shlex.quote(script)]
     if input is None:
         return run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
     return run(argv, input=input, capture_output=True, text=True, timeout=timeout)

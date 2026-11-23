@@ -8,6 +8,8 @@ import json
 import os
 import re
 import select
+import shlex
+import shutil
 import socket
 import stat
 import subprocess
@@ -23,10 +25,16 @@ from unittest import mock
 import test_grovy as base   # its environment setup (private state, config and tmux) applies here too
 
 import grovyd  # noqa: E402
-from grovylib import core, pages, peers, remote, sessions, store, terminal, tmuxctl  # noqa: E402
+from grovylib import core, graft, pages, peers, remote, sessions, store, terminal, tmuxctl  # noqa: E402
 
 TMP = base.TMP
 PEER_TOKEN = "peer-token-0123456789"
+
+
+def graft_ssh_argv():
+    seen = []
+    graft.ssh("hub", "true", run=lambda argv, **k: seen.append(argv) or mock.Mock(returncode=0))
+    return seen[0]
 
 
 def ev(name, **kw):
@@ -669,8 +677,10 @@ class TestRemoteCli(PeerLink):
         with mock.patch.object(remote, "trunk_host", lambda: "me@hub"), mock.patch.object(os, "execvp") as ex:
             remote.run(types.SimpleNamespace(cmd="attach", name="trunk:Grovy"))
         argv = ex.call_args[0][1]
-        self.assertEqual(argv[:4], ["ssh", "-t", "--", "me@hub"])
-        self.assertIn("exec \"$g\" attach Grovy", argv[4])
+        self.assertEqual(argv[:2], ["ssh", "-t"])
+        self.assertEqual(argv[-3:-1], ["--", "me@hub"])
+        self.assertIn("RemoteCommand=none", argv)   # a RemoteCommand in your ssh config would make ssh refuse
+        self.assertIn("exec \"$g\" attach Grovy", argv[-1])
 
 
 class TestHostilePeer(PeerLink):
@@ -1122,7 +1132,8 @@ class TestTunnel(unittest.TestCase):
         out = io.StringIO()
         clock = iter(range(0, 1000, 1))
         code = peers.run_tunnel("hub", "pc", 7333, run=lambda *a, **k: next(runs), popen=popen,
-                                sleep=sleeps.append, clock=lambda: next(clock), rounds=3, out=out)
+                                sleep=sleeps.append, clock=lambda: next(clock), rounds=3, out=out,
+                                config=lambda *a: None)
         self.assertEqual(code, 0)
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][calls[0].index("-R") + 1], "/h/.local/state/grovy/peers/pc.sock:127.0.0.1:7333")
@@ -1136,7 +1147,7 @@ class TestTunnel(unittest.TestCase):
         run = mock.Mock()
         code = peers.run_tunnel("hub", "pc", 7333, remote="/h/s/pc.sock", run=run,
                                 popen=lambda argv, **k: calls.append(argv) or proc, sleep=lambda s: None,
-                                rounds=1, out=io.StringIO(), prepare=False)
+                                rounds=1, out=io.StringIO(), prepare=False, config=lambda *a: None)
         self.assertEqual(code, 0)
         run.assert_not_called()
         self.assertEqual(calls[0][calls[0].index("-R") + 1], "/h/s/pc.sock:127.0.0.1:7333")
@@ -1152,6 +1163,106 @@ class TestTunnel(unittest.TestCase):
         self.assertEqual(peers.run_tunnel("hub", "pc", 7333, run=lambda *a, **k: bad, popen=mock.Mock(),
                                           sleep=lambda s: None, rounds=3, out=out), 2)
         self.assertIn("--remote-socket", out.getvalue())
+
+    USER_CONFIG = """Host hub
+  HostName 127.0.0.1
+  User bob
+  Port 2222
+  RemoteForward /run/user/jack/gnupg/S.gpg-agent /run/user/1000/gnupg/S.gpg-agent.extra
+  LocalForward 8080 localhost:80
+  DynamicForward 1080
+  ForwardAgent yes
+  ControlMaster auto
+  ControlPath ~/.ssh/cm-%r@%h:%p
+  RequestTTY yes
+  RemoteCommand tmux a
+  ProxyJump alice@jump:2200,other
+  IdentityFile ~/.ssh/id_ed25519
+  ServerAliveInterval 10
+  UserKnownHostsFile ~/.ssh/known_hosts_hub
+"""
+
+    def user_ssh(self):
+        """An ssh that reads USER_CONFIG as your ~/.ssh/config (ssh reads the passwd home's, not $HOME's)."""
+        d = tempfile.mkdtemp(dir=TMP)
+        cfg = os.path.join(d, "config")
+        with open(cfg, "w") as f:
+            f.write(self.USER_CONFIG)
+        exe = os.path.join(d, "ssh")
+        with open(exe, "w") as f:
+            f.write(f'#!/bin/sh\nfor a; do [ "$a" = -F ] && exec ssh "$@"; done\nexec ssh -F {cfg} "$@"\n')
+        os.chmod(exe, 0o755)
+        return exe, d
+
+    def resolved(self, argv):
+        """What ssh would do with this argv, from ssh -G: {key: [values]}."""
+        out = subprocess.run([argv[0], "-G", *argv[1:]], capture_output=True, text=True, check=True,
+                             stdin=subprocess.DEVNULL).stdout
+        conf = {}
+        for line in out.splitlines():
+            k, _, v = line.partition(" ")
+            conf.setdefault(k, []).append(v)
+        return conf
+
+    @unittest.skipUnless(shutil.which("ssh"), "needs ssh")
+    def test_tunnel_ignores_the_forwards_and_session_in_your_ssh_config(self):
+        # a RemoteForward for a gpg-agent socket in ~/.ssh/config made every connect fail (ExitOnForwardFailure)
+        ssh, d = self.user_ssh()
+        key = os.path.join(d, "grovy_tunnel")
+        open(key, "w").close()   # ssh leaves out a -i file that doesn't exist
+        text = peers.tunnel_config("hub", ssh, identity=key)
+        path = os.path.join(d, "tunnel.conf")
+        with open(path, "w") as f:
+            f.write(text)
+        conf = self.resolved(peers.tunnel_argv("hub", "/h/pc.sock", 7333, ssh, identity=key, config=path))
+        self.assertEqual(conf["remoteforward"], ["/h/pc.sock [127.0.0.1]:7333"])   # only the tunnel's own
+        for k in ("localforward", "dynamicforward", "remotecommand", "controlpath"):
+            self.assertNotIn(k, conf)
+        self.assertEqual(conf["forwardagent"], ["no"])
+        self.assertEqual(conf["controlmaster"], ["false"])
+        self.assertEqual(conf["exitonforwardfailure"], ["yes"])
+        self.assertEqual(conf["identityfile"], [key])   # the tunnel key only, not yours
+        # how to reach the hub is kept
+        self.assertEqual((conf["hostname"], conf["user"], conf["port"]), (["127.0.0.1"], ["bob"], ["2222"]))
+        self.assertEqual(conf["serveraliveinterval"], ["30"])   # the tunnel's options win
+        self.assertTrue(conf["userknownhostsfile"][0].endswith("/.ssh/known_hosts_hub"))
+        # ProxyJump becomes a ProxyCommand with your usual config for the jump hosts
+        self.assertNotIn("proxyjump", conf)
+        cmd = conf["proxycommand"][0]
+        self.assertEqual(shlex.split(cmd), [ssh, *peers.COMMAND_OPTS, "-J", "alice@jump:2200", "-W", "[%h]:%p",
+                                            "--", "other"])
+        jump = peers.jump_command("ssh", "alice@jump:2200")
+        self.assertEqual(shlex.split(jump)[-1], "ssh://alice@jump:2200")
+        self.assertEqual(shlex.split(peers.jump_command("ssh", "[::1]"))[-1], "[::1]")
+
+    @unittest.skipUnless(shutil.which("ssh"), "needs ssh")
+    def test_logins_that_run_a_command_ignore_forwards_and_remote_command(self):
+        ssh, _ = self.user_ssh()
+        conf = self.resolved([ssh, *peers.prepare_argv("hub", "pc")[1:-1]])
+        for k in ("remoteforward", "localforward", "dynamicforward", "remotecommand"):
+            self.assertNotIn(k, conf)
+        self.assertIn("ClearAllForwardings=yes", graft_ssh_argv())
+        self.assertIn("RemoteCommand=none", graft_ssh_argv())
+
+    def test_tunnel_config_file_is_used_and_removed(self):
+        seen = []
+        proc = mock.Mock()
+
+        def popen(argv, **kw):
+            path = argv[argv.index("-F") + 1]
+            with open(path) as f:
+                seen.append(f.read())
+            seen.append(path)
+            return proc
+        proc.wait.return_value = 0
+        peers.run_tunnel("hub", "pc", 7333, remote="/h/s/pc.sock", popen=popen, sleep=lambda s: None, rounds=1,
+                         out=io.StringIO(), prepare=False, config=lambda *a: "hostname 10.0.0.1\n")
+        self.assertEqual(seen[0], "hostname 10.0.0.1\n")
+        self.assertFalse(os.path.exists(seen[1]))
+        calls = []
+        peers.run_tunnel("hub", "pc", 7333, remote="/h/s/pc.sock", popen=lambda argv, **k: calls.append(argv) or proc,
+                         sleep=lambda s: None, rounds=1, out=io.StringIO(), prepare=False, config=lambda *a: None)
+        self.assertNotIn("-F", calls[0])   # ssh -G failed: your config as it is
 
     def test_cli_refuses_option_like_host(self):
         with self.assertRaises(SystemExit):
