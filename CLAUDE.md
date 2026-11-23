@@ -2,8 +2,9 @@
 
 grovy runs Claude Code sessions in tmux and serves a phone UI for them. `docs/DESIGN.md` documents behaviour,
 invariants and limitations: read the section you are changing (not the whole file) and keep it in sync.
-`README.md` is for users (install, what it does, troubleshooting): update it only for user-visible changes, and
-keep it short and non-technical.
+`README.md` is the short front page for users; the user guides are `docs/guide.md`, `setup.md`, `customize.md`,
+`safety.md` and `troubleshooting.md`. Update them only for user-visible changes, and keep them short and non-technical
+(the README shortest: a line per feature, linking to the guide).
 This file covers **how to change it safely**.
 
 ## You may be running inside grovy
@@ -21,8 +22,9 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 - `index.html` is hot-reloaded by the daemon, and the user gets it on their next page reload.
 - The daemon loads `grovyd.py` and `grovylib/` once, so changes to them need a daemon restart (changes to the modules
   above reach hooks at once, and the daemon only after the restart). Restarting never touches Claude sessions:
-  `tmux respawn-pane -k -t =grovyd: "<same command line it was started with>"` (check it with
-  `tmux list-panes -t =grovyd: -F '#{pane_start_command}'`). Restart only after the tests pass. Events sent during
+  `eval "tmux respawn-pane -k -t =grovyd: $(tmux list-panes -t =grovyd: -F '#{pane_start_command}')"` (the start
+  command is printed shell-quoted: passed back as one quoted string, it runs a program named after the whole line,
+  the pane dies and takes the `grovyd` session with it; this happened). Then check it answers (`grovy ls`). Restart only after the tests pass. Events sent during
   the ~1s gap are lost.
 - Never `pkill -f 'grovy serve'`: the pattern matches your own shell's command line and kills it.
   Use a pidfile, or a `[c]cs serve` style pattern.
@@ -36,10 +38,11 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 | `grovyd.py` | daemon entry: `Http` (API, SSE), `SockHandler` (hooks, CLI), `serve()`, `load_index()` |
 | `Store` | `grovylib/store.py`, assembled from one class per feature (`Tasks`, `Permissions`, `Prompts`, `SessionLifecycle`, `Pages`, `LiveCards`, `Attachments`, `Issues`, `NewProjects`, `Steps`), each in its own module, all sharing `self.lock` and `self.sessions` |
 | `extensions/` | built-in page extensions (`context-bar.js`, ...): features written only against `window.grovy`, loaded before the user's `custom.js`. A self-contained UI feature belongs here rather than in `index.html` when the API can carry it; when it can't, grow the API |
-| `plugins/` | built-in daemon plugins (`git.py`), loaded like the user's own and only through the plugin `Api`; a user plugin with the same name replaces one. Built-in extensions get their data from them |
+| `plugins/` | built-in daemon plugins (`git.py`, `push.py`), loaded like the user's own and only through the plugin `Api`; a user plugin with the same name replaces one. Built-in extensions get their data from them |
+| `sw.js` | the service worker (`/sw.js`): shows Web Push notifications (`plugins/push.py`, `extensions/push.js`). It must never cache or answer page requests |
 | `index.html` | the whole UI: vanilla JS, one inline `<script>` (its CSP hash is computed at load); a map of its parts is at the top of the script |
 | pages | `grovy page` (`cli.cmd_page`) → socket `page` → `Store.publish_page` (`pages.py`); served by `/p/<id>` with `PAGE_CSP` + `PAGE_BRIDGE`. Never loosen `PAGE_CSP` (no `allow-same-origin`, no `connect-src`) without the user agreeing |
-| setup | `grovy setup` (`install.cmd_setup`, `SERVICE_UNIT`; keep `examples/grovy.service` in sync) |
+| setup | `grovy setup` (`setupflow.cmd_setup`, drawn with `tui.py`; `install.SERVICE_UNIT`; keep `examples/grovy.service` in sync); it records what it changed in `$STATE/setup.json`, which `grovy cleanup` (`cleanup.py`) undoes: keep them in step |
 | customizing | the user's own files in `~/.config/grovy/`, never in the repo: `custom.css` and `custom.js` (added to the page by `load_index()`; the script gets its own CSP hash), `instructions.md` (added to Claude's SessionStart context by `claude.user_instructions()`), `plugins/*.py` (loaded by the daemon, `grovylib/plugins.py`; their callbacks run on a worker thread, never under `Store.lock`). `custom.js` uses only `window.grovy` (the "extensions" part of `index.html`); plugins use only the `Api` object. Keep both APIs stable, documented in `examples/custom.js` and `examples/plugin.py`, and grow them rather than change them |
 | widgets | `WIDGET_GUIDE` in `grovylib/claude.py` (what Claude is told, via the SessionStart hook) and `extensions/widgets.js` (renderers, registered with `grovy.widget`; `index.html` only draws the frame and the error). Change both together; every renderer validates its input and throws a readable `Error` |
 | live widgets | client library in `grovylib/scriptlib.py` (`track`, `progress`, `note`, `log`, `show`, re-exported by `grovy.py`; CLI `tail`/`progress`/`note`/`show`) → socket `live` → `Store.live_update` (`live.py`) → `Live` event, rendered by `liveNode`. User scripts import this: it must stay import-cheap, and those functions must never raise or block |
@@ -58,7 +61,8 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 - A "force"/"type anyway" consent applies only at the moment it's given; it must not survive a later state or a restart.
 - Every bug fix gets a regression test. Check that it **fails on the old code**, e.g. with
   `git worktree add /tmp/x HEAD` and the new test file copied in.
-- Keep `docs/DESIGN.md` in sync (behaviour, failure modes, limitations), and `README.md` for user-visible changes.
+- Keep `docs/DESIGN.md` in sync (behaviour, failure modes, limitations), and the user guides (`docs/guide.md` etc., the README's
+  one-liners) for user-visible changes.
 
 ## Testing
 

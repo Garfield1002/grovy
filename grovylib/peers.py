@@ -38,6 +38,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from urllib.parse import parse_qsl, quote, unquote, urlencode
@@ -1055,22 +1056,37 @@ def _sock_request(msg):
     return client.sock_request(msg, timeout=3)
 
 
+PEER_LOOK = {"online": ("●", "green"), "connecting": ("◌", "cyan"), "stale": ("▲", "yellow"), "offline": ("○", "dim")}
+
+
 def cmd_ls(_):
+    """The grafts in peers.json and how the daemon sees them: a table on a terminal, tab-separated otherwise."""
+    from . import tui
     conf, problems = read_config()
     live = {}
     try:
         live = {p["name"]: p for p in (_sock_request({"type": "peers"}) or {}).get("peers", [])}
     except (OSError, ValueError):
-        print("(grovyd isn't running here: showing peers.json only)", file=sys.stderr)
+        tui.caution("(grovyd isn't running here: showing peers.json only)")
+    fancy = tui.color_on(sys.stdout)
     if not conf:
-        print(f"no peers ({config_path()})")
+        print(tui.paint("no peers", "dim") + f" ({tui.short(config_path())})" if fancy else f"no peers ({config_path()})")
+    rows = []
     for name, e in sorted(conf.items()):
         st = live.get(name)
-        what = ("not loaded yet" if st is None else st["state"] + ("" if st["state"] == "online" else
-                f", last seen {ago(st.get('last_seen'))}" + (f": {st['error']}" if st.get("error") else "")))
-        print(f"{name}\t{e['socket']}\t{what}")
+        why = "" if st is None or st["state"] == "online" else (
+            f"last seen {ago(st.get('last_seen'))}" + (f": {st['error']}" if st.get("error") else ""))
+        if not fancy:
+            print(f"{name}\t{e['socket']}\t" + ("not loaded yet" if st is None else st["state"] + (", " + why if why else "")))
+            continue
+        look = PEER_LOOK.get(st["state"] if st else None, ("?", "dim"))
+        rows.append([name, tui.short(e["socket"]), (f"{look[0]} {st['state'] if st else 'not loaded yet'}", *look[1:]),
+                     (why, "dim")])
+    if rows:
+        print("\n".join(tui.table(rows, header=["NAME", "SOCKET", "STATE", ""], shrink=(1, 3),
+                                    cut_start=(1,))[0]))
     for p in problems:
-        print("problem: " + p, file=sys.stderr)
+        tui.caution("problem: " + p)
     return 1 if problems else 0
 
 
@@ -1127,6 +1143,18 @@ SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 TUNNEL_OPTS = ["-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
                "-o", "StreamLocalBindMask=0177"]
 HOST_RE = re.compile(r"[A-Za-z0-9_.@%\[\]:-]{1,255}")
+# For a login that runs one command: none of the forwards or the RemoteCommand from your ~/.ssh/config (a
+# RemoteForward meant for your own logins, e.g. a gpg-agent socket, may fail or leak there; ssh refuses a command when
+# the config has a RemoteCommand).
+COMMAND_OPTS = ["-o", "ClearAllForwardings=yes", "-o", "RemoteCommand=none"]
+# What the tunnel leaves out of your ssh settings for the hub. Forwards: with ExitOnForwardFailure one that fails ends
+# the tunnel (ClearAllForwardings would drop the tunnel's own -R too), and a service has no business forwarding your
+# agent or ports. Connection sharing: it would ride an existing login instead of the tunnel key. A session, a tty or a
+# command: the tunnel has none (-N). Host: the file has no Host blocks, everything in it applies.
+TUNNEL_DROP = {"host", "localforward", "remoteforward", "dynamicforward", "forwardagent", "forwardx11",
+               "forwardx11trusted", "forwardx11timeout", "exitonforwardfailure", "clearallforwardings", "controlmaster",
+               "controlpath", "controlpersist", "remotecommand", "requesttty", "sessiontype", "stdinnull",
+               "forkafterauthentication", "permitlocalcommand", "localcommand", "tunnel", "tunneldevice", "proxyjump"}
 
 
 def prepare_script(name, remote=None):
@@ -1142,14 +1170,59 @@ def prepare_script(name, remote=None):
     return f's={path} && mkdir -p "$(dirname "$s")" && rm -f "$s" && printf "%s\\n" "$s"'
 
 
-def prepare_argv(host, name, remote=None, ssh="ssh"):
+def _key_opts(identity):
+    """ssh options to log in with this key only (grovy setup's dedicated tunnel key), not the agent's others."""
+    return ["-i", identity, "-o", "IdentitiesOnly=yes"] if identity else []
+
+
+def prepare_argv(host, name, remote=None, ssh="ssh", identity=None):
     # The remote login shell parses the command line: one sh -c with the script quoted, the same in sh, bash and zsh.
-    return [ssh, *SSH_OPTS, "--", host, "sh -c " + shlex.quote(prepare_script(name, remote))]
+    # A key restricted by grovy setup runs its forced command instead, which does the same for its one socket.
+    return [ssh, *SSH_OPTS, *COMMAND_OPTS, *_key_opts(identity), "--", host,
+            "sh -c " + shlex.quote(prepare_script(name, remote))]
 
 
-def tunnel_argv(host, sock, port, ssh="ssh", local="127.0.0.1"):
+def tunnel_argv(host, sock, port, ssh="ssh", local="127.0.0.1", identity=None, config=None):
     # 127.0.0.1, not "localhost" (which may resolve to ::1 first, where grovy doesn't listen by default)
-    return [ssh, *SSH_OPTS, *TUNNEL_OPTS, "-R", f"{sock}:{local}:{port}", "--", host]
+    return [ssh, *(["-F", config] if config else []), *SSH_OPTS, *_key_opts(identity), *TUNNEL_OPTS,
+            "-R", f"{sock}:{local}:{port}", "--", host]
+
+
+def jump_command(ssh, jump):
+    """A ProxyCommand doing what ProxyJump JUMP does, but with your usual config for the jump hosts (ProxyJump would
+    hand them the tunnel's -F file, whose settings are the hub's)."""
+    hops = jump.split(",")
+    last = hops[-1]
+    if ":" in last.rsplit("]", 1)[-1]:   # user@host:port isn't a destination; the ssh:// form is
+        last = "ssh://" + last
+    argv = [ssh, *COMMAND_OPTS, *(["-J", ",".join(hops[:-1])] if len(hops) > 1 else []), "-W", "[%h]:%p", "--", last]
+    return " ".join(a if a == "[%h]:%p" else shlex.quote(a) for a in argv)
+
+
+def tunnel_config(host, ssh="ssh", identity=None, run=subprocess.run):
+    """Your ssh settings for host (`ssh -G`: HostName, User, Port, ProxyCommand, known hosts, Match blocks resolved)
+    as a config file, less TUNNEL_DROP (and your keys when the tunnel has its own). None if ssh -G fails: the tunnel
+    then reads your config as it is."""
+    try:
+        r = run([ssh, "-G", "--", host], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode or not (r.stdout or "").strip():
+        return None
+    drop = TUNNEL_DROP | ({"identityfile"} if identity else set())
+    lines, jump, proxy = [], None, False
+    for line in r.stdout.splitlines():
+        key, _, value = line.strip().partition(" ")
+        key = key.lower()
+        if key == "proxyjump" and value.strip().lower() != "none":
+            jump = value.strip()
+        if not key or key in drop:
+            continue
+        proxy = proxy or key == "proxycommand"
+        lines.append(line.strip())
+    if jump and not proxy:
+        lines.append("proxycommand " + jump_command(ssh, jump))
+    return "\n".join(lines) + "\n"
 
 
 def check_remote_socket(path):
@@ -1160,7 +1233,8 @@ def check_remote_socket(path):
 
 
 def run_tunnel(host, name, port, remote=None, ssh="ssh", run=subprocess.run, popen=subprocess.Popen,
-               sleep=time.sleep, clock=time.monotonic, rounds=None, out=sys.stderr, local="127.0.0.1", prepare=True):
+               sleep=time.sleep, clock=time.monotonic, rounds=None, out=sys.stderr, local="127.0.0.1", prepare=True,
+               identity=None, config=tunnel_config):
     """Keep the reverse tunnel up: prepare, connect, wait for ssh to end, back off, repeat (forever unless rounds).
     prepare=False skips the remote shell (for a key restricted to forwarding): remote is then the absolute path, and
     a stale socket is the hub's sshd's business (StreamLocalBindUnlink yes)."""
@@ -1172,7 +1246,7 @@ def run_tunnel(host, name, port, remote=None, ssh="ssh", run=subprocess.run, pop
         start = clock()
         try:
             if prepare:
-                r = run(prepare_argv(host, name, remote, ssh), capture_output=True, text=True, timeout=60,
+                r = run(prepare_argv(host, name, remote, ssh, identity), capture_output=True, text=True, timeout=60,
                         stdin=subprocess.DEVNULL)
                 lines = (r.stdout or "").strip().splitlines()
             else:
@@ -1187,12 +1261,21 @@ def run_tunnel(host, name, port, remote=None, ssh="ssh", run=subprocess.run, pop
             else:
                 sock = lines[-1]
                 say(f"forwarding {host}:{sock} -> {local}:{port}")
-                p = popen(tunnel_argv(host, sock, port, ssh, local), stdin=subprocess.DEVNULL)
+                text, path = config(host, ssh, identity), None
                 try:
-                    code = p.wait()
-                except KeyboardInterrupt:
-                    p.terminate()
-                    raise
+                    if text:
+                        fd, path = tempfile.mkstemp(prefix="grovy-tunnel-", suffix=".conf")
+                        with os.fdopen(fd, "w") as f:
+                            f.write(text)
+                    p = popen(tunnel_argv(host, sock, port, ssh, local, identity, path), stdin=subprocess.DEVNULL)
+                    try:
+                        code = p.wait()
+                    except KeyboardInterrupt:
+                        p.terminate()
+                        raise
+                finally:
+                    if path:
+                        os.unlink(path)
                 say(f"ssh ended (exit {code})")
         except (OSError, subprocess.SubprocessError) as e:
             say(f"ssh failed: {e}")
@@ -1217,6 +1300,8 @@ def cmd_tunnel(a):
     if a.no_prepare and (rs is None or check_remote_socket(rs)):
         core.die("--no-prepare needs --remote-socket with the socket's absolute path on the hub (no ~: no remote "
                  "shell expands it), e.g. --remote-socket /home/you/.local/state/grovy/peers/pc.sock")
+    if a.identity and not os.path.isfile(os.path.expanduser(a.identity)):
+        core.die(f"--identity: no key file {a.identity!r}")
     if not re.fullmatch(r"[0-9a-fA-F.:]{2,45}|localhost", a.local_host):
         core.die("--local-host: an IP address (where this machine's grovy listens)")
     try:
@@ -1225,7 +1310,8 @@ def cmd_tunnel(a):
         print(f"grovy peer tunnel: warning: nothing answers on {a.local_host}:{a.port} yet (is grovy serving here?)",
               file=sys.stderr)
     try:
-        return run_tunnel(a.host, a.name, a.port, a.remote_socket, local=a.local_host, prepare=not a.no_prepare)
+        return run_tunnel(a.host, a.name, a.port, a.remote_socket, local=a.local_host, prepare=not a.no_prepare,
+                          identity=os.path.expanduser(a.identity) if a.identity else None)
     except KeyboardInterrupt:
         return 0
 
@@ -1249,6 +1335,7 @@ def add_parser(sub):
     x.add_argument("--remote-socket", help="socket path on the hub (default: ~/.local/state/grovy/peers/NAME.sock)")
     x.add_argument("--port", type=int, default=core.env_int("PORT", 7333), help="this machine's grovy port")
     x.add_argument("--local-host", default="127.0.0.1", help="the address this machine's grovy listens on")
+    x.add_argument("--identity", help="log in with this ssh key only (grovy setup uses ~/.ssh/grovy_tunnel)")
     x.add_argument("--no-prepare", action="store_true",
                    help="run no command on the hub, only the forward (for a key restricted to forwarding); "
                         "needs --remote-socket ABSOLUTE-PATH, its folder made once by hand")

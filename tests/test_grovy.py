@@ -3,18 +3,24 @@
 No API key needed: integration tests use a fake `claude` (a shell loop) inside real tmux,
 on a private tmux server socket (-L) so your own tmux sessions are never touched.
 """
+import base64
+import collections
 import io
+import ipaddress
 import json
 import re
 import os
 import shutil
 import socket
+import ssl
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import redirect_stdout
@@ -29,11 +35,17 @@ os.environ["XDG_STATE_HOME"] = os.path.join(TMP, "xdg")
 os.environ.pop("CCS_STATE_DIR", None)
 # Nor the user's own custom.css / custom.js / instructions.md.
 os.environ["XDG_CONFIG_HOME"] = os.path.join(TMP, "xdg-config")
-for _k in ("GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
+# Nor ~/.local/share (setup's bash completion).
+os.environ["XDG_DATA_HOME"] = os.path.join(TMP, "xdg-data")
+for _k in ("GROVY_HOME", "CCS_HOME", "GROVY_CONFIG_DIR", "CCS_CONFIG_DIR", "BASH_COMPLETION_USER_DIR"):
     os.environ.pop(_k, None)
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
-from grovylib import plugins, claude, client, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, steps, store, tmuxctl, uploads  # noqa: E402
+from grovylib import peers, plugins, claude, cleanup, client, cli, completion, remote, graft, setupflow, tui, update, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, steps, store, tls, tmuxctl, uploads  # noqa: E402
+# Paths fixed when grovy's modules load, from the real home: never let a test reach the real ~/.ssh or systemd units.
+graft.KEY = os.path.join(TMP, "home-ssh", "grovy_tunnel")
+graft.UNIT = os.path.join(TMP, "home-units", "grovy-tunnel.service")
+setupflow.UNIT = os.path.join(TMP, "home-units", "grovy.service")
 
 
 def ev(name, **kw):
@@ -837,12 +849,1034 @@ class TestSecurityReview(StoreCase):
             grovy.main(["page", "share", "x"])
 
 
+class TestCleanup(unittest.TestCase):
+    """`grovy cleanup` undoes `grovy setup`, from its record or (older installs) from what it finds."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(dir=TMP)
+        self.state = os.path.join(self.home, "state", "grovy")
+        self.cfg = os.path.join(self.home, "cfg", "grovy")
+        os.makedirs(self.state)
+        os.makedirs(self.cfg)
+        env = {"HOME": self.home, "GROVY_STATE_DIR": self.state, "XDG_CONFIG_HOME": os.path.join(self.home, "cfg"),
+               "TMPDIR": os.path.join(self.home, "tmp"), "PATH": "/usr/bin:/bin"}
+        for k in ("GROVY_SESSION", "CCS_SESSION"):
+            env[k] = ""
+        self.runs = []
+        fake_run = lambda argv, **kw: (self.runs.append(argv), subprocess.CompletedProcess(argv, 0, "", ""))[1]  # noqa: E731
+        for p in (mock.patch.dict(os.environ, env), mock.patch.object(cleanup, "_have_systemd", lambda: False),
+                  mock.patch.object(cleanup, "_linger_on", lambda: False),
+                  mock.patch.object(cleanup.subprocess, "run", fake_run),
+                  mock.patch.object(tmuxctl, "tmux_managed", lambda: {}),
+                  mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_cleanup(self, *args):
+        out = io.StringIO()
+        with mock.patch.object(sys.stdin, "isatty", lambda: False), redirect_stdout(out):
+            rc = grovy.main(["cleanup", *args])
+        return rc, out.getvalue()
+
+    def link(self, target):
+        os.makedirs(os.path.join(self.home, ".local", "bin"), exist_ok=True)
+        link = os.path.join(self.home, ".local", "bin", "grovy")
+        os.symlink(target, link)
+        return link
+
+    def test_removes_state_link_and_unit_keeps_home_and_code(self):
+        link = self.link(os.path.join(core.HERE, "grovy"))
+        unit = os.path.join(self.home, ".config", "systemd", "user", "grovy.service")
+        os.makedirs(os.path.dirname(unit))
+        for p in (unit, unit + ".bak"):
+            with open(p, "w") as f:
+                f.write(f"[Service]\nExecStart={os.path.join(core.HERE, 'grovy')} serve\n")
+        install.update_record(role="trunk", link=link)
+        rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(os.path.lexists(link))
+        self.assertFalse(os.path.exists(self.state))
+        self.assertFalse(os.path.exists(unit) or os.path.exists(unit + ".bak"))
+        self.assertTrue(os.path.isdir(self.cfg))                       # the grovy home is kept by default
+        self.assertTrue(os.path.exists(os.path.join(core.HERE, "grovy")))
+        self.assertNotIn(["loginctl", "disable-linger"], self.runs)  # setup never turned linger on
+
+    def test_remove_home_and_linger_only_when_setup_turned_it_on(self):
+        install.update_record(linger=True)
+        install.update_record(linger=False)           # a later setup that found it on doesn't forget who did it
+        self.assertTrue(install.read_record()["linger"])
+        rc, out = self.run_cleanup("-y", "--remove-home")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(["loginctl", "disable-linger"], self.runs)
+        self.assertFalse(os.path.exists(self.cfg))
+
+    def test_a_link_to_another_grovy_is_left_alone(self):
+        link = self.link("/elsewhere/grovy")
+        rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(os.path.lexists(link))
+
+    def test_dry_run_changes_nothing(self):
+        link = self.link(os.path.join(core.HERE, "grovy"))
+        rc, out = self.run_cleanup("--dry-run", "--remove-home")
+        self.assertIn("remove ~/.local/bin/grovy", out)
+        self.assertTrue(os.path.lexists(link) and os.path.isdir(self.state) and os.path.isdir(self.cfg))
+
+    def test_never_removes_a_folder_that_isnt_grovys(self):
+        self.assertFalse(cleanup.safe_to_remove(self.home))                  # GROVY_STATE_DIR=~ by mistake
+        self.assertFalse(cleanup.safe_to_remove("/"))
+        self.assertFalse(cleanup.safe_to_remove(os.path.dirname(self.home)))  # a parent of the home
+        self.assertFalse(cleanup.safe_to_remove(core.HERE))                    # the code
+        plain = tempfile.mkdtemp(dir=self.home, prefix="data")
+        self.assertFalse(cleanup.safe_to_remove(plain))
+        self.assertTrue(cleanup.safe_to_remove(self.state))
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": plain}):
+            rc, out = self.run_cleanup("-y")
+        self.assertTrue(os.path.isdir(plain))
+
+    def unit(self, exe):
+        unit = os.path.join(self.home, ".config", "systemd", "user", "grovy.service")
+        os.makedirs(os.path.dirname(unit), exist_ok=True)
+        with open(unit, "w") as f:
+            f.write(f"[Service]\nExecStart={exe} serve\n")
+        return unit
+
+    def test_refuses_a_service_that_runs_another_grovy(self):
+        """Review: from a scratch checkout, cleanup removed the live service of ~/dev/grovy and its shared state."""
+        unit = self.unit("/somewhere/else/grovy")
+        with self.assertRaises(SystemExit):
+            self.run_cleanup("-y")
+        self.assertTrue(os.path.exists(unit) and os.path.isdir(self.state))
+        self.assertEqual(cleanup.unit_owner(self.unit("%h/dev/grovy/grovy")), os.path.join(self.home, "dev", "grovy"))
+
+    def test_a_failed_step_keeps_the_record_for_the_rerun(self):
+        """Review: a step failed, then the state folder (holding the record) was removed anyway, so the rerun said
+        "Done" and never retried it; the tunnel key was deleted too."""
+        os.makedirs(os.path.dirname(graft.KEY), exist_ok=True)
+        open(graft.KEY, "w").close()
+        install.update_record(linger=True, graft={"key": graft.KEY})
+        with mock.patch.object(cleanup.subprocess, "run",
+                               lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "denied")):
+            rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.exists(install.record_path()) and os.path.exists(graft.KEY))
+        self.assertIn("skipped", out)
+
+    def test_a_trunk_that_is_gone_doesnt_block_cleanup(self):
+        """Second review: an unreachable (decommissioned) trunk made every cleanup fail and keep everything."""
+        os.makedirs(os.path.dirname(graft.KEY), exist_ok=True)
+        open(graft.KEY, "w").close()
+        install.update_record(graft={"trunk": "u@gone", "name": "pc", "key": graft.KEY},
+                              old_grafts=[{"trunk": "u@older", "name": "pc"}])
+        with mock.patch.object(graft, "remove_on_trunk", side_effect=RuntimeError("unreachable")) as rm:
+            rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(rm.call_count, 2)
+        self.assertIn("unreachable", out)
+        self.assertFalse(os.path.exists(graft.KEY) or os.path.exists(self.state))
+
+    def test_stop_pid_doesnt_take_a_busy_daemon_for_gone(self):
+        """Second review: a status timeout counted as "already gone", so the state was removed under it."""
+        with mock.patch.object(client, "sock_request", side_effect=socket.timeout("timed out")), \
+                mock.patch.object(os, "kill") as kill:
+            with self.assertRaises(RuntimeError):
+                cleanup._stop_pid(4242)
+            kill.assert_not_called()
+        with mock.patch.object(client, "sock_request", side_effect=ConnectionRefusedError), \
+                mock.patch.object(os, "kill") as kill:
+            cleanup._stop_pid(4242)                       # really gone: fine, nothing to kill
+            kill.assert_not_called()
+
+    def test_unit_owner_reads_the_forms_systemd_allows(self):
+        here = os.path.realpath(core.HERE)
+        for line in (f"ExecStart=-{here}/grovy serve", f"ExecStart = {here}/grovy serve",
+                     f"ExecStart=/usr/bin/python3 {here}/grovy.py serve", f'ExecStart="{here}/grovy" serve'):
+            self.assertEqual(cleanup.unit_owner(self.unit_text(line)), here, line)
+
+    def unit_text(self, line):
+        path = os.path.join(self.home, "u.service")
+        with open(path, "w") as f:
+            f.write(f"[Service]\nExecStart=\n{line}\n")
+        return path
+
+    def test_linger_off_failing_is_a_failure(self):
+        install.update_record(linger=True)
+        with mock.patch.object(cleanup.subprocess, "run",
+                               lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "denied")):
+            rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 1)
+        self.assertIn("denied", out)
+        self.assertTrue(install.read_record()["linger"])          # still recorded, so a rerun tries again
+
+    def test_a_daemon_that_wont_stop_stops_everything(self):
+        with mock.patch.object(client, "sock_request", lambda *a, **k: {"url": "x", "pid": 4242}), \
+                mock.patch.object(cleanup, "_stop_pid", side_effect=RuntimeError("didn't stop")):
+            rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.isdir(self.state))               # not removed under a daemon still running
+
+    def test_dry_run_on_a_clean_computer_leaves_no_folder(self):
+        shutil.rmtree(self.state)
+        rc, out = self.run_cleanup("--dry-run")
+        self.assertFalse(os.path.exists(self.state), out)
+        self.assertIn("Nothing to remove", out)
+
+    def test_a_trailing_slash_doesnt_see_through_a_link(self):
+        target = os.path.join(self.home, "real-grovy")
+        os.makedirs(target)
+        open(os.path.join(target, "keep"), "w").close()
+        link = os.path.join(self.home, "link-grovy")
+        os.symlink(target, link)
+        self.assertFalse(cleanup.safe_to_remove(link + "/"))
+        self.assertFalse(cleanup.safe_to_remove(link))
+
+    def test_refuses_inside_a_grovy_session(self):
+        with mock.patch.dict(os.environ, {"GROVY_SESSION": "me"}), self.assertRaises(SystemExit):
+            self.run_cleanup("-y")
+        self.assertTrue(os.path.isdir(self.state))
+
+    def test_daemon_outside_the_service_is_stopped_and_an_old_one_refused(self):
+        with mock.patch.object(client, "sock_request", lambda *a, **k: {"url": "x", "pid": 4242}), \
+                mock.patch.object(cleanup, "_stop_pid") as stop:
+            rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 0, out)
+        stop.assert_called_once_with(4242)
+        os.makedirs(self.state, exist_ok=True)
+        with mock.patch.object(client, "sock_request", lambda *a, **k: {"url": "x"}), self.assertRaises(SystemExit):
+            self.run_cleanup("-y")
+        self.assertTrue(os.path.isdir(self.state))      # nothing removed under a daemon we can't stop
+
+    def test_sessions_are_ended_only_when_asked(self):
+        with mock.patch.object(tmuxctl, "tmux_managed", lambda: {"s1": "%1"}), \
+                mock.patch.object(tmuxctl, "tmux") as tm:
+            rc, out = self.run_cleanup("-y")
+            self.assertFalse(tm.called)
+            self.assertIn("keep running", out)
+            os.makedirs(self.state, exist_ok=True)
+            rc, out = self.run_cleanup("-y", "--end-sessions")
+            tm.assert_called_once_with("kill-session", "-t", "=grovy-s1", check=False)
+
+    def test_setup_writes_the_record(self):
+        with mock.patch.object(shutil, "which", lambda x: "/bin/true"), \
+                mock.patch.object(install, "cmd_url", lambda a: None), mock.patch.object(setupflow.time, "sleep"), \
+                redirect_stdout(io.StringIO()):
+            rc = grovy.main(["setup", "-y", "--bind", "127.0.0.1", "--port", "7399", "--no-service"])
+        self.assertEqual(rc, 0)
+        rec = install.read_record()
+        self.assertEqual((rec["role"], rec["bind"], rec["port"]), ("trunk", "127.0.0.1", 7399))
+        self.assertEqual(rec["link"], os.path.join(self.home, ".local", "bin", "grovy"))
+
+
+class TestCompletion(unittest.TestCase):
+    """bash's tab: `grovy __complete LINE` answers from the CLI's own parser."""
+    real_other_names = staticmethod(completion.other_names)   # setUp replaces it
+
+    def complete(self, line, wordbreaks=":"):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch.dict(os.environ, {"GROVY_WORDBREAKS": wordbreaks}):
+            self.assertEqual(cli.main(["__complete", line]), 0)
+        return out.getvalue().splitlines()
+
+    def setUp(self):
+        for p in (mock.patch.object(completion, "local_sessions", lambda: ["Grovy", "Tups"]),
+                  mock.patch.object(completion, "machines", lambda: {"pc": "peer", "trunk": "trunk"}),
+                  mock.patch.object(remote, "peer_lines", lambda only=None: ([("pc:build", "idle", "/x")], [])),
+                  mock.patch.object(remote, "trunk_host", lambda: "me@hub"),
+                  mock.patch.object(remote, "trunk_lines", lambda host: ([("trunk:Tups", "idle", "/y")], [])),
+                  mock.patch.object(completion, "other_names", lambda: [])):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_commands_options_and_choices(self):
+        cmds = self.complete("grovy ")
+        self.assertIn("attach", cmds)
+        self.assertIn("completion", cmds)
+        self.assertNotIn("hook", cmds)   # Claude Code's, not yours
+        self.assertEqual(self.complete("grovy at"), ["attach"])
+        self.assertEqual(self.complete("grovy page "), ["publish", "rm", "ls"])
+        self.assertEqual(self.complete("grovy note --tone "), ["ok", "warn", "bad"])
+        self.assertEqual(self.complete("grovy logs --l"), ["--lines"])
+        self.assertEqual(self.complete("grovy logs -n 50 T"), ["Tups"])   # an option's value isn't a positional
+        self.assertEqual(self.complete("grovy nope "), [])
+        self.assertEqual(self.complete("grovy new t1 "), [])      # a folder: bash completes file names
+        self.assertEqual(self.complete("grovy x share "), [])     # a plugin's own arguments
+        self.assertEqual(self.complete("grovy rename Tups "), [])  # the new name is yours to pick
+
+    def test_session_names_here_and_on_other_machines(self):
+        self.assertEqual(self.complete("grovy attach "), ["Grovy", "Tups", "pc:", "trunk:"])
+        self.assertEqual(self.complete("grovy attach p"), ["pc:"])
+        self.assertEqual(self.complete("grovy kill pc:"), ["build"])          # bash replaces what follows the ':'
+        self.assertEqual(self.complete("grovy kill pc:", wordbreaks=" "), ["pc:build"])
+        self.assertEqual(self.complete("grovy logs trunk:T"), ["Tups"])
+        self.assertEqual(self.complete("grovy ls "), ["pc", "trunk"])
+        self.assertEqual(self.complete("grovy attach 'Tu"), ["Tups"])        # an unfinished quote
+
+    def test_other_machines_names_alone_when_unambiguous(self):
+        with mock.patch.object(completion, "other_names", lambda: ["pc:build", "pc:Grovy", "pc:x", "trunk:x"]):
+            # build: on pc only; Grovy: here wins; x: on two machines, so it needs its MACHINE:
+            self.assertEqual(self.complete("grovy attach "), ["Grovy", "Tups", "build", "pc:", "trunk:"])
+
+    def test_the_names_cache_is_refreshed_in_the_background(self):
+        spawned = []
+        with mock.patch.object(completion, "other_names", self.real_other_names), \
+                mock.patch.object(completion.subprocess, "Popen", lambda argv, **kw: spawned.append((argv, kw))):
+            if os.path.exists(completion.cache_path()):
+                os.unlink(completion.cache_path())
+            self.assertEqual(completion.other_names(), [])   # never waits: nothing known yet
+            self.assertEqual(len(spawned), 1)
+            self.assertEqual(spawned[0][0][-2:], ["__complete", "--refresh"])
+            self.assertTrue(spawned[0][1]["start_new_session"])
+            completion.other_names()                          # a refresh is under way: no second one
+            self.assertEqual(len(spawned), 1)
+            with mock.patch.object(remote, "elsewhere", lambda: (["pc:build"], [])):
+                self.assertEqual(completion.complete(["--refresh"]), 0)
+            self.assertEqual(completion.other_names(), ["pc:build"])
+            with mock.patch.object(completion.time, "time", lambda: 10 ** 11):
+                completion.other_names()                      # stale: asked again
+            self.assertEqual(len(spawned), 2)
+
+    def test_a_failure_prints_nothing(self):
+        with mock.patch.object(completion, "candidates", mock.Mock(side_effect=RuntimeError("x"))):
+            self.assertEqual(self.complete("grovy "), [])
+
+    @unittest.skipUnless(shutil.which("bash"), "needs bash")
+    def test_the_bash_function(self):
+        """The script as bash runs it, asking the real `grovy __complete`."""
+        d = tempfile.mkdtemp(dir=TMP)
+        os.symlink(os.path.join(ROOT, "grovy"), os.path.join(d, "grovy"))
+        script = ('eval "$(grovy completion bash)"; complete -p grovy; '
+                  'for line in "grovy at" "grovy page " "grovy attach x" "grovy ls --"; do COMP_LINE="$line"; '
+                  'COMP_POINT=${#line}; read -ra COMP_WORDS <<<"$line"; _grovy 2>&1; '
+                  'echo "$line|${COMPREPLY[*]}"; done')
+        out = subprocess.run(["bash", "--norc", "-c", script], capture_output=True, text=True, timeout=30,
+                             env={**os.environ, "PATH": d + os.pathsep + os.environ["PATH"]}).stdout.splitlines()
+        self.assertEqual(out[0], "complete -o default -F _grovy grovy")
+        self.assertIn("grovy at|attach", out)
+        self.assertIn("grovy page |publish rm ls", out)
+        self.assertIn("grovy attach x|", out)   # no session x: nothing (and bash falls back to file names)
+        self.assertIn("grovy ls --|--help --here --plain", out)
+
+    def test_cleanup_removes_only_its_own_file(self):
+        path = completion.path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        for content, removed in ((completion.SCRIPT, True), ("# someone's own grovy completion\n", False)):
+            with open(path, "w") as f:
+                f.write(content)
+            with mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError)):
+                steps, why = cleanup.plan({}, False, state_existed=False)
+            labels = [l for l, _ in steps]
+            self.assertEqual(any("tab completion" in (l or "") for l in labels), removed, labels)
+        os.unlink(path)
+
+
+class TestTrunkFromAGraft(unittest.TestCase):
+    """On a graft, `grovy ls` shows the trunk's own sessions too (reported: `grovy ls` there showed none)."""
+
+    def test_rows_are_the_trunks_own(self):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "NAME             STATE        PATH\n"
+                                               "Tups             idle         /home/me/tups\n"
+                                               "pc:build         idle         /x\n"
+                                               "evil\x1b]52;c;x\x07  idle   /z\n", "")
+        rows, notes = remote.trunk_lines("me@hub", run=run)
+        self.assertEqual(rows, [("trunk:Tups", "idle", "/home/me/tups")])   # not the grafts' (this one included)
+        self.assertEqual(notes, [])
+        self.assertIn("BatchMode=yes", seen[0])
+        self.assertIn("ls --here", seen[0][-1])
+        self.assertEqual(seen[0][-2:-1], ["me@hub"])
+
+    def test_a_failed_login_is_a_note(self):
+        rows, notes = remote.trunk_lines("me@hub", run=lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 255, "", "me@hub: Permission denied (publickey,password).\n"))
+        self.assertEqual(rows, [])
+        self.assertIn("Permission denied", notes[0])
+        self.assertIn("grovy ls trunk", notes[0])
+        self.assertEqual(remote.trunk_lines("-oProxyCommand=x")[0], [])
+
+    def test_ls_lists_them_and_attach_points_there(self):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(remote, "trunk_host", lambda: "me@hub"), \
+                mock.patch.object(remote, "trunk_lines", lambda host: ([("trunk:Tups", "idle", "/t")], [])), \
+                mock.patch.object(remote, "peer_lines", lambda only=None: ([], [])), \
+                mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError)), \
+                mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            cli.main(["ls"])
+            self.assertIn("trunk:Tups", out.getvalue())
+            out.truncate(0)
+            cli.main(["ls", "--here"])
+            self.assertNotIn("trunk:", out.getvalue())
+            with mock.patch.object(remote, "run", lambda a: a.name):
+                self.assertEqual(cli.main(["attach", "Tups"]), "trunk:Tups")   # the name alone is enough
+        self.assertIn("(Tups is trunk:Tups)", err.getvalue())
+
+
+class FakeTty(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class TestLsLooks(unittest.TestCase):
+    """`grovy ls` is a coloured table on a terminal, and exactly the plain columns it always was anywhere else:
+    remote.trunk_lines parses `grovy ls --here` from a graft by whitespace, and scripts may too."""
+    PLAIN = ("NAME             STATE        PATH\n"
+             "a                idle         /home/me/a\n"
+             "b                needs_input  /w/b\n"
+             "old              exited       /o\n"
+             "pc:build         working      /x\n")
+
+    def ls(self, argv, out, env=None, remote_rows=(("pc:build", "working", "/x"),)):
+        err = io.StringIO()
+        reg = {"a": {"cwd": "/home/me/a"}, "b": {"cwd": "/w/b"}, "old": {"cwd": "/o"}}
+        status = {"sessions": {"a": {"state": "idle"}, "b": {"state": "needs_input"}}}
+        with mock.patch.object(sessions, "registry", lambda: reg), \
+                mock.patch.object(tmuxctl, "tmux_managed", lambda: {"a": "%1", "b": "%2"}), \
+                mock.patch.object(client, "sock_request", lambda msg, **kw: status), \
+                mock.patch.object(remote, "trunk_host", lambda: None), \
+                mock.patch.object(remote, "peer_lines", lambda only=None: (list(remote_rows), ["laptop: offline"])), \
+                mock.patch.object(completion, "remember", lambda names: None), \
+                mock.patch.dict(os.environ, {"TERM": "xterm", **(env or {})}), \
+                mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            if not env or "NO_COLOR" not in env:
+                os.environ.pop("NO_COLOR", None)
+            cli.main(argv)
+        return out.getvalue(), err.getvalue()
+
+    def test_plain_when_not_a_terminal_byte_for_byte(self):
+        out, err = self.ls(["ls"], io.StringIO())
+        self.assertEqual(out, self.PLAIN)
+        self.assertEqual(err, "laptop: offline\n")
+        self.assertEqual(self.ls(["ls"], FakeTty(), env={"NO_COLOR": "1"})[0], self.PLAIN)
+        self.assertEqual(self.ls(["ls", "--plain"], FakeTty())[0], self.PLAIN)
+        out, _ = self.ls(["ls"], io.StringIO(), remote_rows=())
+        self.assertEqual(out, self.PLAIN.replace("pc:build         working      /x\n", ""))
+
+    def test_trunk_lines_still_parses_it(self):
+        out, _ = self.ls(["ls", "--here"], io.StringIO())
+        rows, notes = remote.trunk_lines("me@hub", run=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, out, ""))
+        self.assertEqual([r[:2] for r in rows], [("trunk:a", "idle"), ("trunk:b", "needs_input"), ("trunk:old", "exited")])
+
+    def test_a_table_with_colours_on_a_terminal(self):
+        with mock.patch.dict(os.environ, {"HOME": "/home/me"}), mock.patch.object(tui, "width", lambda: 80), \
+                mock.patch.object(shutil, "get_terminal_size", lambda *a: os.terminal_size((80, 24))):
+            out, err = self.ls(["ls"], FakeTty())
+            # pc:build is wider than this machine's names: the 4 lines shown at once are drawn again, lined up
+            self.assertIn("\x1b[4A\x1b[J", out)
+            screen = out.split("\x1b[J")[-1]
+            with mock.patch.object(shutil, "get_terminal_size", lambda *a: os.terminal_size((80, 4))):
+                tail = self.ls(["ls"], FakeTty())[0]   # too tall to be sure it's on the screen: a block of its own
+            self.assertNotIn("\x1b[J", tail)
+            self.assertTrue(tui._ANSI.sub("", tail).endswith("pc:build  ● working      /x\n"))
+        out = screen
+        self.assertIn("\x1b[", out)
+        lines = [tui._ANSI.sub("", x) for x in out.splitlines()]
+        self.assertEqual(lines[0].split(), ["NAME", "STATE", "PATH"])
+        self.assertIn("~/a", lines[1])   # the home folder as ~
+        self.assertIn("needs input", lines[2])
+        self.assertTrue(lines[4].startswith("pc:build"))
+        col = lines[0].index("PATH")
+        self.assertEqual({x[col - 1:col + 1] for x in lines[1:]}, {" ~", " /"}, lines)   # one table, lined up
+        self.assertIn("\x1b[33;1m▲ needs input", out)   # what wants you stands out
+        self.assertIn("laptop: offline", err)
+
+
+class TestCliLooks(unittest.TestCase):
+    def test_die_is_red_on_a_terminal_only(self):
+        for stream, coloured in ((io.StringIO(), False), (FakeTty(), True)):
+            with mock.patch("sys.stderr", stream), mock.patch.dict(os.environ, {"TERM": "xterm"}), \
+                    self.assertRaises(SystemExit):
+                os.environ.pop("NO_COLOR", None)
+                core.die("nope")
+            self.assertEqual(tui._ANSI.sub("", stream.getvalue()), "grovy: nope\n")
+            self.assertEqual("\x1b[" in stream.getvalue(), coloured)
+
+    def test_done_lines_are_unchanged_off_a_terminal(self):
+        out = io.StringIO()
+        tui.done("started x in tmux session grovy-x", "  (grovy attach x)", stream=out)
+        self.assertEqual(out.getvalue(), "started x in tmux session grovy-x  (grovy attach x)\n")
+
+    def test_peer_ls_plain_unchanged(self):
+        out = io.StringIO()
+        conf = {"pc": {"socket": "/s/pc.sock"}, "lap": {"socket": "/s/lap.sock"}, "new": {"socket": "/s/n.sock"}}
+        live = {"peers": [{"name": "pc", "state": "online"},
+                          {"name": "lap", "state": "offline", "last_seen": None, "error": "refused"}]}
+        with mock.patch.object(peers, "read_config", lambda: (conf, [])), \
+                mock.patch.object(peers, "_sock_request", lambda msg: live), mock.patch("sys.stdout", out):
+            peers.cmd_ls(None)
+        self.assertEqual(out.getvalue(), f"lap\t/s/lap.sock\toffline, last seen {peers.ago(None)}: refused\n"
+                                         "new\t/s/n.sock\tnot loaded yet\npc\t/s/pc.sock\tonline\n")
+
+    def test_doctor_keeps_an_earlier_failure(self):
+        """grovy doctor said all was well (exit 0) when tmux was missing but grovy's certificate matched: the
+        certificate check overwrote the result so far."""
+        which = lambda c: None if c == "tmux" else "/bin/" + c   # noqa: E731
+        with mock.patch.object(shutil, "which", which), \
+                mock.patch.object(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "1.0", "")), \
+                mock.patch.object(tls, "cert_paths", lambda: (tls.own_cert(), None)), \
+                mock.patch.object(tls, "context", lambda *a: None), \
+                mock.patch.object(tls, "expires_soon", lambda p: False), \
+                mock.patch.object(tls, "matches", lambda *a: True), \
+                mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError("down"))), \
+                mock.patch.object(tmuxctl, "tmux_managed", lambda: {}), \
+                mock.patch.object(sessions, "registry", lambda: {}), \
+                redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(install.cmd_doctor(None), 1)
+        self.assertIn("[FAIL] tmux: not found", out.getvalue())
+
+
+class TestPlainNamesAcrossMachines(unittest.TestCase):
+    """A session name without MACHINE: that isn't here is looked for on the other machines (the user: local and
+    remote should be as transparent as possible)."""
+
+    def main(self, argv, found, local=False):
+        ran, err = [], io.StringIO()
+        with mock.patch.object(remote, "find", mock.Mock(return_value=(found, ["laptop: offline"]))) as find, \
+                mock.patch.object(cli, "here", lambda n: local), \
+                mock.patch.object(remote, "run", lambda a: ran.append(("remote", a.name, getattr(a, "new", None)))), \
+                mock.patch.object(cli, "cmd_attach", lambda a: ran.append(("local", a.name))), \
+                mock.patch.object(cli, "cmd_rename", lambda a: ran.append(("local", a.name))), \
+                mock.patch("sys.stderr", err):
+            try:
+                cli.main(argv)
+            except SystemExit:
+                ran.append("died")
+        return ran, find, err.getvalue()
+
+    def test_one_machine_has_it(self):
+        ran, _, _ = self.main(["attach", "Tups"], ["pc:Tups"])
+        self.assertEqual(ran, [("remote", "pc:Tups", None)])
+        ran, _, _ = self.main(["rename", "Tups", "T2"], ["pc:Tups"])
+        self.assertEqual(ran, [("remote", "pc:Tups", "T2")])
+
+    def test_here_wins_and_isnt_looked_up(self):
+        ran, find, _ = self.main(["attach", "Tups"], ["pc:Tups"], local=True)
+        self.assertEqual(ran, [("local", "Tups")])
+        find.assert_not_called()
+
+    def test_two_machines_ask_which(self):
+        ran, _, err = self.main(["attach", "Tups"], ["pc:Tups", "laptop:Tups"])
+        self.assertEqual(ran, ["died"])
+        self.assertIn("pc:Tups or laptop:Tups", err)
+
+    def test_nowhere_is_the_usual_error_with_the_machines_that_didnt_answer(self):
+        ran, _, err = self.main(["attach", "Tups"], [])
+        self.assertEqual(ran, [("local", "Tups")])
+        self.assertIn("laptop: offline", err)
+
+    def test_new_stays_here(self):
+        with mock.patch.object(cli, "cmd_new", lambda a: "local"), mock.patch.object(remote, "find") as find:
+            self.assertEqual(cli.main(["new", "t9", "/tmp"]), "local")
+        find.assert_not_called()
+
+    def test_find_matches_whole_names(self):
+        with mock.patch.object(remote, "elsewhere", lambda: (["pc:Tups", "pc:Tups2", "trunk:Tups"], [])):
+            self.assertEqual(remote.find("Tups"), (["pc:Tups", "trunk:Tups"], []))
+
+
+class TestSetupFlow(unittest.TestCase):
+    """The guided `grovy setup`: what it plans, that a rerun with the same answers changes nothing, its defaults."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(dir=TMP)
+        self.runs = []
+
+        def fake_run(argv, **kw):
+            self.runs.append(argv)
+            out = "inactive\n" if argv[:3] == ["systemctl", "--user", "is-active"] else ""
+            if argv[:2] == ["loginctl", "show-user"]:
+                out = "Linger=yes\n" if ["loginctl", "enable-linger"] in self.runs else "Linger=no\n"
+            return subprocess.CompletedProcess(argv, 0, out, "")
+        for p in (mock.patch.dict(os.environ, {"HOME": self.home, "GROVY_STATE_DIR": os.path.join(self.home, "st-grovy"),
+                                               "XDG_CONFIG_HOME": os.path.join(self.home, "cfg"),
+                                               "XDG_DATA_HOME": os.path.join(self.home, "data")}),
+                  mock.patch.object(setupflow, "UNIT", os.path.join(self.home, "grovy.service")),
+                  mock.patch.object(setupflow.subprocess, "run", fake_run),
+                  mock.patch.object(setupflow, "addresses", lambda: [("vpn", "100.64.1.2"), ("lan", "192.168.1.9")]),
+                  mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError)),
+                  mock.patch("sys.stdout", io.StringIO())):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def apply(self, steps):
+        for _, action in steps:
+            action()
+
+    def test_first_setup_plans_everything_a_rerun_nothing(self):
+        steps = setupflow.plan_trunk("127.0.0.1", 7390, False, True, install.read_record())
+        labels = " | ".join(l for l, _ in steps if l)
+        for want in ("link ~/.local/bin/grovy", "your grovy home", "grovy service, listening on 127.0.0.1:7390",
+                     "start grovy", "linger", "tab completion for bash"):
+            self.assertIn(want, labels)
+        self.apply(steps)
+        with open(completion.path()) as f:
+            self.assertEqual(f.read(), completion.SCRIPT)
+        self.assertTrue(completion.path().startswith(self.home))
+        self.assertIn("Environment=GROVY_PORT=7390", open(setupflow.UNIT).read())
+        rec = install.read_record()
+        self.assertEqual((rec["role"], rec["port"], rec["https"], rec["linger"]), ("trunk", 7390, False, True))
+        with mock.patch.object(setupflow.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(
+                argv, 0, "active\n" if "is-active" in argv else "Linger=yes\n", "")):
+            again = setupflow.plan_trunk("127.0.0.1", 7390, False, True, install.read_record())
+        self.assertEqual(again, [])                                  # same answers: nothing to change
+
+    def test_a_changed_address_says_what_it_was(self):
+        self.apply(setupflow.plan_trunk("127.0.0.1", 7390, False, True, {}))
+        steps = setupflow.plan_trunk("100.64.1.2", 7390, False, True, install.read_record())
+        self.assertTrue(any(l and "100.64.1.2:7390" in l and "(was 127.0.0.1:7390)" in l for l, _ in steps))
+
+    def test_an_install_older_than_the_record_keeps_its_settings(self):
+        """Review: a main-era install (unit, no setup.json) rerun with -y was rebound to 127.0.0.1 with HTTPS off."""
+        with open(setupflow.UNIT, "w") as f:
+            f.write(install.service_unit("100.64.1.2", 7444))
+        os.makedirs(os.path.dirname(tls.own_cert()), exist_ok=True)
+        open(tls.own_cert(), "w").close()
+        rec = setupflow.current({})
+        self.assertEqual((rec["bind"], rec["port"], rec["https"], rec["role"]), ("100.64.1.2", 7444, True, "trunk"))
+        with mock.patch.object(tui, "interactive", lambda: False):
+            self.assertEqual(setupflow.ask_bind(rec), "100.64.1.2")
+            self.assertTrue(setupflow.ask_https("100.64.1.2", rec))
+
+    def test_a_recorded_address_thats_down_stays_the_default(self):
+        """Review: with the VPN down, -y rebound the service to 127.0.0.1."""
+        with mock.patch.object(tui, "interactive", lambda: False), mock.patch.object(setupflow, "addresses", lambda: []):
+            self.assertEqual(setupflow.ask_bind({"bind": "100.64.9.9"}), "100.64.9.9")
+
+    def test_dry_run_and_no_terminal_change_nothing(self):
+        """Review: a dry run with only the record to update wrote it; without a terminal or -y, setup applied
+        defaults (and could cut the phone off)."""
+        install.update_record(role="graft", bind="127.0.0.1", port=7390)
+        before = open(install.record_path()).read()
+        steps = [(None, lambda: install.update_record(role="trunk"))]
+        self.assertFalse(setupflow.review_and_apply("t", steps, True))
+        self.assertEqual(open(install.record_path()).read(), before)
+        ran = []
+        with mock.patch.object(tui, "interactive", lambda: False):
+            self.assertFalse(setupflow.review_and_apply("t", [("x", lambda: ran.append(1))], False))
+        self.assertEqual(ran, [])
+        with mock.patch.object(tui, "AUTO", True):
+            self.assertTrue(setupflow.review_and_apply("t", [("x", lambda: ran.append(1))], False))
+        self.assertEqual(ran, [1])
+
+    def test_linger_failing_is_only_a_warning(self):
+        def run(argv, **kw):
+            if argv[:2] == ["loginctl", "enable-linger"]:
+                return subprocess.CompletedProcess(argv, 1, "", "denied by polkit")
+            return subprocess.CompletedProcess(argv, 0, "Linger=no\n" if "show-user" in argv else "inactive\n", "")
+        with mock.patch.object(setupflow.subprocess, "run", run):
+            steps = setupflow.plan_trunk("127.0.0.1", 7390, False, True, {})
+            linger = next(a for l, a in steps if l and "linger" in l)
+            linger()                                       # no exception: setup goes on to the record and the link
+        self.assertFalse(install.read_record().get("linger"))
+
+    def test_becoming_a_trunk_takes_the_graft_down(self):
+        """Review: a graft switched to trunk kept tunnelling into its old trunk, which could still drive it."""
+        rec = {"role": "graft", "bind": "127.0.0.1", "port": 7390, "graft": {"trunk": "hub", "name": "pc"}}
+        steps = setupflow.plan_trunk("127.0.0.1", 7390, False, False, rec)
+        leave = [a for l, a in steps if l and "stop the tunnel to hub" in l]
+        self.assertEqual(len(leave), 1)
+        with mock.patch.object(graft, "leave") as lv:
+            leave[0]()
+        lv.assert_called_once_with({"trunk": "hub", "name": "pc"}, "now a trunk")
+        self.assertIsNone(install.read_record()["graft"])
+
+    def test_https_without_any_name_is_refused(self):
+        with mock.patch.object(setupflow, "addresses", lambda: []), mock.patch.object(tls, "default_names", lambda: []):
+            with self.assertRaises(SystemExit):
+                setupflow.plan_trunk("0.0.0.0", 7390, True, False, {})
+
+    def test_an_address_thats_down_doesnt_move_the_port(self):
+        """Second review: binding an address that isn't up fails, which read as "busy", so -y moved the port."""
+        self.assertFalse(install._port_busy("10.255.255.254", 7333))
+
+    def test_the_port_check_probes_the_address_itself(self):
+        """Review: for 0.0.0.0 it probed 127.0.0.1 and missed a listener on one specific address."""
+        seen = []
+        with mock.patch.object(install, "_port_busy", lambda b, p: seen.append(b) or False), \
+                mock.patch.object(tui, "interactive", lambda: False):
+            setupflow.ask_port("0.0.0.0", {}, None)
+        self.assertEqual(seen, ["0.0.0.0"])
+
+    def test_https_off_is_written_into_the_unit(self):
+        self.assertIn("Environment=GROVY_TLS=off", install.service_unit("1.2.3.4", 1, tls_off=True))
+        self.assertNotIn("GROVY_TLS", install.service_unit("1.2.3.4", 1))
+
+    def test_defaults_are_this_computer_only_and_no_https(self):
+        with mock.patch.object(tui, "interactive", lambda: False):
+            self.assertEqual(setupflow.ask_role({}), "trunk")
+            self.assertEqual(setupflow.ask_bind({}), "127.0.0.1")
+            self.assertEqual(setupflow.ask_bind({"bind": "100.64.1.2"}), "100.64.1.2")   # a rerun keeps the answer
+            self.assertFalse(setupflow.ask_https("100.64.1.2", {}))
+        self.assertFalse(setupflow.ask_https("127.0.0.1", {"https": True}))          # never asked for local only
+
+    def test_yes_on_a_terminal_takes_the_defaults_and_doesnt_leak(self):
+        with mock.patch.object(sys.stdin, "isatty", lambda: True), mock.patch.object(sys.stdout, "isatty", lambda: True,
+                                                                                         create=True), \
+                mock.patch.object(shutil, "which", lambda x: "/bin/true"), mock.patch.object(setupflow.time, "sleep"), \
+                mock.patch("builtins.input", side_effect=AssertionError("asked a question")):
+            rc = grovy.main(["setup", "-y", "--no-service", "--port", "7391"])
+            self.assertEqual(rc, 0)
+            self.assertFalse(tui.AUTO)
+        self.assertEqual(install.read_record()["bind"], "127.0.0.1")
+
+    def test_rerun_menu_can_remove(self):
+        install.update_record(role="trunk", bind="127.0.0.1", port=7390)
+        with mock.patch.object(tui, "interactive", lambda: True), \
+                mock.patch.object(tui, "select", lambda q, opts, default=0: "remove"), \
+                mock.patch.object(cleanup, "cmd_cleanup", lambda a: 7) as c:
+            self.assertEqual(grovy.main(["setup"]), 7)
+
+
+class TestGraft(unittest.TestCase):
+    """The graft half of setup: probing the trunk, the scripts it runs there, the tunnel key and unit, cleanup."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(dir=TMP)
+        for p in (mock.patch.object(graft, "KEY", os.path.join(self.home, ".ssh", "grovy_tunnel")),
+                  mock.patch.object(graft, "UNIT", os.path.join(self.home, "grovy-tunnel.service"))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_remote(self, script, stdin, home=None):
+        """Run a trunk-side script for real, in a fake trunk home whose `grovy` logs its arguments and stdin."""
+        home = home or self.home
+        os.makedirs(os.path.join(home, ".local", "bin"), exist_ok=True)
+        fake = os.path.join(home, ".local", "bin", "grovy")
+        with open(fake, "w") as f:
+            f.write('#!/bin/sh\nif [ "$1 $2" = "peer -h" ]; then exit 0; fi\n'
+                    'printf "%s|%s\\n" "$*" "$(cat)" >> "$HOME/grovy.log"\n')
+        os.chmod(fake, 0o755)
+        env = {"HOME": home, "PATH": "/usr/bin:/bin",
+               **{k: os.environ[k] for k in ("LANG", "LC_ALL") if k in os.environ}}   # a trunk's locale reaches it
+        return subprocess.run(["sh", "-c", script], input=stdin, capture_output=True, text=True, env=env, timeout=20)
+
+    def keypair(self):
+        os.makedirs(os.path.dirname(graft.KEY), exist_ok=True)
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "t", "-f", graft.KEY], check=True,
+                       capture_output=True)
+        return graft.public_key()
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_add_script_writes_a_restricted_line_and_keeps_the_others(self):
+        trunk = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(trunk, ".ssh"))
+        ak = os.path.join(trunk, ".ssh", "authorized_keys")
+        with open(ak, "w") as f:
+            f.write("ssh-ed25519 AAAAothersothersothersothers me@laptop\n")
+        pub = self.keypair()
+        script = graft.ADD_SCRIPT.replace("@NAME@", "pc").replace("@RMOLD@", ":")
+        for _ in range(2):   # a rerun replaces our line rather than adding a second
+            r = self.run_remote(script, f"TOKEN123\n{pub}\n", trunk)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        sock = os.path.join(trunk, ".local", "state", "grovy", "peers", "pc.sock")
+        self.assertIn("SOCKET=" + sock, r.stdout)
+        lines = open(ak).read().splitlines()
+        self.assertEqual(lines[0], "ssh-ed25519 AAAAothersothersothersothers me@laptop")
+        self.assertEqual(lines[1:], [f'restrict,port-forwarding,permitopen="127.0.0.1:9",permitlisten="127.0.0.1:9",'
+                                     f'command="rm -f {sock}; echo {sock}" {pub} grovy-tunnel:pc'])
+        self.assertEqual(os.stat(os.path.join(trunk, ".local", "state", "grovy", "peers")).st_mode & 0o777, 0o700)
+        log = open(os.path.join(trunk, "grovy.log")).read()
+        self.assertIn(f"peer add pc --socket {sock}|TOKEN123", log)     # the token on stdin, never in argv
+        out = subprocess.run(["ssh-keygen", "-l", "-f", ak], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)                   # OpenSSH reads our line, options and all
+        self.assertIn("grovy-tunnel:pc", out.stdout)
+
+    def trunk_with(self, content):
+        trunk = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(trunk, ".ssh"))
+        ak = os.path.join(trunk, ".ssh", "authorized_keys")
+        with open(ak, "wb") as f:
+            f.write(content)
+        return trunk, ak
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_add_script_keeps_lines_that_arent_utf8_and_replaces_the_names_old_key(self):
+        """Review: in a UTF-8 locale grep silently dropped a line with a Latin-1 comment; a NUL byte dropped the
+        rest; and another computer's line under the same name stayed, so both tunnels fought over one socket."""
+        pub = self.keypair()
+        other = b'restrict,command="x" ssh-ed25519 AAAAotherpcotherpcotherpc grovy-tunnel:pc\n'
+        content = (b"ssh-ed25519 AAAAlatin1latin1latin1latin1 jos\xe9@laptop\n" + other +
+                   b"ssh-ed25519 AAAAnulnulnulnulnulnul a\x00b\nssh-ed25519 AAAAlastlastlastlastlast last-no-newline")
+        trunk, ak = self.trunk_with(content)
+        env_utf8 = {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+        with mock.patch.dict(os.environ, env_utf8):
+            r = self.run_remote(graft.ADD_SCRIPT.replace("@NAME@", "pc").replace("@RMOLD@", ":"), f"T\n{pub}\n", trunk)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = open(ak, "rb").read().split(b"\n")
+        self.assertIn(b"ssh-ed25519 AAAAlatin1latin1latin1latin1 jos\xe9@laptop", got)
+        self.assertIn(b"ssh-ed25519 AAAAnulnulnulnulnulnul a\x00b", got)
+        self.assertIn(b"ssh-ed25519 AAAAlastlastlastlastlast last-no-newline", got)
+        self.assertNotIn(other.rstrip(b"\n"), got)                     # the name's previous key is replaced
+        self.assertEqual(sum(1 for x in got if x.endswith(b"grovy-tunnel:pc")), 1)
+        self.assertEqual(oct(os.stat(ak).st_mode & 0o777), "0o600")
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_scripts_leave_the_file_alone_when_anything_fails(self):
+        """Review: when mktemp failed, the remove script emptied authorized_keys and still said REMOVED."""
+        pub = self.keypair()
+        content = f"ssh-ed25519 AAAAkeepkeepkeepkeepkeep me\nrestrict {pub} grovy-tunnel:pc\n".encode()
+        trunk, ak = self.trunk_with(content)
+        bad = os.path.join(trunk, "badbin")
+        os.makedirs(bad)
+        with open(os.path.join(bad, "awk"), "w") as f:
+            f.write("#!/bin/sh\nexit 2\n")
+        os.chmod(os.path.join(bad, "awk"), 0o755)
+        fake = os.path.join(trunk, ".local", "bin", "grovy")
+        for script in (graft.REMOVE_SCRIPT.replace("@NAME@", "pc"),
+                       graft.ADD_SCRIPT.replace("@NAME@", "pc").replace("@RMOLD@", ":")):
+            self.run_remote("true", "", trunk)   # makes the fake grovy
+            r = subprocess.run(["sh", "-c", script], input=f"T\n{pub}\n" if "SOCKET" in script else pub + "\n",
+                               capture_output=True, text=True, timeout=20,
+                               env={"HOME": trunk, "PATH": f"{bad}:/usr/bin:/bin"})
+            self.assertNotIn("REMOVED", r.stdout)
+            self.assertNotIn("SOCKET=", r.stdout)
+            self.assertEqual(open(ak, "rb").read(), content)
+        os.chmod(os.path.join(trunk, ".ssh"), 0o500)                      # no temporary file can be made there
+        try:
+            r = self.run_remote(graft.REMOVE_SCRIPT.replace("@NAME@", "pc"), pub + "\n", trunk)
+        finally:
+            os.chmod(os.path.join(trunk, ".ssh"), 0o700)
+        self.assertNotIn("REMOVED", r.stdout)
+        self.assertEqual(open(ak, "rb").read(), content)
+        self.assertTrue(os.path.exists(fake))
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_remove_leaves_the_computer_that_took_the_name(self):
+        """Second review: removal matched the name too, so a computer that had been replaced deleted its
+        replacement's key line on the trunk."""
+        pub = self.keypair()
+        theirs = "restrict ssh-ed25519 AAAAreplacementreplacement grovy-tunnel:pc"
+        trunk, ak = self.trunk_with(f"{theirs}\n".encode())
+        r = self.run_remote(graft.REMOVE_SCRIPT.replace("@NAME@", "pc"), pub + "\n", trunk)
+        self.assertIn("REMOVED", r.stdout)
+        self.assertEqual(open(ak).read(), theirs + "\n")
+        r = self.run_remote(graft.REMOVE_SCRIPT.replace("@NAME@", "pc"), "\n", trunk)   # no key known: by name
+        self.assertEqual(open(ak).read(), "")
+
+    def test_leave_without_systemctl_and_from_the_unit(self):
+        """Second review: leave() crashed where there is no systemctl; a graft without a record lost its trunk."""
+        with open(graft.UNIT, "w") as f:
+            f.write(graft.tunnel_unit("me@hub", "pc", 7334, path="/bin"))
+        self.assertEqual(graft.from_unit(), {"trunk": "me@hub", "name": "pc"})
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": os.path.join(self.home, "st-grovy")}), \
+                mock.patch.object(shutil, "which", lambda x: None), mock.patch.object(graft, "remove_on_trunk") as rm, \
+                redirect_stdout(io.StringIO()):
+            graft.leave({"trunk": "me@hub", "name": "pc"}, "now a trunk")
+        rm.assert_called_once()
+        self.assertFalse(os.path.exists(graft.UNIT))
+
+    def test_add_script_refuses_an_empty_key(self):
+        """An empty pattern would make `grep -v` drop every line of authorized_keys."""
+        trunk = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(trunk, ".ssh"))
+        ak = os.path.join(trunk, ".ssh", "authorized_keys")
+        with open(ak, "w") as f:
+            f.write("ssh-ed25519 AAAAkeepkeepkeepkeepkeep me\n")
+        r = self.run_remote(graft.ADD_SCRIPT.replace("@NAME@", "pc").replace("@RMOLD@", ":"), "TOKEN\n\n", trunk)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(open(ak).read(), "ssh-ed25519 AAAAkeepkeepkeepkeepkeep me\n")
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_remove_script_takes_only_our_line(self):
+        trunk = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(trunk, ".ssh"))
+        pub = self.keypair()
+        ak = os.path.join(trunk, ".ssh", "authorized_keys")
+        with open(ak, "w") as f:
+            f.write(f"ssh-ed25519 AAAAkeepkeepkeepkeepkeep me\nrestrict,command=\"x\" {pub} grovy-tunnel:pc\n")
+        r = self.run_remote(graft.REMOVE_SCRIPT.replace("@NAME@", "pc"), pub + "\n", trunk)
+        self.assertIn("REMOVED", r.stdout)
+        self.assertEqual(open(ak).read(), "ssh-ed25519 AAAAkeepkeepkeepkeepkeep me\n")
+        self.assertIn("peer rm pc", open(os.path.join(trunk, "grovy.log")).read())
+
+    def test_probe_reads_the_trunk(self):
+        def answer(out, code=0, err=""):
+            return lambda argv, **kw: subprocess.CompletedProcess(argv, code, out, err)
+        names, why = graft.probe("hub", run=answer("OK\npc\t/s/pc.sock\tonline\nbox\t/s/box.sock\toffline, last seen\n"))
+        self.assertEqual(names, {"pc": "online", "box": "offline, last seen"})
+        self.assertIn("isn't installed", graft.probe("hub", run=answer("NOGROVY\n"))[1])
+        self.assertIn("too old", graft.probe("hub", run=answer("OLDGROVY\n"))[1])
+        self.assertIn("Permission denied", graft.probe("hub", run=answer("", 255, "Permission denied"))[1])
+        self.assertIn("isn't an ssh destination", graft.probe("-oProxyCommand=x")[1])
+
+    def test_ssh_hosts_and_default_name(self):
+        cfg = os.path.join(self.home, "config")
+        with open(cfg, "w") as f:
+            f.write("Host *\n  User x\nHost hub hub2\n  HostName 1.2.3.4\nhost !bad box-*  srv\n")
+        self.assertEqual(graft.ssh_hosts(cfg), ["hub", "hub2", "srv"])
+        with mock.patch.object(socket, "gethostname", lambda: "My_Laptop.local"):
+            self.assertEqual(graft.default_name(), "my_laptop")
+        with mock.patch.object(socket, "gethostname", lambda: "..."):
+            self.assertEqual(graft.default_name(), "pc")
+
+    def test_tunnel_unit_and_the_tunnel_uses_the_key(self):
+        u = graft.tunnel_unit("me@hub%1", "pc", 7334, path="/bin")
+        self.assertIn(f"peer tunnel me@hub%%1 --name pc --port 7334 --identity {graft.KEY}", u)
+        self.assertIn("Restart=always", u)
+        argv = peers.tunnel_argv("hub", "/s/pc.sock", 7334, identity="/k")
+        self.assertEqual(argv[argv.index("-i") + 1], "/k")
+        self.assertIn("IdentitiesOnly=yes", argv)
+        self.assertNotIn("-i", peers.tunnel_argv("hub", "/s/pc.sock", 7334))
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_plan_makes_the_key_adds_to_the_trunk_and_records_it(self):
+        sent = {}
+
+        def fake_ssh(host, script, input=None, **kw):
+            sent.update(host=host, script=script, input=input)
+            return subprocess.CompletedProcess([], 0, "SOCKET=/h/.local/state/grovy/peers/pc.sock\n", "")
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": os.path.join(self.home, "st-grovy")}), \
+                mock.patch.object(graft, "ssh", fake_ssh), mock.patch.object(core, "load_token", lambda **k: "TOK"):
+            steps = graft.plan("hub", "pc", 7334, False, {})
+            self.assertEqual(len(steps), 2)          # key, trunk (no systemd: no unit)
+            for _, act in steps:
+                act()
+            rec = install.read_record()
+            self.assertEqual(rec["graft"], {"trunk": "hub", "name": "pc", "socket": "/h/.local/state/grovy/peers/pc.sock",
+                                            "key": graft.KEY})
+            self.assertEqual(sent["input"].splitlines(), ["TOK", graft.public_key()])
+            self.assertNotIn("TOK", sent["script"])  # the token travels on stdin only
+            self.assertEqual(graft.plan("hub", "pc", 7334, False, rec), [])   # same answers: nothing to do
+
+    def test_cleanup_takes_the_graft_off_its_trunk_and_removes_the_key(self):
+        os.makedirs(os.path.dirname(graft.KEY))
+        for p in (graft.KEY, graft.KEY + ".pub"):
+            open(p, "w").close()
+        rec = {"graft": {"trunk": "hub", "name": "pc", "key": graft.KEY}}
+        with mock.patch.object(graft, "remove_on_trunk") as rm, mock.patch.object(client, "sock_request",
+                                                                                 mock.Mock(side_effect=OSError)):
+            steps, _ = cleanup.plan(rec, False)
+            labels = [l for l, _ in steps]
+            self.assertIn("on hub: remove this computer (pc) and its tunnel key line", labels)
+            for label, act in steps:
+                if "hub" in label or "tunnel key" in label:
+                    act()
+        rm.assert_called_once_with(rec["graft"])
+        self.assertFalse(os.path.exists(graft.KEY) or os.path.exists(graft.KEY + ".pub"))
+
+
+class TestUpdate(unittest.TestCase):
+    """`grovy update` on a throwaway clone of a throwaway upstream: fast-forward only, checked, restart mocked."""
+
+    def g(self, cwd, *args):
+        return subprocess.run(["git", "-C", cwd, *args], check=True, capture_output=True, text=True,
+                              env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+                                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}).stdout.strip()
+
+    def commit(self, repo, name, text="x"):
+        with open(os.path.join(repo, name), "w") as f:
+            f.write(text)
+        self.g(repo, "add", name)
+        self.g(repo, "commit", "-q", "-m", f"add {name}")
+
+    def setUp(self):
+        root = tempfile.mkdtemp(dir=TMP)
+        self.up, self.work, self.here = (os.path.join(root, x) for x in ("up.git", "work", "here"))
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", self.up], check=True)
+        subprocess.run(["git", "clone", "-q", self.up, self.work], check=True, capture_output=True)
+        self.commit(self.work, "a")
+        self.g(self.work, "push", "-q", "origin", "HEAD:main")
+        subprocess.run(["git", "clone", "-q", self.up, self.here], check=True, capture_output=True)
+        self.restarted = []
+        for p in (mock.patch.object(core, "HERE", self.here),
+                  mock.patch.object(update, "imports_ok", lambda: (True, "")),
+                  mock.patch.object(update, "plan_restart",
+                                    lambda: ([("restart the grovy service", lambda: self.restarted.append(1))], None)),
+                  mock.patch.object(update, "_wait_daemon", lambda seconds=15: True),
+                  mock.patch("sys.stdout", io.StringIO())):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_update(self, *args):
+        try:
+            return grovy.main(["update", *args])
+        except SystemExit as e:
+            return e.code
+
+    def head(self):
+        return self.g(self.here, "rev-parse", "HEAD")
+
+    def test_up_to_date_does_nothing(self):
+        self.assertEqual(self.run_update("-y"), 0)
+        self.assertEqual(self.restarted, [])
+
+    def test_fast_forwards_then_restarts(self):
+        self.commit(self.work, "b")
+        self.g(self.work, "push", "-q", "origin", "HEAD:main")
+        self.assertEqual(self.run_update("--check"), 0)          # --check: shows, changes nothing
+        self.assertFalse(os.path.exists(os.path.join(self.here, "b")))
+        self.assertEqual(self.run_update("-y"), 0)
+        self.assertTrue(os.path.exists(os.path.join(self.here, "b")))
+        self.assertEqual(self.restarted, [1])
+
+    def test_new_code_that_doesnt_load_is_undone(self):
+        before = self.head()
+        self.commit(self.work, "b")
+        self.g(self.work, "push", "-q", "origin", "HEAD:main")
+        with mock.patch.object(update, "imports_ok", lambda: (False, "SyntaxError: boom")):
+            self.assertEqual(self.run_update("-y"), 1)
+        self.assertEqual(self.head(), before)
+        self.assertFalse(os.path.exists(os.path.join(self.here, "b")))
+        self.assertEqual(self.restarted, [])                    # nothing restarted onto broken code
+
+    def test_refuses_local_changes_and_own_commits(self):
+        self.commit(self.work, "b")
+        self.g(self.work, "push", "-q", "origin", "HEAD:main")
+        with open(os.path.join(self.here, "a"), "w") as f:
+            f.write("edited")
+        before = self.head()
+        self.assertEqual(self.run_update("-y"), 1)              # uncommitted change to a tracked file
+        self.g(self.here, "commit", "-q", "-am", "mine")
+        mine = self.head()
+        self.assertEqual(self.run_update("-y"), 1)              # diverged: no merge, no rebase
+        self.assertEqual(self.head(), mine)
+        self.assertNotEqual(mine, before)
+
+    def test_without_a_terminal_or_yes_nothing_changes(self):
+        self.commit(self.work, "b")
+        self.g(self.work, "push", "-q", "origin", "HEAD:main")
+        with mock.patch.object(tui, "interactive", lambda: False):
+            self.assertEqual(self.run_update(), 2)
+        self.assertFalse(os.path.exists(os.path.join(self.here, "b")))
+
+    def test_the_daemon_pane_is_found_by_its_pid(self):
+        out = "%1\t111\tbash\n%7\t4242\tbash -lc \"exec python3 /x/grovy serve\"\n"
+        with mock.patch.object(update.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, out, "")):
+            self.assertEqual(update.daemon_pane(4242), ("%7", ["bash", "-lc", "exec python3 /x/grovy serve"]))
+            self.assertIsNone(update.daemon_pane(999))
+            self.assertIsNone(update.daemon_pane(None))
+
+    def test_a_respawned_pane_runs_the_same_command(self):
+        """Regression: tmux shows a pane's start command shell-quoted; passed back to respawn-pane as one string, a
+        pane started from one string ran a program named after the whole line, died, and took the daemon's tmux
+        session with it. Real tmux, private server: both ways a pane can have been started."""
+        sock = f"grovy-respawn-{os.getpid()}"
+        self.addCleanup(subprocess.run, ["tmux", "-L", sock, "kill-server"], capture_output=True)
+        mark = os.path.join(TMP, f"respawned-{os.getpid()}")
+        for how in (["sh -c \"echo one >> " + mark + "; exec sleep 60\""],          # one string (a shell runs it)
+                    ["sh", "-c", "echo two >> " + mark + "; exec sleep 60"]):        # an argument array
+            subprocess.run(["tmux", "-L", sock, "-f", "/dev/null", "new-session", "-d", "-s", "d", *how], check=True)
+            pid = subprocess.run(["tmux", "-L", sock, "list-panes", "-t", "=d:", "-F", "#{pane_pid}"],
+                                 capture_output=True, text=True).stdout.strip()
+            real = subprocess.run
+            with mock.patch.object(update.subprocess, "run",
+                                   lambda argv, **k: real(argv[:1] + ["-L", sock] + argv[1:], **k)):
+                target, argv = update.daemon_pane(int(pid))
+                update._run(["tmux", "respawn-pane", "-k", "-t", target, *argv])
+            time.sleep(0.5)
+            alive = subprocess.run(["tmux", "-L", sock, "has-session", "-t", "=d"], capture_output=True).returncode
+            self.assertEqual(alive, 0, f"the pane died after respawning {how}")
+            subprocess.run(["tmux", "-L", sock, "kill-session", "-t", "=d"], capture_output=True)
+        self.assertEqual(open(mark).read().split(), ["one", "one", "two", "two"])
+
+
 class TestSetupAndCustomCss(unittest.TestCase):
     def test_service_unit(self):
         u = install.service_unit("100.1.2.3", 7333, path="/a:/b:/a:/x%y")
         self.assertIn("KillMode=process", u)              # restarting the daemon must not kill tmux
         self.assertIn("Environment=GROVY_BIND=100.1.2.3", u)
-        self.assertIn("Environment=PATH=/a:/b:/x%%y\n", u)  # de-duplicated, % escaped for systemd
+        self.assertIn('Environment="PATH=/a:/b:/x%%y"\n', u)  # de-duplicated, % escaped, quoted for systemd
         self.assertIn(os.path.join(core.HERE, "grovy") + " serve", u)
 
     def test_pick_port_prompts_and_avoids_a_taken_port(self):
@@ -859,25 +1893,30 @@ class TestSetupAndCustomCss(unittest.TestCase):
         free = install._free_port("127.0.0.1", busy + 1)
         self.assertFalse(install._port_busy("127.0.0.1", free))
 
-        tty = mock.patch.object(sys.stdin, "isatty", lambda: True)
+        tty = mock.patch.object(tui, "interactive", lambda: True)
+        quiet = redirect_stdout(io.StringIO())
+        ask = lambda bind, own=None: setupflow.ask_port(bind, {"port": free}, own)  # noqa: E731
         # a plain, free answer is honoured (surrounding spaces stripped)
-        with tty, mock.patch("builtins.input", side_effect=[f" {free} "]):
-            self.assertEqual(install._pick_port("127.0.0.1", False, None), free)
+        with tty, quiet, mock.patch("builtins.input", side_effect=[f" {free} "]):
+            self.assertEqual(ask("127.0.0.1"), free)
         # a taken port is refused; pressing enter takes the suggested free port
-        with tty, mock.patch("builtins.input", side_effect=[str(busy), ""]):
-            self.assertEqual(install._pick_port("127.0.0.1", False, None), free)
+        with tty, quiet, mock.patch("builtins.input", side_effect=[str(busy), ""]):
+            self.assertEqual(ask("127.0.0.1"), free)
         # typing the taken port again uses it anyway (consent is in-session only, like --port)
-        with tty, mock.patch("builtins.input", side_effect=[str(busy), str(busy)]):
-            self.assertEqual(install._pick_port("127.0.0.1", False, None), busy)
+        with tty, quiet, mock.patch("builtins.input", side_effect=[str(busy), str(busy)]):
+            self.assertEqual(ask("127.0.0.1"), busy)
         # garbage is re-asked
-        with tty, mock.patch("builtins.input", side_effect=["nope", str(free)]):
-            self.assertEqual(install._pick_port("127.0.0.1", False, None), free)
+        with tty, quiet, mock.patch("builtins.input", side_effect=["nope", str(free)]):
+            self.assertEqual(ask("127.0.0.1"), free)
         # our own already-running daemon's port is not treated as a conflict
-        with tty, mock.patch("builtins.input", side_effect=[str(busy)]):
-            self.assertEqual(install._pick_port("127.0.0.1", False, busy), busy)
+        with tty, quiet, mock.patch("builtins.input", side_effect=[str(busy)]):
+            self.assertEqual(ask("127.0.0.1", busy), busy)
+        # a port that was ours but is now taken is steered off before asking
+        with tty, quiet, mock.patch("builtins.input", side_effect=[""]):
+            self.assertNotEqual(setupflow.ask_port("127.0.0.1", {"port": busy}, None), busy)
         # non-interactive: no prompt, env/default port
-        with mock.patch.object(sys.stdin, "isatty", lambda: False), mock.patch.dict(os.environ, {"GROVY_PORT": "7340"}):
-            self.assertEqual(install._pick_port("127.0.0.1", False, None), 7340)
+        with mock.patch.object(tui, "interactive", lambda: False), mock.patch.dict(os.environ, {"GROVY_PORT": "7340"}):
+            self.assertEqual(setupflow.ask_port("127.0.0.1", {}, None), 7340)
 
     def test_dry_run_changes_nothing(self):
         home = tempfile.mkdtemp(dir=TMP)
@@ -887,28 +1926,41 @@ class TestSetupAndCustomCss(unittest.TestCase):
                 mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError)), redirect_stdout(out):
             rc = grovy.main(["setup", "--dry-run", "--bind", "0.0.0.0", "--no-service"])
         self.assertEqual(rc, 0)
-        self.assertIn("linking", out.getvalue())
+        self.assertIn("link ~/.local/bin/grovy", out.getvalue())
         self.assertEqual(os.listdir(home), [])
 
-    def test_setup_finishes_with_the_phone_link(self):
-        """It ended in a NameError (the custom.css path variable was gone) right after printing the link."""
+    def test_setup_finishes_with_the_phone_qr(self):
+        """It ends by rendering a QR code of the login link (not the long URL), then keeps going without a
+        NameError (the custom.css path variable was once gone right after printing the link)."""
         home = tempfile.mkdtemp(dir=TMP)
         env = {"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, "cfg"), "PATH": "/usr/bin:/bin"}
         out = io.StringIO()
         with mock.patch.dict(os.environ, env), mock.patch.object(shutil, "which", lambda x: "/bin/true"), \
-                mock.patch.object(client, "sock_request", lambda *a, **k: {"ok": 1}), \
-                mock.patch.object(install, "cmd_url", lambda a: print("LINK")), redirect_stdout(out):
-            rc = grovy.main(["setup", "--bind", "127.0.0.1", "--no-service"])
+                mock.patch.object(client, "sock_request",
+                                  lambda *a, **k: {"url": "http://10.0.0.5:7333"}), redirect_stdout(out):
+            rc = grovy.main(["setup", "-y", "--bind", "10.0.0.5", "--no-service"])
         self.assertEqual(rc, 0)
-        self.assertIn("LINK", out.getvalue())
-        self.assertIn(os.path.join(home, "cfg", "grovy"), out.getvalue())
+        self.assertIn("Scan it, or open the link, once on each device", out.getvalue())
+        self.assertIn("▀", out.getvalue())                       # the half-block the QR is drawn with
+        self.assertIn("http://10.0.0.5:7333/?token=", out.getvalue())  # and the link, for a device without a camera
+        self.assertIn("~/cfg/grovy", out.getvalue())
         self.assertLessEqual({"custom.css", "custom.js"}, set(os.listdir(os.path.join(home, "cfg", "grovy"))))
 
     def test_config_dir_changes_the_fingerprint_only_when_set(self):
         base = claude.session_fingerprint("fp")
         with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": "/somewhere"}):
-            self.assertNotEqual(claude.session_fingerprint("fp"), base)
+            old = claude.session_fingerprint("fp")
+            self.assertNotEqual(old, base)
+        with mock.patch.dict(os.environ, {"GROVY_HOME": "/somewhere"}):   # the new name: same folder, same fingerprint
+            self.assertEqual(claude.session_fingerprint("fp"), old)
         self.assertEqual(claude.session_fingerprint("fp"), base)
+
+    def test_grovy_home_names_the_config_folder(self):
+        with mock.patch.dict(os.environ, {"GROVY_HOME": "/h", "GROVY_CONFIG_DIR": "/c"}):
+            self.assertEqual(core.config_dir(), "/h")        # the new name wins
+        with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": "/c"}):
+            self.assertEqual(core.config_dir(), "/c")        # the old one still works
+        self.assertEqual(core.config_dir(), os.path.join(os.environ["XDG_CONFIG_HOME"], "grovy"))
 
     def test_custom_css_is_served_and_reloaded(self):
         d = tempfile.mkdtemp(dir=TMP)
@@ -1376,6 +2428,217 @@ class TestBuiltinPlugins(StoreCase):
 
 
 @unittest.skipUnless(shutil.which("git"), "git not installed")
+def load_push_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("grovy_push_test", os.path.join(ROOT, "plugins", "push.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@unittest.skipUnless(shutil.which("openssl"), "needs the openssl command")
+class TestPushPlugin(unittest.TestCase):
+    """plugins/push.py: empty Web Push, the text fetched from grovy by the service worker."""
+
+    def setUp(self):
+        self.mod = load_push_module()
+        self.dir = tempfile.mkdtemp(dir=TMP)
+        self.sent, self.answer, self.done = [], None, threading.Event()
+        test = self
+
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n=-1): return b""
+
+        def opener(req, timeout):
+            test.sent.append(req)
+            try:
+                if test.answer:
+                    raise urllib.error.HTTPError(req.full_url, test.answer, "gone", {}, io.BytesIO(b"bye"))
+                return Resp()
+            finally:
+                test.done.set()
+        self.logs = []
+        self.grovy = type("G", (), {"log": lambda _, m: self.logs.append(m)})()
+        self.push = self.mod.Push(self.grovy, self.dir, "mailto:t@example.invalid", opener=opener)
+        self.ep = "https://push.example.invalid/sub/abc"
+
+    def wait(self, n):
+        for _ in range(100):
+            if len(self.sent) >= n:
+                return
+            time.sleep(0.02)
+        self.fail(f"expected {n} pushes, got {len(self.sent)}")
+
+    def test_vapid_token_is_a_valid_es256_jwt(self):
+        auth = self.push.vapid.header(self.ep)
+        m = re.fullmatch(r"vapid t=([^,]+), k=(\S+)", auth)
+        tok, k = m.groups()
+        head, claims, sig = tok.split(".")
+        pad = lambda x: x + "=" * (-len(x) % 4)
+        self.assertEqual(json.loads(base64.urlsafe_b64decode(pad(head))), {"typ": "JWT", "alg": "ES256"})
+        c = json.loads(base64.urlsafe_b64decode(pad(claims)))
+        self.assertEqual(c["aud"], "https://push.example.invalid")
+        self.assertEqual(c["sub"], "mailto:t@example.invalid")
+        self.assertLess(c["exp"] - time.time(), 24 * 3600 + 1)          # push services refuse longer
+        raw = base64.urlsafe_b64decode(pad(sig))
+        self.assertEqual(len(raw), 64)
+        self.assertEqual(base64.urlsafe_b64decode(pad(k)), self.push.vapid.public)
+        # verify with openssl: r||s back to DER, against the public key
+        def der_int(b):
+            b = b.lstrip(b"\0") or b"\0"
+            b = b"\0" + b if b[0] & 0x80 else b
+            return b"\x02" + bytes([len(b)]) + b
+        body = der_int(raw[:32]) + der_int(raw[32:])
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "sig"), "wb") as f:
+            f.write(b"\x30" + bytes([len(body)]) + body)
+        with open(os.path.join(d, "msg"), "wb") as f:
+            f.write(f"{head}.{claims}".encode())
+        subprocess.run(["openssl", "ec", "-in", self.push.vapid.key, "-pubout", "-out", os.path.join(d, "pub")],
+                       capture_output=True, check=True)
+        r = subprocess.run(["openssl", "dgst", "-sha256", "-verify", "pub", "-signature", "sig", "msg"], cwd=d,
+                           capture_output=True, text=True)
+        self.assertIn("Verified OK", r.stdout)
+        self.assertEqual(self.push.vapid.header(self.ep), auth)        # reused, not signed again
+        self.assertEqual(os.stat(self.push.vapid.key).st_mode & 0o777, 0o600)
+
+    def test_push_is_empty_and_the_text_is_fetched(self):
+        self.push.subscribe(self.ep)
+        self.push.notify("api", "input", "permission: Bash rm -rf build")
+        self.wait(1)
+        req = self.sent[0]
+        self.assertEqual((req.full_url, req.get_method(), req.data), (self.ep, "POST", b""))   # nothing in the push
+        self.assertTrue(req.get_header("Authorization").startswith("vapid t="))
+        self.assertEqual(req.get_header("Urgency"), "high")
+        self.assertEqual(req.get_header("Content-type"), "application/octet-stream")
+        self.assertRegex(req.get_header("Topic"), r"^[A-Za-z0-9_-]{22}$")   # RFC 8030: at most 32 base64url characters
+        got = self.push.take(self.ep)
+        self.assertEqual([(m["session"], m["kind"], m["text"]) for m in got["messages"]],
+                         [("api", "input", "permission: Bash rm -rf build")])
+        again = self.push.take(self.ep)
+        self.assertEqual(again["messages"], [])                         # taken once...
+        self.assertEqual(again["latest"]["text"], "permission: Bash rm -rf build")   # ...but a late push can re-show it
+        self.assertIsNone(self.push.take("https://push.example.invalid/other"))      # only subscribed devices
+        self.push.notify("api", "input", "again")
+        self.push.notify("api", "done", "finished")
+        self.wait(3)
+        topics = collections.Counter(r.get_header("Topic") for r in self.sent)   # (threads: any order)
+        self.assertEqual(sorted(topics.values()), [1, 2])              # same session and kind: replaces if undelivered
+
+    def test_subscriptions_persist_and_ended_ones_go(self):
+        self.push.subscribe(self.ep)
+        again = self.mod.Push(self.grovy, self.dir, "mailto:x@example.invalid")
+        self.assertTrue(again.known(self.ep))                           # kept across restarts
+        self.answer = 410
+        self.push.notify("api", "done", "finished")
+        self.wait(1)
+        for _ in range(100):
+            if not self.push.known(self.ep):
+                break
+            time.sleep(0.02)
+        self.assertFalse(self.push.known(self.ep))
+        self.assertFalse(self.mod.Push(self.grovy, self.dir, "mailto:x@example.invalid").known(self.ep))
+
+    def test_a_redirect_is_not_followed(self):
+        """A push service never redirects: following one would carry the signed token (and the POST) elsewhere."""
+        import http.server
+        hits = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                hits.append(self.path)
+                self.send_response(302)
+                self.send_header("Location", "/elsewhere")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            do_GET = do_POST
+            def log_message(self, *a): pass
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            p = self.mod.Push(self.grovy, self.dir, "mailto:t@example.invalid")   # the real opener
+            p._send(f"http://127.0.0.1:{srv.server_address[1]}/sub", False, "t")
+            self.assertEqual(hits, ["/sub"])
+            self.assertTrue(any("302" in m for m in self.logs))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_endpoints_must_be_https(self):
+        for bad in ("http://push.example/x", "https://user:pw@push.example/x", "file:///etc/passwd", "https:///x",
+                    None, 5, "https://x/" + "a" * 3000):
+            self.assertFalse(self.mod.valid_endpoint(bad), bad)
+        self.assertTrue(self.mod.valid_endpoint(self.ep))
+
+    def test_raw_signature(self):
+        r, s = (1).to_bytes(32, "big"), (b"\xff" * 32)
+        der = b"\x30\x45" + b"\x02\x20" + r + b"\x02\x21\x00" + s
+        self.assertEqual(self.mod.raw_signature(der), r + s)
+
+
+class TestPushRoutes(unittest.TestCase):
+    """The plugin loaded as grovy loads it, through the HTTP API."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which("openssl"):
+            raise unittest.SkipTest("needs the openssl command")
+        cls.reg = mock.patch.object(sessions, "registry", lambda: {})
+        cls.reg.start()
+        cls.store = store.Store(tempfile.mkdtemp(dir=TMP), tmux_live=lambda: {}, paste=lambda *a: None)
+        with mock.patch("sys.stderr", io.StringIO()):
+            cls.store.plugins = plugins.Plugins(cls.store, "/nonexistent", builtin=plugins.BUILTIN_DIR).load()
+        cls.httpd = grovyd.HttpServer(("127.0.0.1", 0), grovyd.Http)
+        cls.httpd.store, cls.httpd.token = cls.store, "t" * 32
+        cls.httpd.page = grovyd.load_index()
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.stopping = True
+        cls.httpd.shutdown()
+        cls.reg.stop()
+
+    def req(self, path, body=None, token=True):
+        h = {"X-Grovy": "1", **({"Cookie": "grovy_token=" + "t" * 32} if token else {})}
+        data = None
+        if body is not None:
+            data, h["Content-Type"] = json.dumps(body).encode(), "application/json"
+        r = urllib.request.Request(self.base + path, data=data, headers=h)
+        try:
+            with urllib.request.urlopen(r, timeout=5) as resp:
+                return resp.status, json.loads(resp.read() or b"null"), resp.headers
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"null"), e.headers
+
+    def test_routes(self):
+        self.assertIn("push", self.store.plugins.loaded)
+        self.assertEqual(self.req("/api/x/push/key", token=False)[0], 401)
+        code, got, _ = self.req("/api/x/push/key")
+        self.assertEqual(len(base64.urlsafe_b64decode(got["key"] + "=")), 65)
+        self.assertEqual(os.stat(os.path.join(core.state_dir(), "plugins", "push")).st_mode & 0o777, 0o700)
+        ep = {"endpoint": "https://push.example.invalid/routes"}
+        self.assertEqual(self.req("/api/x/push/pending", ep)[0], 404)                 # not subscribed
+        self.assertEqual(self.req("/api/x/push/subscribe", {"endpoint": "http://evil/"})[0], 400)
+        self.assertEqual(self.req("/api/x/push/subscribe", ep)[0], 200)
+        self.assertEqual(self.req("/api/x/push/pending", ep)[1], {"messages": [], "latest": None})
+        self.assertEqual(self.req("/api/x/push/unsubscribe", ep)[0], 200)
+        self.assertEqual(self.req("/api/x/push/pending", ep)[0], 404)
+
+    def test_service_worker_and_manifest(self):
+        r = urllib.request.urlopen(self.base + "/sw.js", timeout=5)        # public: the browser fetches it itself
+        self.assertEqual(r.headers["Content-Type"], "text/javascript; charset=utf-8")
+        self.assertIn(b"/api/x/push/pending", r.read())
+        self.assertEqual(r.headers["Cache-Control"], "no-cache")
+        man = json.loads(urllib.request.urlopen(self.base + "/manifest.webmanifest", timeout=5).read())
+        self.assertEqual((man["id"], man["scope"], man["start_url"]), ("/", "/", "/"))
+        r = urllib.request.Request(self.base + "/", headers={"Cookie": "grovy_token=" + "t" * 32})
+        self.assertIn("worker-src 'self'", urllib.request.urlopen(r, timeout=5).headers["Content-Security-Policy"])
+
+
 class TestGitPlugin(StoreCase):
     def git(self, *args, cwd=None):
         env = dict(os.environ, GIT_AUTHOR_NAME="Ada", GIT_AUTHOR_EMAIL="a@x", GIT_COMMITTER_NAME="Ada",
@@ -3307,6 +4570,25 @@ class TestHttp(unittest.TestCase):
         self.assertEqual(h["X-Frame-Options"], "DENY")
         self.assertNotIn("Access-Control-Allow-Origin", h)
 
+    def test_login_cookie_is_lax_not_strict(self):
+        """Regression: scanning the setup QR (or opening the link from any other app) is an externally-initiated
+        navigation, and a SameSite=Strict cookie is withheld on it. The browser followed the /?token= redirect to
+        "/" without the cookie and showed "login needed". The login cookie must be Lax so it rides that navigation."""
+        import http.client
+        with mock.patch.object(self.httpd, "token", "s" * 32):
+            c = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=5)
+            try:
+                c.request("GET", "/?token=" + "s" * 32)   # raw: don't follow the redirect, inspect its Set-Cookie
+                r = c.getresponse()
+                r.read()
+            finally:
+                c.close()
+            self.assertEqual(r.status, 303)
+            cookie = r.getheader("Set-Cookie") or ""
+            self.assertIn("SameSite=Lax", cookie)
+            self.assertNotIn("Strict", cookie)
+            self.assertIn("HttpOnly", cookie)
+
     def test_server_time_for_clock_offset(self):
         """Regression: the phone's clock ran behind the server's, so the typing timer showed "-1:-1"."""
         for path in ("/api/sessions", "/api/sessions/a"):
@@ -3508,6 +4790,14 @@ class TestHttp(unittest.TestCase):
         self.assertIn(b"GROVY_HOSTS=box.&lt;b&gt;tail&lt;/b&gt;.ts.net", body)
         self.assertNotIn(b"<b>tail", body)
 
+    def test_host_port_must_be_a_number(self):
+        """The Host is echoed into links (the HTTPS page): "127.0.0.1:x@evil.example" passed as an IP literal."""
+        for bad in ("127.0.0.1:x@evil.example", "127.0.0.1:80@evil.example", "[::1]x@evil.example", "localhost:",
+                    "[::1%@evil.example#]", "[fe80::1%25eth0]:7333"):
+            self.assertEqual(self.req("/api/sessions", headers={"Host": bad})[0], 403, bad)
+        for good in ("127.0.0.1:7333", "[::1]:7333", "localhost", "127.0.0.1", "[::1]"):
+            self.assertEqual(self.req("/api/sessions", headers={"Host": good})[0], 200, good)
+
     def test_public_assets_are_an_allowlist(self):
         with mock.patch.object(self.httpd, "token", "secret"):
             code, body, h = self.req("/assets/icon-192.png")                 # no token needed: nothing private
@@ -3690,6 +4980,333 @@ class TestHttp(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("tmux"), "tmux not installed")
+@unittest.skipUnless(shutil.which("openssl"), "needs the openssl command")
+class TestHttps(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sd = tempfile.mkdtemp(dir=TMP)
+        cls.env = mock.patch.dict(os.environ, {"GROVY_STATE_DIR": cls.sd})
+        cls.env.start()
+        cls.reg = mock.patch.object(sessions, "registry", lambda: {})
+        cls.reg.start()
+        tls.init(["127.0.0.1", "localhost"])
+        cls.store = store.Store(tempfile.mkdtemp(dir=TMP), tmux_live=lambda: {}, paste=lambda *a: None)
+        cls.store.reconcile()
+        cls.srv = cls.server()
+        cls.port = cls.srv.server_address[1]
+        cls.client = ssl.create_default_context(cadata=tls.cert_der())
+
+    @classmethod
+    def server(cls, klass=None):
+        srv = (klass or grovyd.HttpServer)(("127.0.0.1", 0), grovyd.Http)
+        srv.store, srv.token, srv.page = cls.store, "tok", grovyd.load_index()
+        srv.tls_paths = tls.cert_paths()
+        srv.reload_tls()
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.stopping = True
+        cls.srv.shutdown()
+        cls.reg.stop()
+        cls.env.stop()
+
+    def get(self, url, ctx=None, data=None):
+        r = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"} if data else {})
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx or self.client),
+                                             type("NoRedirect", (urllib.request.HTTPRedirectHandler,),
+                                                  {"redirect_request": lambda *a: None}))
+        try:
+            with opener.open(r, timeout=5) as resp:
+                return resp.status, resp.read(), resp.headers
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), e.headers
+
+    def test_https_login_sets_a_secure_cookie(self):
+        base = f"https://127.0.0.1:{self.port}"
+        self.assertEqual(self.get(base + "/api/sessions")[0], 401)
+        code, _, h = self.get(base + "/?token=tok")
+        self.assertEqual(code, 303)
+        set_cookies = h.get_all("Set-Cookie")
+        self.assertTrue(set_cookies[0].startswith("__Secure-grovy_token=tok;"))
+        self.assertIn("; Secure", set_cookies[0])
+        self.assertTrue(set_cookies[1].startswith("grovy_token=;") and "Max-Age=0" in set_cookies[1])   # the http one goes
+        self.assertEqual(self.get(f"https://localhost:{self.port}/?token=tok")[0], 303)   # the name is in the certificate too
+
+        def index(cookie):
+            r = urllib.request.Request(base + "/", headers={"Cookie": cookie})
+            with urllib.request.urlopen(r, context=self.client, timeout=5) as resp:
+                return resp.status, resp.headers.get_all("Set-Cookie") or []
+        code, got = index("grovy_token=tok")             # enrolled over HTTP: swapped for the Secure cookie
+        self.assertEqual(code, 200)
+        self.assertTrue(got[0].startswith("__Secure-grovy_token=tok;"))
+        self.assertEqual(index("__Secure-grovy_token=tok"), (200, []))   # already swapped: nothing more
+        self.assertEqual(self.get(base + "/grovy.crt")[0], 401)   # never served: it could be swapped on the way
+
+    def test_login_page_takes_a_pasted_link(self):
+        """The home-screen app on iPhone keeps cookies of its own and has no address bar: the login link must be
+        pasteable into the page itself."""
+        base = f"https://127.0.0.1:{self.port}"
+        code, body, h = self.get(base + "/")
+        self.assertEqual(code, 401)
+        self.assertIn(b"<form method=get action='/'", body)
+        self.assertIn("form-action 'self'", h["Content-Security-Policy"])
+        self.assertNotIn(b"didn't work", body)
+        link = urllib.parse.quote(f" https://box.lan:7333/?token=tok ")   # as pasted: the whole link, spaces and all
+        code, _, h = self.get(base + "/?token=" + link)
+        self.assertEqual(code, 303)
+        self.assertTrue(h["Set-Cookie"].startswith("__Secure-grovy_token=tok;"))
+        self.assertEqual(self.get(base + "/?token=%20tok%20")[0], 303)        # or just the token
+        code, body, _ = self.get(base + "/?token=" + urllib.parse.quote("https://box.lan/?token=nope"))
+        self.assertEqual(code, 401)
+        self.assertIn(b"didn't work", body)
+        self.assertNotIn(b"nope", body)
+
+    def test_token_never_in_the_log(self):
+        with mock.patch.dict(os.environ, {"GROVY_DEBUG": "1"}), mock.patch("sys.stderr", io.StringIO()) as err:
+            self.get(f"https://127.0.0.1:{self.port}/?token=tok&x=1")
+            time.sleep(0.2)
+        self.assertIn("GET /?token=…&x=1", err.getvalue())
+        self.assertNotIn("token=tok", err.getvalue())
+
+    def test_plain_http_to_the_https_port_points_to_https(self):
+        base = f"http://127.0.0.1:{self.port}"
+        code, body, h = self.get(base + "/?token=tok")
+        self.assertEqual(code, 200)
+        self.assertNotIn("Set-Cookie", h)                    # never logs in over plain HTTP
+        self.assertIn(f'href="https://127.0.0.1:{self.port}/?token=tok"'.encode(), body)
+        self.assertNotIn(tls.fingerprint(tls.cert_der()).encode(), body)   # meaningless on a page that came over HTTP
+        self.assertIn(b"<code>grovy.crt</code>", body)       # says which file to install...
+        self.assertNotIn(b"href=\"/grovy", body)             # ...and never offers it for download
+        self.assertNotIn(b"BEGIN", body)
+        code, body, _ = self.get(base + "/?token=wrong")
+        self.assertNotIn(b"wrong", body)                     # the token is echoed only when it is the right one
+        self.assertIn(f'href="https://127.0.0.1:{self.port}/"'.encode(), body)
+        self.assertEqual(self.get(base + "/api/sessions")[0], 200)   # the same page: nothing private
+        self.assertNotIn(b'"sessions"', self.get(base + "/api/sessions")[1])
+        self.assertNotIn(b"BEGIN", self.get(base + "/grovy.crt")[1])
+        self.assertNotIn(tls.cert_der(), self.get(base + "/grovy.crt")[1])
+        self.assertEqual(self.get(base + "/api/x", data=b"{}")[0], 400)
+        s = socket.create_connection(("127.0.0.1", self.port))
+        s.sendall(b"GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n")
+        s.settimeout(5)
+        got = b""
+        while chunk := s.recv(4096):
+            got += chunk
+        self.assertIn(b" 403 ", got)                          # DNS-rebinding guard applies here too
+        s.close()
+
+    def test_failed_handshakes_leave_the_server_working(self):
+        untrusting = ssl.create_default_context()
+        with self.assertRaises(urllib.error.URLError):
+            self.get(f"https://127.0.0.1:{self.port}/", ctx=untrusting)
+        s = socket.create_connection(("127.0.0.1", self.port))
+        s.sendall(b"\x16\x03\x01\x00\x05garbage")
+        s.settimeout(5)
+        try:
+            while s.recv(4096):   # a TLS alert, then the server closes (with our unread bytes: a reset)
+                pass
+        except ConnectionResetError:
+            pass
+        s.close()
+        with mock.patch("sys.stderr", io.StringIO()) as err:
+            self.assertEqual(self.get(f"https://127.0.0.1:{self.port}/?token=tok")[0], 303)
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_stalled_handshakes_are_cut_and_cannot_lock_out_the_phone(self):
+        class Small(grovyd.HttpServer):
+            MAX_CONNECTIONS = 4
+        with mock.patch.object(grovyd.Http, "HEADER_DEADLINE", 0.5):
+            srv = self.server(Small)
+            port = srv.server_address[1]
+            try:
+                s = socket.create_connection(("127.0.0.1", port))
+                s.sendall(b"\x16\x03\x01")                # the start of a handshake, then nothing
+                s.settimeout(3)
+                t0 = time.time()
+                self.assertEqual(s.recv(1), b"")         # cut by the deadline
+                self.assertLess(time.time() - t0, 2.5)
+                s.close()
+                idle = [socket.create_connection(("127.0.0.1", port)) for _ in range(6)]
+                for i in idle[::2]:
+                    i.sendall(b"\x16")
+                time.sleep(0.8)
+                self.assertEqual(self.get(f"https://127.0.0.1:{port}/?token=tok")[0], 303)
+                [x.close() for x in idle]
+            finally:
+                srv.stopping = True
+                srv.shutdown()
+                srv.server_close()
+
+    def test_aborted_tls_connections_print_no_tracebacks(self):
+        """Regression: a TLS connection the deadline cut, one a browser preconnected and closed unused, and one reset
+        right after its ClientHello each printed a traceback (plain HTTP prints none); the reset also skipped finish()."""
+        class Quick(grovyd.HttpServer):
+            pass
+        with mock.patch.object(grovyd.Http, "HEADER_DEADLINE", 1.0), mock.patch("sys.stderr", io.StringIO()) as err:
+            srv = self.server(Quick)
+            port = srv.server_address[1]
+            try:
+                c = self.client.wrap_socket(socket.create_connection(("127.0.0.1", port)), server_hostname="127.0.0.1")
+                c.close()                                    # preconnect: handshake, then nothing
+                idle = self.client.wrap_socket(socket.create_connection(("127.0.0.1", port)),
+                                               server_hostname="127.0.0.1")
+                t0 = time.time()
+                idle.settimeout(5)
+                try:
+                    self.assertEqual(idle.recv(1), b"")      # one deadline for handshake and headers together
+                except (ConnectionError, ssl.SSLError):
+                    pass
+                self.assertLess(time.time() - t0, 1.6)      # not a second full deadline after the handshake
+                idle.close()
+                for _ in range(3):
+                    r = socket.create_connection(("127.0.0.1", port))
+                    r.sendall(b"\x16\x03\x01\x02\x00\x01\x00\x01\xfc\x03\x03")
+                    r.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    r.close()                                # RST
+                time.sleep(1.2)
+                self.assertEqual(self.get(f"https://127.0.0.1:{port}/?token=tok")[0], 303)
+            finally:
+                srv.stopping = True
+                srv.shutdown()
+                srv.server_close()
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_expires_soon(self):
+        cert = tls.cert_paths()[0]
+        self.assertFalse(tls.expires_soon(cert))
+        self.assertTrue(tls.expires_soon(cert, days=tls.CERT_DAYS + 1))
+        self.assertIsNone(tls.expires_soon("/nonexistent.pem"))   # openssl's error isn't "expires soon"
+
+    def test_a_key_with_a_passphrase_fails_instead_of_prompting(self):
+        """Regression: OpenSSL asked for the passphrase on the daemon's terminal and blocked (the reload too)."""
+        d = tempfile.mkdtemp(dir=TMP)
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-subj", "/CN=x", "-keyout", "k", "-out", "c",
+                        "-passout", "pass:secret", "-days", "1"], cwd=d, capture_output=True, check=True)
+        with self.assertRaisesRegex(ValueError, "passphrase"):
+            tls.context(os.path.join(d, "c"), os.path.join(d, "k"))
+
+    def test_new_certificate_is_picked_up_and_a_broken_one_ignored(self):
+        srv = grovyd.HttpServer(("127.0.0.1", 0), grovyd.Http)
+        try:
+            srv.tls_paths = tls.cert_paths()
+            self.assertTrue(srv.reload_tls())
+            first = srv.ssl_ctx
+            self.assertTrue(srv.reload_tls())
+            self.assertIs(srv.ssl_ctx, first)            # unchanged files: nothing reloaded
+            path = srv.tls_paths[0]
+            with open(path) as f:
+                good = f.read()
+            try:
+                with open(path, "w") as f:
+                    f.write("not a certificate")
+                with mock.patch("sys.stderr", io.StringIO()) as err:
+                    self.assertTrue(srv.reload_tls())
+                self.assertIs(srv.ssl_ctx, first)        # kept the working one
+                self.assertIn("keeping the previous one", err.getvalue())
+            finally:
+                with open(path, "w") as f:
+                    f.write(good)
+            os.utime(path, ns=(time.time_ns() + 10**9,) * 2)
+            self.assertTrue(srv.reload_tls())
+            self.assertIsNot(srv.ssl_ctx, first)
+        finally:
+            srv.server_close()
+
+    def test_cert_paths(self):
+        self.assertEqual(tls.cert_paths(), (os.path.join(self.sd, "tls", "server.pem"), None))
+        with mock.patch.dict(os.environ, {"GROVY_TLS": "off"}):
+            self.assertIsNone(tls.cert_paths())
+        with mock.patch.dict(os.environ, {"GROVY_TLS_CERT": "/x.pem"}):
+            self.assertRaises(ValueError, tls.cert_paths)
+        with mock.patch.dict(os.environ, {"GROVY_TLS_CERT": "/x.pem", "GROVY_TLS_KEY": "/x.key"}):
+            self.assertEqual(tls.cert_paths(), ("/x.pem", "/x.key"))
+        self.assertEqual(install.lan_bases("https://10.1.2.3:7333/"), ["https://10.1.2.3:7333"])
+        self.assertEqual(install.lan_bases("http://10.1.2.3:7333/"), ["http://10.1.2.3:7333"])
+
+    def test_certificate_names(self):
+        for bad in ("dev", "bad name!", "fd00::1%eth0", "0.0.0.0", ""):
+            self.assertRaises(ValueError, tls.parse_names, [bad])
+        ips, names = tls.parse_names(["Box.Example.org.", "10.9.8.7", "localhost"])
+        self.assertEqual((ips, names), ({ipaddress.ip_address("10.9.8.7")}, {"box.example.org", "localhost"}))
+        self.assertEqual(os.stat(tls.own_cert()).st_mode & 0o777, 0o600)
+
+    def test_the_installed_certificate_vouches_only_for_this_server(self):
+        """Devices install a CA (phones only trust those; Firefox refuses a server certificate that is a CA): its key
+        must be gone, the only key left must not sign anything that verifies, and its constraints must name only
+        these names."""
+        sd = tempfile.mkdtemp(dir=TMP)
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": sd}):
+            tls.init(["box.example.org", "10.9.8.7"])
+            own, root = tls.own_cert(), tls.public_cert()
+        self.assertEqual(sorted(os.listdir(os.path.join(sd, "tls"))), ["grovy.crt", "server.pem"])   # no root key
+        self.assertTrue(tls.matches(own, root))
+        with open(own) as f:
+            self.assertEqual(f.read().count("PRIVATE KEY"), 2)   # BEGIN/END of the server's key, nothing else
+        text = subprocess.run(["openssl", "x509", "-in", own, "-noout", "-text"], capture_output=True, text=True).stdout
+        self.assertIn("CA:FALSE", text)                          # what Firefox requires of a server certificate
+        rt = subprocess.run(["openssl", "x509", "-in", root, "-noout", "-text"], capture_output=True, text=True).stdout
+        self.assertIn("CA:TRUE, pathlen:0", rt)
+        self.assertIn("DNS:box.example.org", rt.split("Name Constraints")[1])
+        self.assertEqual(subprocess.run(["openssl", "verify", "-CAfile", root, "-purpose", "sslserver", own],
+                                        capture_output=True).returncode, 0)
+        d = tempfile.mkdtemp(dir=TMP)                            # the server's key can't stand in for the root's
+        with open(os.path.join(d, "x.cnf"), "w") as f:
+            f.write("[e]\nsubjectAltName = DNS:box.example.org\nextendedKeyUsage = serverAuth\n")
+        subprocess.run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=x", "-keyout", "k",
+                        "-out", "r"], cwd=d, capture_output=True, check=True)
+        subprocess.run(["openssl", "x509", "-req", "-in", "r", "-CA", own, "-CAkey", own, "-extfile", "x.cnf",
+                        "-extensions", "e", "-out", "c"], cwd=d, capture_output=True, check=True)
+        with open(os.path.join(d, "chain"), "w") as f, open(own) as o:
+            f.write(o.read())
+        r = subprocess.run(["openssl", "verify", "-CAfile", root, "-untrusted", os.path.join(d, "chain"), "c"],
+                           cwd=d, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+
+    def test_a_killed_run_leaves_no_key_behind(self):
+        """A run killed midway skips Python's cleanup, leaving its temporary folder with the root key in it."""
+        sd = tempfile.mkdtemp(dir=TMP)
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": sd}):
+            os.makedirs(os.path.join(sd, "tls", "tmpdead"))
+            with open(os.path.join(sd, "tls", "tmpdead", "root.key"), "w") as f:
+                f.write("x")
+            tls.init(["box.example.org"])
+            first = tls.cert_der()
+            self.assertEqual(sorted(os.listdir(os.path.join(sd, "tls"))), ["grovy.crt", "server.pem"])
+            tls.init(["box.example.org"])                    # a second run: the first pair is gone
+            self.assertNotEqual(tls.cert_der(), first)
+            with open(os.path.join(sd, "old.crt"), "wb") as f:
+                f.write(ssl.DER_cert_to_PEM_cert(first).encode())
+            self.assertFalse(tls.matches(tls.own_cert(), os.path.join(sd, "old.crt")))   # what doctor reports
+            self.assertTrue(tls.matches(tls.own_cert(), tls.public_cert()))
+
+    def test_url_uses_the_certificate_names(self):
+        """With grovy's own certificate, links by IP address fail (it is only valid for its names)."""
+        self.assertEqual(tls.cert_names(tls.own_cert()), ["127.0.0.1", "localhost"])
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(client, "sock_request", lambda *a, **k: {"url": "https://0.0.0.0:7333/",
+                                                                        "tls": tls.own_cert()}), \
+                mock.patch.object(core, "load_token", lambda: "tok"), redirect_stdout(out), mock.patch("sys.stderr", err):
+            install.cmd_url(None)
+        self.assertEqual(out.getvalue().split(), ["https://127.0.0.1:7333/?token=tok", "https://localhost:7333/?token=tok"])
+        self.assertIn(tls.public_cert(), err.getvalue())   # the file a new device installs
+        self.assertIn(tls.fingerprint(tls.cert_der()), err.getvalue())
+
+    def test_public_certificate_file(self):
+        with open(tls.public_cert()) as f:
+            pem = f.read()
+        self.assertNotIn("PRIVATE", pem)
+        self.assertEqual(ssl.PEM_cert_to_DER_cert(pem), tls.cert_der())
+        self.assertEqual(os.stat(tls.public_cert()).st_mode & 0o777, 0o644)
+
+    def test_install_hint_only_for_grovys_own_certificate(self):
+        base = f"http://127.0.0.1:{self.port}"
+        self.assertIn(b"grovy.crt", self.get(base + "/")[1])
+        with mock.patch.object(self.srv, "tls_paths", ("/elsewhere/fullchain.pem", "/elsewhere/key.pem")):
+            self.assertNotIn(b"grovy.crt", self.get(base + "/")[1])
+
+
 class TestTmuxIntegration(unittest.TestCase):
     """Real tmux, fake claude, private tmux server (-L) so the user's server is untouched."""
 
@@ -3750,13 +5367,15 @@ class TestTmuxIntegration(unittest.TestCase):
         sessions.kill_session("ow1")
 
     def test_config_dir_reaches_the_session(self):
-        """The hooks read instructions.md from the same config folder as the daemon that started the session."""
-        cfg = tempfile.mkdtemp(dir=TMP)
-        with mock.patch.dict(os.environ, {"GROVY_CONFIG_DIR": cfg}):
-            sessions.start_session("cd1", self.proj)
-        out = tmuxctl.tmux("show-environment", "-t", "=grovy-cd1", "GROVY_CONFIG_DIR", check=False).stdout
-        self.assertEqual(out.strip(), "GROVY_CONFIG_DIR=" + cfg)
-        sessions.kill_session("cd1")
+        """The hooks read instructions.md from the same grovy home as the daemon that started the session, whether
+        it was given as GROVY_HOME or by its older name GROVY_CONFIG_DIR."""
+        for i, var in enumerate(("GROVY_HOME", "GROVY_CONFIG_DIR")):
+            cfg = tempfile.mkdtemp(dir=TMP)
+            with mock.patch.dict(os.environ, {var: cfg}):
+                sessions.start_session(f"cd{i}", self.proj)
+            out = tmuxctl.tmux("show-environment", "-t", f"=grovy-cd{i}", "GROVY_HOME", check=False).stdout
+            self.assertEqual(out.strip(), "GROVY_HOME=" + cfg)
+            sessions.kill_session(f"cd{i}")
 
     def test_instant_exit_reports_claude_error_not_tmux(self):
         """Regression: a claude (or GROVY_CLAUDE wrapper) that dies at once takes its tmux session
@@ -4053,6 +5672,68 @@ const fnArg = f => f;
         r = self.run_js("""return [err("{".repeat(1000) + "}".repeat(1000)), err("\\\\sqrt{".repeat(500) + "}".repeat(500)),
                                    err("\\\\it\\\\rm".repeat(600))];""")
         self.assertEqual(r, ["nested too deeply"] * 3)
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestServiceWorker(unittest.TestCase):
+    """sw.js's push handler, run in node against a fake registration: what the phone would show."""
+    HARNESS = r"""
+const handlers = {}, shown = [];
+let inbox = [], latest = null, wins = [];
+class Note { constructor(title, o) { Object.assign(this, o, {title}); this.data = structuredClone(o.data); }
+  close() { shown.splice(shown.indexOf(this), 1); } }
+const self = globalThis.self = {
+  addEventListener: (k, f) => { handlers[k] = f; },
+  clients: {matchAll: async () => wins, claim: async () => {}},
+  registration: {
+    pushManager: {getSubscription: async () => ({endpoint: "https://push.example/x"})},
+    getNotifications: async (o = {}) => shown.filter(n => !o.tag || n.tag === o.tag),
+    showNotification: async (title, o) => {
+      if (o.renotify && o.silent) throw new TypeError("renotify and silent");
+      const old = shown.findIndex(n => n.tag === o.tag);
+      const n = new Note(title, o); if (old >= 0) shown[old] = n; else shown.push(n);
+      log.push({title, body: o.body || "", alert: !o.silent, tag: o.tag});
+    }}};
+globalThis.fetch = async () => { const m = inbox; inbox = []; if (m.length) latest = m[m.length - 1];
+  return {ok: true, json: async () => ({messages: m, latest})}; };
+const log = [];
+async function push(...msgs) { inbox = msgs; let p; handlers.push({waitUntil: x => { p = x; }}); await p; }
+const M = (session, kind, text) => ({session, kind, text});
+"""
+
+    def run_sw(self, body):
+        with open(os.path.join(ROOT, "sw.js"), encoding="utf-8") as f:
+            src = f.read()
+        js = self.HARNESS + src + "\n(async () => {" + body + "\nconsole.log(JSON.stringify({log, shown: shown.map(" \
+            "n => ({title: n.title, body: n.body, tag: n.tag}))}));})();"
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_sessions_stack_in_one_notification(self):
+        """Each session had a notification of its own, so a busy afternoon filled the shade, buzzing every time."""
+        r = self.run_sw("""
+await push(M("a", "done", "finished: tests pass"));
+await push(M("b", "done", "finished: refactor"));
+await push(M("a", "input", "permission: Bash"));""")
+        self.assertEqual([x["alert"] for x in r["log"]], [True, False, True])   # a finished turn only updates it
+        self.assertEqual(len(r["shown"]), 1)
+        self.assertEqual(r["shown"][0]["title"], "2 sessions: 1 needs you, 1 finished")
+        self.assertEqual(r["shown"][0]["body"], "a: permission: Bash\nb: refactor")
+
+    def test_nothing_shows_while_grovy_is_in_front(self):
+        r = self.run_sw("""
+await push(M("a", "done", "finished: x"));
+wins = [{focused: true, visibilityState: "visible", url: "https://h/#/"}];
+await push(M("b", "input", "permission: Bash"));""")
+        self.assertEqual([n["body"] for n in r["shown"]], ["a: x"])   # the stack stays; nothing new shown
+
+    def test_a_push_without_news_redraws_quietly(self):
+        r = self.run_sw("""
+await push(M("a", "input", "question"));
+await push();""")
+        self.assertEqual([x["alert"] for x in r["log"]], [True, False])
+        self.assertEqual(r["shown"][0]["title"], "a needs you")
 
 
 if __name__ == "__main__":

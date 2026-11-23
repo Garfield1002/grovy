@@ -21,6 +21,7 @@ grovy folder, are written the same way: read plugins/git.py for a longer example
     grovy.sessions(), grovy.session(name)   the session list / one session's detail (copies)
     grovy.send(session, text)               send a message, with the phone's rules (never forced)
     grovy.log(text)                          a line in grovy's log (journalctl --user -u grovy)
+    grovy.data_dir()                         a folder of the plugin's own for its files (private, kept across restarts)
 
 The on() callbacks run one at a time on a thread of their own; each route call on a thread of its own. on() and route()
 only work inside setup(). If setup() fails or takes over 10s, the plugin is skipped; if a callback fails, the error is

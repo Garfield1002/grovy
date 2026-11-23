@@ -1,6 +1,6 @@
 # grovy: design and internals
 
-For people changing grovy (and Claude sessions doing it: see `CLAUDE.md`). Users: see `README.md`.
+For people changing grovy (and Claude sessions doing it: see `CLAUDE.md`). Users: see `README.md` and the guides it links to.
 
 ```
 claude ──hooks──► grovy hook NAME ──unix socket──► grovyd ──HTTP+SSE──► phone
@@ -15,6 +15,8 @@ claude ──hooks──► grovy hook NAME ──unix socket──► grovyd �
 | `extensions/` | built-in extensions of the page, written against `window.grovy` like a user's `custom.js` (see "Making it yours") |
 | `grovylib/` | the rest, one file per topic (CLI, hook adapter, tmux, registry, and the daemon's `Store`, assembled from one class per feature); `grovylib/__init__.py` maps it |
 | `index.html` | the whole UI (vanilla JS, no innerHTML); a map of its parts opens its script |
+| `sw.js` | the service worker, served at `/sw.js`: shows push notifications and opens their session; caches nothing |
+| `plugins/` | built-in daemon plugins (`git.py`, `push.py`), written against the plugin `Api` like a user's own |
 | `tests/test_grovy.py`, `tests/test_peers.py` | unit + tmux integration tests (`python3 -m unittest discover -s tests`) |
 | `examples/` | systemd unit, Telegram notify script, the generated hook config |
 | `assets/` | icon sizes and the home-screen backdrop, from [grove](https://github.com/Garfield1002/grove); served without the token from an allowlist (`ASSETS` in `grovyd.py`) |
@@ -42,19 +44,25 @@ GROVY_BIND=100.101.102.103 grovy serve        # or 0.0.0.0 for every interface
 grovy url                                   # prints http://ADDR:7333/?token=... : open it once on the phone
 ```
 
+`grovy setup` ends by printing that same link as a **QR code** to scan with the phone's camera, rather than the
+long token URL (`grovylib/qr.py`, a small stdlib-only byte-mode encoder, drawn with half-block characters and
+explicit black/white colours so it scans in any terminal theme); `grovy url` still prints the link as text to copy.
+
 **A token is always required, loopback included**, because other local users and DNS-rebinding web pages can
 reach 127.0.0.1 too. It's generated once into `$STATE/token` (mode 0600). `GROVY_TOKEN` overrides it. Opening the `grovy url` link sets an HttpOnly, SameSite=Lax
 cookie for a year. (Lax, not Strict: a standalone PWA launched from the phone's home screen is a top-level
 navigation the browser counts as cross-site, and Strict withholds the cookie there, so every cold launch landed
 back on the login page. CSRF is covered without Strict — actions are POST, guarded by the forced CORS preflight and
-the Origin check, and GET API routes need the `X-Grovy` header a navigation can't set.) Without it the page shows "login needed" and the API returns 401. To rotate the token, delete the
+the Origin check, and GET API routes need the `X-Grovy` header a navigation can't set.) Without it the page shows "login needed" and the API returns 401. That page also has a field to
+paste the login link (or the token) into, a plain GET form to `/?token=`, since grovy added to an iPhone's home screen
+keeps cookies of its own and has no address bar to open the link in. A token in a URL is never written to the log. To rotate the token, delete the
 file and restart the daemon. ⋯ → Login link (on the session list only, not inside a session) shows the same link for the address the page was opened
 on: the cookie is HttpOnly, so the page asks `POST /api/login-link`, which returns the token only to a logged-in,
 same-origin JSON request (a cross-site page can't send one). A script injected into the page could read the token
 that way; the strict script CSP is what prevents that. `GROVY_AUTH=off` temporarily accepts requests without a token while still setting the
 cookie from the link. That's useful for enrolling a phone whose only way to see the link is the grovy page itself.
-Without TLS the token protects against other peers on the network, not an on-path observer; the VPN provides the
-encryption. Cookies aren't isolated by port, so another web service on the same host name/IP that your phone visits
+Without HTTPS (below) the token protects against other peers on the network, not an on-path observer; the VPN
+provides the encryption. Cookies aren't isolated by port, so another web service on the same host name/IP that your phone visits
 would also receive the cookie. Only browse services there that you trust.
 
 **Host check:** requests are accepted only when the `Host` header is an IP address, `localhost`, or this machine's
@@ -63,6 +71,108 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 
 "Add to Home Screen" on the phone gives it an app-like icon.
 
+## HTTPS (optional)
+
+Off by default; plain HTTP is unchanged. The daemon serves HTTPS on the same port when it has a certificate:
+`GROVY_TLS_CERT` + `GROVY_TLS_KEY` (your own, e.g. Let's Encrypt), else `$STATE/tls/server.pem` (certificate and key
+in one file, so replacing it is atomic) if `grovy tls init` made one. `GROVY_TLS=off` ignores both. A certificate
+that is there but doesn't load stops the daemon at start (it never falls back to HTTP silently); a key with a
+passphrase is refused, never prompted for. The reconcile loop (10s) reloads it when its files change
+(`HttpServer.reload_tls`, a new `SSLContext` swapped in whole); a broken new file keeps the previous one. With HTTPS
+the login cookie is `__Secure-grovy_token` (`Secure`), and the plain `grovy_token` is deleted, also when the page
+loads for a phone that logged in over plain HTTP (it would otherwise keep sending it in the clear to the old
+`http://` address). A different name because a browser won't let `http://` overwrite a Secure cookie of the same
+name: turning HTTPS off again would lock phones out until they cleared the site's data. Links (`grovy url`, `status`) say
+`https`, and `status` reports which certificate is served.
+
+`grovy tls init [--name NAME ...]` (`grovylib/tls.py`, using the `openssl` command; default name: this machine's full
+host name) makes, each time, two certificates for exactly those names and IP addresses, valid 800 days (iOS refuses
+more than 825; `grovy doctor` warns 30 days before):
+* `grovy.crt`, what devices install: a CA, because phones only offer to trust a CA (`serverAuth` only). Its key
+  signs the next certificate and is then deleted (it only ever existed in a 0700 temporary folder, which a later run
+  removes if a killed run left it): it can never vouch for anything else. That is the protection. Its **name
+  constraints**, pinned to those names and addresses, are a second guard only where enforced: Android ignores them
+  on an installed certificate (and they aren't marked critical, so a client that doesn't understand them accepts
+  it). `grovy doctor` checks that the served certificate is signed by `grovy.crt` (an interrupted run could leave
+  them mismatched).
+* `server.pem`, what the daemon serves (certificate and key in one file, 0600): an ordinary server certificate
+  (`CA:FALSE`), signed by the above. Firefox refuses a server certificate that is a CA itself, so it can't be one file.
+
+X.509 can't exclude subdomains, so a name also covers its subdomains; a name must therefore have a dot (`dev` would
+be a whole top-level domain), except `localhost`. Every run makes a new pair, which each device installs again (with
+no lasting CA, nothing else could stay the same). A name other than the machine's own also needs `GROVY_HOSTS`;
+`grovy tls init` says so.
+
+**Getting the certificate onto a device.** `grovy tls init` also writes the certificate alone (no key) to
+`$STATE/tls/grovy.crt` and prints how to install it (Firefox, Linux system-wide with `trust anchor`, iPhone,
+Android), with its SHA-256 fingerprint. You copy that file over yourself (cable, AirDrop, USB stick): grovy **never serves it**. Over
+plain HTTP anyone on the path could swap it, and with it any fingerprint shown beside it; over HTTPS it's useless
+(a device that can open the page already trusts it). The fingerprint to check is the one the computer prints, against
+the one the device shows for what it installed.
+
+**Plain HTTP to the HTTPS port.** The daemon looks at the first byte of each connection, in the connection's thread
+(the TLS handshake also runs there, never in the accept loop), under one deadline (`HEADER_DEADLINE`) for handshake
+and headers together, and under idle eviction. A TLS handshake gets TLS; anything else gets `HTTPS_PAGE` for every
+request: it links to `https://<same Host>/` (with `?token=` only if the request carried the right one, so an old login
+link still works in one tap; the Host check requires a numeric port and no IPv6 zone id, since the Host is echoed)
+and, with grovy's own certificate, says to install `grovy.crt` first. It never sets a cookie or shows anything
+private. TLS reads that fail (a preconnect closed unused, a connection the deadline cut) end the connection quietly.
+
+## Setup and cleanup
+
+`grovy setup` (`grovylib/setupflow.py`, drawn with `grovylib/tui.py`) asks every question first, then shows one
+review listing only what has to change, and applies it on a yes, step by step (✓/✗; the first failure stops it and
+points to `grovy cleanup`). The questions: role (trunk, the default, or graft: joining a trunk, see "Other
+machines"), the address (a menu of this machine's addresses: this computer only (the default, with a warning that
+other devices can't open it), VPN (100.64/10), local network, public, everywhere), the port (the recorded one or
+`GROVY_PORT`/7333; one that something else listens on is refused once and suggested a free one; typing it again uses
+it, for that run only), HTTPS (only asked when other devices can reach it; default no; no writes `GROVY_TLS=off` into
+the unit so an old certificate isn't served). The changes: the `~/.local/bin/grovy` link, bash tab completion (`completion.SCRIPT` in bash-completion's
+per-user folder, loaded on the first tab; only written over if it is grovy's own, by its first line), the token and the
+`custom.*` templates, a certificate (`tls.init`, for the address, or every address for 0.0.0.0, and the host name,
+unless the current one already covers them), the systemd user service (previous version kept as `.bak`), starting
+it, linger. Each change is recorded in `$STATE/setup.json` (role, address, port, https, the link it made, services it
+wrote, `linger: true` if it turned linger on; that flag survives reruns). On a computer already set up, it first
+offers: change settings (the recorded answers preselected), show the login link, or remove (= `grovy cleanup`).
+It ends with the login link: a QR code and the link when other devices can reach grovy, else the link and an offer
+to open it in the browser (only when asked in person); if the daemon answering still runs other settings (one
+outside the service), it says so instead. A failing `enable-linger` is a warning (grovy then starts at login), not
+a failure. Answers are preselected from the record, or for an install older than it from the unit itself
+(`GROVY_BIND`, `GROVY_PORT`, `GROVY_TLS`; HTTPS on when `server.pem` exists and isn't turned off); a recorded address
+that isn't up right now stays offered and the default. With `-y`, every question takes its default (`tui.AUTO`)
+and it applies; without a terminal and without `-y` it shows the plan, changes nothing and exits 2. An address that
+isn't up right now can't be probed for its port: that port counts as free. HTTPS with no address or
+host name to put in the certificate is refused. The unit carries `GROVY_HOME`/`GROVY_STATE_DIR` when they are set,
+and `PATH` quoted. Ctrl-C stops it with a line saying what stays; flags
+(`--role`, `--bind`, `--port`, `--https/--no-https`, `--no-service`, `--dry-run`) answer questions up front.
+
+`grovy cleanup` (`grovylib/cleanup.py`) plans first, shows the list, and applies it on a yes (`-y` without asking,
+`--dry-run` only shows; looking makes no folder: one created by the look itself is removed). It refuses to start when
+a `grovy`/`grovy-tunnel` unit runs another grovy folder (its `ExecStart`, `%h` expanded): that grovy shares the
+state. Steps that stop something (a service, a daemon) stop cleanup if they fail; steps that remove what a rerun
+needs (the state with its record, the tunnel key) run last and are skipped once anything failed, so `grovy cleanup`
+again retries exactly what's left. A hand-started daemon's pid is checked again just before it is stopped (a daemon
+that doesn't answer is a failure, not "gone"). It stops and removes the `grovy` and `grovy-tunnel` services and unit files (and `.bak`),
+stops a daemon running outside the service (by the `pid` the daemon reports in `status`; a daemon too old to report
+one makes cleanup stop before changing anything), removes the link only if it points to this grovy folder (the completion file only if it is grovy's), turns
+linger off only if the record says setup turned it on, and removes the state folder, the ccs symlink and the
+attachments folder. The grovy home is kept unless asked (`--remove-home`), and running sessions are ended only on a yes
+(`--end-sessions`); they keep running in plain tmux otherwise (until the user manager exits at the last logout, once the
+service and linger are gone; their hooks recreate an empty state folder). Without a record (installs older than it), it removes
+what it finds in those places. A folder is only ever deleted when it is named for grovy (or ccs), is not the home
+folder, `/` or one of the home's parents, and doesn't hold the grovy code: a mistyped `GROVY_STATE_DIR=~` can't
+wipe a home. It refuses to run inside a grovy session, which it would cut off. The grovy folder is never touched.
+
+**`grovy update`** (`grovylib/update.py`) updates the grovy folder from its upstream branch: it refuses without one,
+with uncommitted changes to tracked files, and when the branch has commits of its own (it only fast-forwards: no
+merge, no rebase), fetches, lists the incoming commits (cleaned of control characters) and asks (`-y`; without a
+terminal and without `-y` it changes nothing and exits 2; `--check` only shows). After `git merge --ff-only` it
+checks that `grovy`, `grovylib.hook` and `grovyd` import in a fresh interpreter; if not, `git reset --keep` back to
+the commit it came from, and nothing is restarted. Then it restarts what runs the code: the `grovy` service, else a
+daemon started by hand in a tmux pane (the pane whose process is the daemon's pid, respawned with its own start
+command), and the `grovy-tunnel` service; then waits for the daemon to answer. Claude sessions are never touched;
+those started before keep their `--settings` until ⋯ → Update session. `--no-restart` updates the code only.
+
 ## Configuration (environment variables)
 
 | var | default | |
@@ -70,8 +180,12 @@ another name, such as a MagicDNS name, add it to `GROVY_HOSTS` (comma-separated)
 | `GROVY_BIND`, `GROVY_PORT` | `127.0.0.1`, `7333` | HTTP listener (`grovy serve --bind/--port` too) |
 | `GROVY_TOKEN` | `$STATE/token` | web UI token (auto-generated) |
 | `GROVY_HOSTS` | unset | extra accepted `Host` names, comma-separated |
+| `GROVY_TLS_CERT`, `GROVY_TLS_KEY` | unset | serve HTTPS with this certificate (else `$STATE/tls/server.pem` if `grovy tls init` made one; see "HTTPS") |
+| `GROVY_TLS` | on | `off` = plain HTTP even if there is a certificate |
 | `GROVY_AUTH` | `on` | `off` = don't require the token (enrollment only) |
 | `GROVY_STATE_DIR` | `$XDG_STATE_HOME/grovy` → `~/.local/state/grovy` | all state, mode 0700 |
+| `GROVY_TERMINAL` | `off` | `on` = another machine (this one's trunk) may open a terminal on this machine's sessions (`grovy attach pc:NAME`, see "Other machines") |
+| `GROVY_HOME` | `$XDG_CONFIG_HOME/grovy` → `~/.config/grovy` | your own files: `custom.css`/`custom.js`, `instructions.md`, `plugins/`, `peers.json` (`GROVY_CONFIG_DIR` is the older name; `GROVY_HOME` wins). Passed on to sessions started from it |
 | `GROVY_PERMISSION_TIMEOUT` | `600` | seconds a permission waits for the phone (fixed per session at `grovy new`) |
 | `GROVY_CLAUDE` | `claude` | claude executable |
 | `GROVY_PROJECTS_DIR` | `~/dev` | where ⋯ → New project makes projects |
@@ -91,10 +205,38 @@ command output or the full prompt. It is rate-limited to one per session per kin
 in a background thread with a 15s timeout, so a failing bot never blocks hooks or Claude.
 `examples/notify-telegram.sh` posts to an existing bot (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`).
 
+**Push notifications on your devices (Web Push).** Needs HTTPS (see "HTTPS"): browsers allow service workers and
+push only on a secure page. ⋯ → Notifications (on the session list; `extensions/push.js`) turns them on per device: it asks for permission
+right inside the tap (iPhone shows the prompt nowhere else), subscribes with grovy's VAPID key and registers the
+subscription's endpoint with the built-in plugin `plugins/push.py`, which sends a test. On iPhone it only works in
+grovy opened from the home screen. The plugin listens to the same moments as `GROVY_NOTIFY_CMD` (its `notify` event,
+not rate-limited) and sends each subscribed
+device an **empty** push through its browser's push service (Apple, Google, Mozilla: the only way to wake a phone),
+which so learns that something happened and when, never what. The service worker (`sw.js`) then fetches the text
+from grovy (`POST /api/x/push/pending`, with the login cookie, over HTTPS) and shows it; tapping it opens the session.
+Hence no payload encryption, and no crypto code in grovy: the VAPID key (P-256, in the plugin's `data_dir()`, 0600) is
+made and used with the `openssl` command (ES256 tokens, one per push service, reused for 11h).
+* All of grovy is **one notification, a stack**: a line per session (its latest news, newest first, at most 6), kept in
+  the notification's own `data`, so dismissing or tapping it starts a new stack. It alerts when it appears, and again
+  only for news that needs you (input, error); a finished turn updates it silently. Tapping it opens the session if
+  it holds one, else the list. The badge (`assets/badge-96.png`) is white on transparent: Android draws it as a mask.
+* Every push shows a notification (browsers count silent ones against the site, and Safari drops the subscription):
+  one that finds no new message (an earlier one took it) redraws the stack quietly; one that can't reach grovy says
+  "open grovy to see". While a grovy window is in front, news is shown and closed at once (the page shows it). Pushes carry a `Topic` per session and kind, so a phone that was off gets one of each, not a burst.
+* On iPhone, `subscribe()` must run inside the tap itself: the extension fetches the key and the service worker
+  beforehand, and calls it first thing (it asks for permission itself). It never unsubscribes a device on its own.
+* Messages wait per device (at most 20, in memory: lost on a daemon restart) until its service worker takes them.
+* A push service answering 404/410 ends that subscription. A device re-registers its subscription on each start.
+* `GROVY_PUSH_CONTACT` (default: grovy's GitHub page) is the contact put in the tokens; Apple refuses placeholder
+  addresses. Redirects from a push service are not followed (they would carry the token elsewhere).
+* Untested against real push services from here: Apple's in particular (a home-screen app on an iPhone).
+* The service worker caches nothing and handles no page requests, so the app is never a stale copy; the page
+  registers it on every start, so an update reaches devices. `/sw.js` is public (nothing private in it).
+
 ## Making it yours
 
 grovy's page can be extended by scripts that use one documented object, `window.grovy`, the same way for grovy's own
-built-in extensions and for the user's. Everything personal lives in `~/.config/grovy/` (`GROVY_CONFIG_DIR`), outside
+built-in extensions and for the user's. Everything personal lives in `~/.config/grovy/`, the *grovy home* (`GROVY_HOME`, formerly `GROVY_CONFIG_DIR`, still accepted), outside
 the repo, so updates never conflict with it. `grovy setup` installs commented templates of `custom.css` and `custom.js`.
 
 * **Built-in extensions** are `extensions/*.js` in the grovy folder, loaded in file-name order right after grovy's own
@@ -544,10 +686,28 @@ the `NewProjects` part of `Store`; the page side is `extensions/projects.js`).
   (post-checkout, post-merge) run as they would for you. Issue actions take `issue_lock` (one at a time) and run git
   outside `Store.lock`. Renaming an issue's session keeps the issue (the branch keeps its name).
 
-**Desktop.** At 1000px wide or more, a conversation gets a sidebar with all sessions (state dot, pending-request
-badge, last activity) and all pages, refreshed on any session's event at most every 400ms and only fetched while it's
-shown. There is then no header row: the pill and ⋯ float at the top right
-(over the margin beside the conversation; on a window just over 1000px they can overlap a message's corner). A page opened from the sidebar may belong to another session: the viewer looks pages up in both lists
+**Desktop.** At 1000px wide or more there is no home page: the session list is a sidebar beside every route, built
+by the same `listNodes()`/`sessCard()` as the phone's home screen (worktree nesting, peer warnings, pages), made
+compact by CSS, refreshed on any session's event at most every 400ms and only fetched while it's shown. `#/` shows
+"Pick a session" on the right. Sheets (menus, dialogs) are centred dialogs there, with a ✕ (`#sclose`), rows that
+highlight on hover, and their body scrolling under the ✕; the phone keeps the bottom sheet. The sidebar header has ＋ and a ⋯ with grovy's own menu (what the phone's home ⋯
+has, plus New session). There is no header row: the pill and the session's ⋯ float at the top right
+(over the margin beside the conversation; on a window just over 1000px they can overlap a message's corner). The grove
+backdrop stays, fainter, behind every route. Right-click (a mouse only: the event's `pointerType`, or `pointer: fine`
+when it has none) does what ⋯ menus and an item's own small buttons do on the phone (`#ctx`). Any node can carry items
+(`h(..., {ctx: el => [...]})`; extensions: `grovy.contextMenu(node, items)`); the menu lists the nearest one's, then
+each enclosing one's below a divider (a code block's Copy code, then its reply's Copy, Quote, Show tool calls). Items
+that mirror a button go through `press(button)`, which clicks that button, so its checks hold (Allow on a card too large
+to show stays disabled), and on a permission card the first, focused item is a Copy, so Enter in the menu never
+approves. Carriers: session cards (Open, Rename, Update, Resume, Stop, Remove), page cards (Open, new tab, its session,
+Delete), replies, your messages (Copy, Quote; Cancel while queued), subagent reports, code blocks, attachments, tool
+lines in "Worked for", permission cards (Copy, Deny, Allow once), folders in New session (Start here, Copy path). The
+conversation's background gives the open session's ⋯ items, the rest of the sidebar or an empty right side grovy's.
+With text selected in a message (`selectedText()`, what the phone's Quote button takes), it offers Quote selection and
+Copy; the docked Quote bar is then hidden (wide screen with a mouse), and letting go of a mouse selection in a
+message shows a small bar with ❝ Quote and Copy right above it (`#selbar`; gone when the selection is, on scroll or resize). Text boxes, a selection anywhere else, links and pictures inside a message, and Shift+right-click keep the
+browser's menu. Extensions' ⋯ items appear only for the open session: they act on `grovy.session`. Remove/Delete
+buttons are hidden in the sidebar (they are in the menu). ↑/↓ move in it, Esc or Tab closes it. A page opened from the sidebar may belong to another session: the viewer looks pages up in both lists
 (`pageOf`), so the conversation's refresh doesn't close it. Keyboard:
 Ctrl/Cmd+Enter sends (Enter stays a new line, as on the phone); typing with nothing focused goes to the message box;
 Alt+↑/↓ switch to the previous/next session (not from a full-screen message box); Esc closes a sheet or the page viewer, else the `/` picker, else shrinks a full-screen message box, else leaves
@@ -673,6 +833,101 @@ session can publish pages but can't make one public.
 
 ## Other machines (peers)
 
+**How the CLI looks (`grovylib/tui.py`).** Commands people read (`ls`, `peer ls`, `page ls`, `doctor`, `url`, the
+result lines of `new`/`kill`/`rename`/`resume`/`forget`, `core.die`'s `grovy:`) are styled only when their stream is
+a terminal and neither `NO_COLOR` nor `TERM=dumb` is set (`tui.color_on`, per stream: stdout and stderr each on their
+own); anywhere else they print exactly what they always did, byte for byte, because `remote.trunk_lines` parses a
+trunk's `grovy ls --here` by whitespace columns and scripts may parse the rest (`grovy ls --plain` asks for that on a
+terminal too; `forget` stays silent off a terminal). `tui.table` is borderless: column widths from display width
+(wide characters 2, combining marks 0), the header dim, one column (or several, in order) cut with … to fit the
+terminal (paths from their start, so their end shows), and every cell passed through `tui.safe` (control characters
+become `?`) before it is measured, whatever cleaning the caller did. `grovy ls` colours STATE by what it asks of
+you: idle green, working/starting cyan, needs input bold yellow, error bold red, exited/unknown/`running?` dim, an
+unknown state plain; this machine's paths use `~`, other machines' names have a dim `pc:`. Local rows are printed
+at once; when other machines' rows arrive and need wider columns, the local lines are redrawn in place (cursor up,
+erase) so it stays one table, but only if they surely are still on the screen (fewer lines than the terminal's
+height, each narrower than it); otherwise the remote rows follow as their own block. Notes on stderr get a yellow ⚠
+on a terminal. `grovy ls trunk` from a terminal runs `ssh -t`, so the trunk's grovy draws its own table.
+
+**The CLI on another machine's sessions (`grovylib/remote.py`).** `MACHINE:NAME` names a session elsewhere (local
+names never hold a colon). On a trunk, MACHINE is a graft from peers.json: `attach`, `logs`, `kill`, `resume`,
+`forget`, `rename`, `new` (no extra claude arguments, no `--fresh`) go straight to that graft's grovy through its
+tunnel socket with the token from peers.json (`peers.Peer` without a hub; the daemon isn't involved), and `grovy ls`
+lists every graft's sessions after the local ones, which it prints first: the grafts are asked at once (daemon threads) and
+get 4s in all, the whole answer included, so one asleep behind its tunnel or trickling bytes can't stall it, and
+Ctrl-C doesn't wait for them; one answering junk only loses its own rows (`grovy ls pc`: that graft only; an unreachable graft, or a peers.json
+problem, is a line on stderr). What a graft says is untrusted, like Claude's output: names are checked, and states,
+folders, errors and `logs` text are stripped of control characters and lone surrogates before they reach the
+terminal (and `ls` fields of newlines and tabs, so a graft can't print a made-up row). `rename` can't
+move a session between machines; `new` needs an absolute folder (it is resolved on the other machine). On a graft, MACHINE is `trunk`: the command runs there as `ssh [-t] TRUNK sh -c 'exec grovy …'` with your
+usual ssh (the tunnel's key can't run commands). A graft's plain `grovy ls` adds the trunk's own sessions as
+`trunk:NAME`: `grovy ls --here` there over ssh with `BatchMode=yes` (a login that needs a password is a note on stderr,
+never a prompt in the middle of the list) and a 5s bound; rows whose name isn't a plain session name (the trunk's grafts,
+this one included) are left out, and the fields are cleaned like a graft's. **A plain name works across machines**
+(local and remote as transparent as possible): for `attach`, `logs`, `kill`, `resume`, `forget`, `rename`, a NAME that
+isn't this computer's (registry or tmux; `cli.here`) is looked for on the others (`remote.find`, the same bounded
+asking as `ls`): on one machine it runs there (`(NAME is pc:NAME)` on stderr), on several it stops and lists them
+(never a guess, `kill` included), on none it's the usual error plus the machines that didn't answer. This computer's
+session always wins and costs no lookup. `new` always means here. Tab completion offers the other machines' names
+alone too when they're unambiguous, from `$STATE/completion-names.json`, written by `grovy ls` and by a detached
+`grovy __complete --refresh` started when it's over 30s old (a tab never waits for the network; the file is marked
+fresh before the refresh starts, so a burst of tabs starts one). `logs` reads `GET /api/sessions/NAME/screen?lines=N` (X-Grovy).
+**attach** (`grovylib/terminal.py`): `POST /api/sessions/NAME/terminal` with the token, `X-Grovy: 1` and `Upgrade:
+grovy-terminal` (a browser can't send Upgrade) gets `101`, then the graft's grovyd runs `tmux attach-session -t
+=grovy-NAME` in a pseudo-terminal (TERM and size from `X-Term`/`X-Rows`/`X-Cols`) and relays it: its output as
+raw bytes; input as frames (type byte, 2-byte length; type 0 keys, type 1 rows+cols). Detaching (C-b d) or the
+session ending closes it; either side closing kills the attach (the graft waits 0.2s after the trunk's side closes,
+so keys typed just before `~.` reach tmux). **`grovy shell MACHINE`** is the same relay on `POST /api/shell`, under the
+same `GROVY_TERMINAL=on` (the user's choice: a terminal on a session already lets you run anything there): the graft
+runs `tmux new-session -A -s grovy_shell -c ~` (your login shell, in a plain tmux session that isn't a grovy one,
+so a dropped link leaves it running and the next `grovy shell` joins it). `grovy shell trunk` on a graft is
+`ssh -t TRUNK exec tmux new-session -A -s grovy_shell` with your usual ssh. A TERM the graft has no terminfo entry for (kitty,
+ghostty...) becomes `xterm-256color` (tmux would refuse it). The child's environment and argv are built before the
+fork (`execvpe`); when the relay ends the pty is closed first and the tmux client gets SIGHUP, then SIGKILL after 3s
+(a hung tmux server can't keep the thread and its connection slot; the pty is non-blocking, and input tmux
+doesn't read within 10s ends the relay). On the trunk, `~.` at the start of a line ends
+it from there, as in ssh (`~~` sends a `~`; what was typed before it is still sent; a paste holding a newline
+then `~.` ends it too, as in ssh); SIGTERM ends it cleanly; an end tmux didn't clean up after (`~.`, a
+dropped link, a signal) resets the terminal (alternate screen, mouse, bracketed paste, cursor) and says why. The
+size is the terminal's own (`os.get_terminal_size` on stdin). Only with `GROVY_TERMINAL=on` in the graft's
+environment (setup asks a graft, default yes, and writes it into the unit): it is a full terminal (tmux runs
+commands), so whoever holds the token, i.e. the trunk, can then run anything as you on the graft. Off, the trunk
+still lists, starts, stops and messages the sessions, as the phone does.
+
+**Setting one up (`grovy setup`, role "graft", `grovylib/graft.py`).** In setup's words the hub is the *trunk* and a
+peer is a *graft*. Setup on the PC: picks the trunk (Host entries of `~/.ssh/config`, or a typed `user@host`) and
+probes it over your usual ssh (`grovy peer -h` there: missing or too old grovy is said so before anything changes),
+asks the name (the short host name by default), and plans the graft's own grovy on 127.0.0.1 (no HTTPS) plus: a
+dedicated key `~/.ssh/grovy_tunnel` (ed25519, no passphrase: the service has no agent), one ssh run on the trunk
+(`graft.ADD_SCRIPT`: this grovy's token and the public key on stdin, never in argv; it replaces any line holding the
+same key in `~/.ssh/authorized_keys` and appends
+`restrict,port-forwarding,permitopen="127.0.0.1:9",permitlisten="127.0.0.1:9",command="rm -f SOCK; echo SOCK" KEY
+grovy-tunnel:NAME` (`permitlisten` stops the key opening TCP listeners on the trunk; a Unix-socket `-R` isn't limited
+by it, see "Trust"; it needs OpenSSH 7.8 or newer on the trunk, whose older sshd rejects the whole line), makes the socket's folder 0700, runs `grovy peer add NAME --socket SOCK`, prints the path. The
+file is edited by `edit_keys` (shared with the removal): adding drops the lines holding this key, or ending in
+`grovy-tunnel:NAME` (another computer that had the name); removing drops only this key's line (the name may belong to
+the computer that replaced this one by now), or the name's line when the key is gone here; comparing awk fields exactly on bytes (`LC_ALL=C`: grep
+in a UTF-8 locale silently dropped lines that weren't valid UTF-8), writes a temporary file in `~/.ssh`, and puts it
+in place (`mv`, or written through a symlink) only if the line counts add up; any failure leaves the file as it was.
+An empty key, and a socket path outside `[A-Za-z0-9/._-]`, are refused. Then the
+the `grovy-tunnel` user service (`grovy peer tunnel TRUNK --name NAME --port PORT --identity KEY`, `Restart=always`).
+The forced command *is* the tunnel's preparation for that one socket (remove a stale one, print the path), so the
+normal `grovy peer tunnel` works with the restricted key whatever the trunk's `StreamLocalBindUnlink`. Setup's own
+logins share one ssh connection (`ControlMaster`, a private temporary `ControlPath`, closed at exit), so a password
+is asked once. It ends by polling `grovy peer ls` on the trunk until the graft shows online (30s), else it says where
+to look. `grovy cleanup` on the graft runs `graft.REMOVE_SCRIPT` on the trunk (drops the key's line, `grovy peer rm
+NAME`; if the trunk can't be reached, a trunk that may be gone for good, it warns and says what to run there, and
+goes on: the key is deleted here, so the line left there is dead) and deletes the key it made. Pointing a graft at another trunk takes it off the old one first; setup as a trunk on a
+former graft stops and removes the tunnel and takes it off its trunk (`graft.leave`). A trunk that can't be reached
+then is kept in the record (`old_grafts`, one entry per trunk and name, dropped once reached) for cleanup; a graft
+set up before the record knew its trunk is read back from its unit. busybox awk splits a line at a NUL byte (gawk,
+mawk keep it). Limits: the trunk's login shell must be sh-like (a csh can't
+parse the multi-line `sh -c '…'`); with `ProxyJump`, `--identity` doesn't reach the jump host and the service has no
+agent, so the tunnel fails even though setup worked.
+Checked against OpenSSH 10.0 (a private sshd, default `StreamLocalBindUnlink no`): a command asked for over the key
+runs the forced command instead, `-L` is refused, and the tunnel comes up over a stale socket.
+
+
 One grovy (the **hub**) can show and command the sessions of grovy daemons on other machines (**peers**, e.g. a PC
 with no public address) next to its own. All of it is `grovylib/peers.py`. Its state (each link, the peer's last
 session and page lists) is not `Store` state: it lives in `Peers`/`Peer` under their own locks, and they call
@@ -691,6 +946,14 @@ PC: grovyd (127.0.0.1:7333) ◄── ssh -R ──── hub: ~/.local/state/gr
   (sshd only binds over one with `StreamLocalBindUnlink yes`, which it usually lacks) and print the socket's absolute
   path; then `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes
   -R SOCK:127.0.0.1:PORT HOST`; when ssh ends it waits 2s, 4s, … up to 60s (reset after a minute up) and starts again.
+  The tunnel's ssh reads your settings for HOST through `ssh -G HOST` written to a temporary `-F` file, minus the
+  forwards (`RemoteForward`, `LocalForward`, `DynamicForward`, `ForwardAgent`, X11), connection sharing (`ControlMaster`/
+  `ControlPath`), `RemoteCommand`/`RequestTTY` and, with `--identity`, your `IdentityFile`s: a forward meant for your
+  own logins (a gpg-agent socket in `/run/user/…`) fails on the hub, and with `ExitOnForwardFailure` that ended every
+  connect (`ClearAllForwardings` can't be used: it drops the tunnel's own `-R` too). `ProxyJump` becomes a
+  `ProxyCommand` (`ssh -W`, your usual config for the jump hosts). If `ssh -G` fails, your config is used as it is.
+  The other logins that run one command (setup's, `prepare`, `trunk:NAME`) pass `ClearAllForwardings=yes` and
+  `RemoteCommand=none`.
   `--no-prepare` skips the remote shell entirely (needed with a key restricted to forwarding, below): then
   `--remote-socket` must be the absolute path, its folder made once by hand (`mkdir -p -m 700`), and a stale socket is
   left to the hub's sshd (`StreamLocalBindUnlink yes`, which sashimi has).
@@ -897,6 +1160,10 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
   (above) gets around them.
 * A shared page's link is its only protection, over plain HTTP: anyone who sees the link, or the traffic on the
   network, can open it until you stop sharing.
+* HTTPS with `grovy tls init`: each device installs `grovy.crt` by hand, again after every run. Firefox on Android
+  ignores installed certificates unless "Use third party CA certificates" is on in its secret settings. Untested on
+  real phones so far, name constraints on iOS in particular. HTTP and HTTPS can't both be served normally: once HTTPS
+  is on, plain HTTP only gets the page pointing to it.
 
 ## Tests
 

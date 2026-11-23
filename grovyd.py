@@ -18,15 +18,16 @@ import re
 import shutil
 import socket
 import socketserver
+import ssl
 import stat
 import sys
 import threading
 import time
 from collections import deque
 from html import escape as html_escape
-from urllib.parse import urlsplit, parse_qs, unquote
+from urllib.parse import urlsplit, parse_qs, quote, unquote
 
-from grovylib import claude, client, commands, core, newproject, notify, oom, pages, peers, plugins
+from grovylib import claude, client, commands, core, newproject, notify, oom, pages, peers, plugins, terminal, tls, tmuxctl
 from grovylib.store import Store
 
 
@@ -67,7 +68,8 @@ class SockHandler(socketserver.StreamRequestHandler):
                         pass   # the hook gave up waiting; the message was marked steered but may not have arrived
         elif t == "status":
             self._reply({"sessions": {s["name"]: s for s in store.list_sessions()}, "url": self.server.url,
-                         "claude": shutil.which(claude.claude_cmd())})
+                         "tls": self.server.tls_cert,
+                         "claude": shutil.which(claude.claude_cmd()), "pid": os.getpid()})
         elif t == "refresh":
             store.reconcile()
         elif t == "peers":   # `grovy peer ls`
@@ -128,6 +130,7 @@ class SockHandler(socketserver.StreamRequestHandler):
 
 class SockServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
+    tls_cert = None   # the certificate the HTTP side serves, for `grovy tls init` / `grovy url`
 
 
 INDEX_PATH = os.path.join(core.HERE, "index.html")
@@ -192,11 +195,13 @@ ASSETS_DIR = os.path.join(core.HERE, "assets")
 
 # Public static files: an allowlist, never a path from the request.
 ASSETS = {"icon-64.png": "image/png", "icon-180.png": "image/png", "icon-192.png": "image/png",
-          "icon-512.png": "image/png", "backdrop.svg": "image/svg+xml"}
+          "icon-512.png": "image/png", "badge-96.png": "image/png", "backdrop.svg": "image/svg+xml"}
 
 
+SW_PATH = os.path.join(core.HERE, "sw.js")
 MANIFEST = json.dumps({
-    "name": "grovy", "short_name": "grovy", "start_url": "/", "display": "standalone",
+    "id": "/", "scope": "/", "name": "grovy", "short_name": "grovy", "start_url": "/", "display": "standalone",
+    "description": "Your Claude Code sessions",
     "background_color": "#161615", "theme_color": "#161615",
     "icons": [{"src": "/assets/icon-192.png", "sizes": "192x192", "type": "image/png"},
               {"src": "/assets/icon-512.png", "sizes": "512x512", "type": "image/png"}]}).encode()
@@ -263,7 +268,8 @@ def load_index():
     # "<script>" in a comment would otherwise shift what gets hashed).
     hashes = " ".join("'sha256-%s'" % base64.b64encode(hashlib.sha256(s).digest()).decode() for s in scripts + added)
     csp = (f"default-src 'none'; script-src {hashes}; style-src 'unsafe-inline'; connect-src 'self'; "
-           "img-src 'self' data:; frame-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; "
+           "img-src 'self' data:; frame-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; "
+           "form-action 'none'; "
            "frame-ancestors 'none'")
     return html, csp
 
@@ -283,10 +289,30 @@ HOST_PAGE = (b"<!doctype html><meta name=viewport content='width=device-width,in
              b"daemon with <code>GROVY_HOSTS={host}</code> in its environment.</p>")
 
 
+HTTPS_PAGE = """<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>
+<title>grovy</title><body style='font:16px system-ui;padding:24px;max-width:30em;line-height:1.45'>
+<h2>grovy uses HTTPS now</h2>{cert}
+<p><a href="{link}" style='font-size:1.15em'>Open grovy with HTTPS</a></p>"""
+
+HTTPS_CERT = """<p>The first time on this device (and after each <code>grovy tls init</code>), install grovy's
+certificate, so the browser trusts it. It is the file <code>grovy.crt</code> that <code>grovy tls init</code> made on the
+computer: copy it to this device yourself (cable, AirDrop, a USB stick...). It is never downloaded from here, since
+anyone on the network could swap it on its way.</p>"""
+
+
 LOGIN_PAGE = (b"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
               b"<title>grovy</title><body style='font:16px system-ui;padding:24px;max-width:30em'>"
-              b"<h2>grovy: login needed</h2><p>Open the link printed by <code>grovy url</code> on the machine "
-              b"(it ends in <code>?token=...</code>). Your browser remembers it for a year.</p>")
+              b"<h2>grovy: login needed</h2>{wrong}<p>Open the link printed by <code>grovy url</code> on the machine "
+              b"(it ends in <code>?token=...</code>). Your browser remembers it for a year.</p>"
+              # The home-screen app keeps cookies of its own (iPhone) and has no address bar to open the link in.
+              b"<p>In grovy added to the home screen, paste the link here instead. Copy it with "
+              b"&#8943; &rarr; Login link on a device that is logged in, or from <code>grovy url</code>.</p>"
+              b"<form method=get action='/' style='display:flex;gap:8px;flex-wrap:wrap'>"
+              b"<input name=token required autocomplete=off autocapitalize=off spellcheck=false "
+              b"placeholder='Login link or token' aria-label='Login link or token' "
+              b"style='flex:1 1 14em;font:inherit;padding:8px;border:1px solid #888;border-radius:8px'>"
+              b"<button style='font:inherit;padding:8px 16px;border-radius:8px'>Log in</button></form>")
+LOGIN_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
 
 
 def _res(code, res, key=None):
@@ -301,8 +327,9 @@ class Http(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
-        if core.env("DEBUG"):
-            super().log_message(fmt, *args)
+        if core.env("DEBUG"):   # never the login token in the log (it comes in the URL)
+            super().log_message(fmt, *(re.sub(r"token=[^&\s\"]*", "token=…", a) if isinstance(a, str) else a
+                                       for a in args))
 
     def _send(self, code, body, ctype="application/json", extra=(), frame="DENY"):
         if not isinstance(body, bytes):
@@ -383,15 +410,75 @@ class Http(http.server.BaseHTTPRequestHandler):
             got = auth[7:]
         for part in self.headers.get("Cookie", "").split(";"):
             k, _, v = part.strip().partition("=")
-            if k in ("grovy_token", "ccs_token"):  # ccs_token: cookie set before the rename
+            if k in ("__Secure-grovy_token", "grovy_token", "ccs_token"):  # ccs_token: cookie set before the rename
                 got = got or v
         return hmac.compare_digest(got.encode(), token.encode())
 
     timeout = 30  # seconds of client silence before a connection is dropped
     HEADER_DEADLINE = 15  # whole request line + headers must arrive within this (per-recv timeouts can be trickled)
+    tls = False         # this connection is HTTPS
+    plain_on_tls = False   # plain HTTP to the HTTPS port: answered only with HTTPS_PAGE
+    _raw = None         # with HTTPS: our own handle on the TCP socket, so _abort never touches the TLS object
+
+    def setup(self):
+        """With HTTPS, the handshake runs here, in this connection's thread (never in the accept loop, where one slow
+        client would stall everyone), under the same deadline and idle eviction as a request's headers: the deadline
+        covers both together."""
+        ctx = self.server.ssl_ctx
+        self.tls_failed = False
+        self._since = time.monotonic()
+        if not ctx:
+            return super().setup()
+        t = threading.Timer(self.HEADER_DEADLINE, self._abort)
+        t.daemon = True
+        try:
+            self._raw = socket.socket(self.request.family, self.request.type, fileno=os.dup(self.request.fileno()))
+            t.start()
+            self.server.waiting_add(self)
+            self.request.settimeout(self.timeout)
+            if self.request.recv(1, socket.MSG_PEEK) == b"\x16":   # a TLS handshake record
+                wrapped = ctx.wrap_socket(self.request, server_side=True, do_handshake_on_connect=False)
+                self.request = wrapped   # only once wrapped: a failed wrap may already have detached the socket
+                wrapped.do_handshake()
+                self.tls = True
+            else:
+                self.plain_on_tls = True
+            super().setup()
+        except (OSError, ValueError, RuntimeError) as e:   # SSLError is an OSError: e.g. the phone doesn't trust us yet
+            self.tls_failed = True   # no rfile/wfile: handle() and finish() skip their part
+            if core.env("DEBUG"):
+                print(f"grovyd: TLS handshake with {self.client_address[0]} failed: {e}", file=sys.stderr, flush=True)
+        finally:
+            t.cancel()
+            self.server.waiting_remove(self)
+
+    def handle(self):
+        if self.tls_failed:
+            return
+        try:
+            super().handle()
+        except OSError:
+            if not self.tls:
+                raise
+            # A TLS read on a socket the deadline shut down, or a browser's preconnect closed unused, raises where
+            # plain HTTP reads b"" quietly. Nothing to report.
+
+    def finish(self):
+        try:
+            if not self.tls_failed:
+                super().finish()
+        finally:
+            if self._raw is not None:
+                if isinstance(self.request, ssl.SSLSocket):   # wrapping detached the socket socketserver closes
+                    try:
+                        self.request.close()
+                    except OSError:
+                        pass
+                self._raw.close()
 
     def handle_one_request(self):
-        t = self._deadline = threading.Timer(self.HEADER_DEADLINE, self._abort)
+        left = self.HEADER_DEADLINE - (time.monotonic() - self._since) if self._raw else self.HEADER_DEADLINE
+        t = self._deadline = threading.Timer(max(left, 0.5), self._abort)
         t.daemon = True
         t.start()
         self.server.waiting_add(self)
@@ -405,22 +492,63 @@ class Http(http.server.BaseHTTPRequestHandler):
         ok = super().parse_request()  # reads the headers; past this point the deadline no longer applies
         self._deadline.cancel()
         self.server.waiting_remove(self)
+        if ok and self.plain_on_tls:
+            self._https_page()
+            return False
         return ok
+
+    def _https_page(self):
+        """Plain http:// to the HTTPS port (an old link, or a phone that hasn't installed the certificate yet): point
+        to https://. Never the certificate itself: over plain HTTP it could be swapped. Nothing private: the token is
+        only echoed back to a request that already carried it."""
+        self.close_connection = True
+        if not self._host_ok():
+            return self._err(403, "unknown Host header (add the name to GROVY_HOSTS)")
+        url = urlsplit(self.path)
+        if self.command != "GET":
+            return self._err(400, "this grovy uses HTTPS")
+        q = parse_qs(url.query).get("token", [""])[0]
+        good = q and self.server.token and hmac.compare_digest(q.encode(), self.server.token.encode())
+        link = "https://" + (self.headers.get("Host") or "").strip() + "/" + (f"?token={quote(q)}" if good else "")
+        own = self.server.tls_paths == (tls.own_cert(), None)   # not with GROVY_TLS_CERT: nothing to install
+        page = HTTPS_PAGE.replace("{cert}", HTTPS_CERT if own else "")
+        self._send(200, page.replace("{link}", html_escape(link)).encode(), "text/html",
+                   [("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")])
 
     def _abort(self):
         if core.env("DEBUG"):
             print(f"grovyd: closed idle connection from {self.client_address[0]} "
                   f"(no request within {self.HEADER_DEADLINE}s)", file=sys.stderr, flush=True)
         try:
-            self.connection.shutdown(socket.SHUT_RDWR)
+            (self._raw or self.connection).shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
+
+    def _cookies(self, token):
+        """Set-Cookie headers for a login. Over HTTPS the cookie is `__Secure-grovy_token` (Secure: never sent over
+        plain HTTP), and the plain-HTTP one is deleted. A different name, so that if HTTPS is turned off again a login
+        over http:// can still set `grovy_token` (a browser won't let http:// overwrite a Secure cookie of the same name)."""
+        # SameSite=Lax, not Strict: Strict withholds the cookie on top-level navigations the browser treats as
+        # cross-site, which includes a standalone PWA launched from the Android home screen, so every cold launch landed
+        # on the login page. Lax still blocks CSRF here (actions are POST, guarded by the JSON/octet-stream content
+        # type's forced preflight and the Origin check; GET API routes need the X-Grovy header a navigation can't set),
+        # and only sends on top-level GETs.
+        attrs = "Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000"
+        if not self.tls:
+            return [("Set-Cookie", f"grovy_token={token}; {attrs}")]
+        return [("Set-Cookie", f"__Secure-grovy_token={token}; {attrs}; Secure"),
+                ("Set-Cookie", "grovy_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")]
 
     def _host_ok(self):
         """DNS-rebinding guard: a browser reaching us through an attacker's name sends that name as
         Host. Accept only IP literals, localhost, this machine's names, and GROVY_HOSTS."""
         host = (self.headers.get("Host") or "").strip().lower()
         name = host[1:host.find("]")] if host.startswith("[") else host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+        if "%" in name:   # an IPv6 zone id passes ip_address() with any text after it ("[::1%@evil.example#]")
+            return False
+        port = host[host.find("]") + 1:] if host.startswith("[") else host[len(name):] if host.count(":") == 1 else ""
+        if port and not re.fullmatch(r":\d{1,5}", port):   # e.g. "127.0.0.1:x@evil.example", echoed in links
+            return False
         try:
             ipaddress.ip_address(name)
             return True
@@ -435,17 +563,17 @@ class Http(http.server.BaseHTTPRequestHandler):
             return self._err(403, "unknown Host header (add the name to GROVY_HOSTS)")
         url = urlsplit(self.path)
         path = url.path
+        wrong = False
         if path == "/" and self.server.token:
-            q = parse_qs(url.query).get("token", [""])[0]
+            q = parse_qs(url.query).get("token", [""])[0].strip()
+            if "token=" in q:   # the whole login link, pasted into the login page's field
+                q = parse_qs(urlsplit(q).query).get("token", [""])[0].strip()
             if q and hmac.compare_digest(q.encode(), self.server.token.encode()):
+                # Lax (see _cookies): a scanned QR or a messaged link opens this from outside the origin
                 return self._send(303, b"", "text/plain", [
                     ("Location", "/"),
-                    # SameSite=Lax, not Strict: Strict withholds the cookie on top-level navigations the browser
-                    # treats as cross-site, which includes a standalone PWA launched from the Android home screen,
-                    # so every cold launch landed on the login page. Lax still blocks CSRF here (actions are POST,
-                    # guarded by the JSON/octet-stream content type's forced preflight and the Origin check; GET API
-                    # routes need the X-Grovy header a navigation can't set), and only sends on top-level GETs.
-                    ("Set-Cookie", f"grovy_token={q}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000")])
+                    *self._cookies(q)])
+            wrong = bool(q)
         if path.startswith("/assets/") and path[8:] in ASSETS:   # icons and backdrop: nothing private
             try:
                 with open(os.path.join(ASSETS_DIR, path[8:]), "rb") as f:
@@ -458,6 +586,14 @@ class Http(http.server.BaseHTTPRequestHandler):
                                if ctype == "image/svg+xml" else []))
         if path == "/manifest.webmanifest":
             return self._send(200, MANIFEST, "application/manifest+json")
+        if path == "/sw.js":   # the service worker (sw.js): at the root, so it may cover the whole app. Nothing private
+            try:
+                with open(SW_PATH, "rb") as f:
+                    sw = f.read()
+            except OSError:
+                return self._err(404, "not found")
+            return self._send(200, sw, "text/javascript", [("Cache-Control", "no-cache"),
+                              ("Content-Security-Policy", "default-src 'none'; connect-src 'self'; img-src 'self'")])
         m = re.fullmatch(r"/s/([0-9a-f]{32})", path)
         if m:   # a shared page: its link is the credential, and it grants nothing but this page
             got = self.server.store.shared_page_html(m.group(1))
@@ -470,7 +606,9 @@ class Http(http.server.BaseHTTPRequestHandler):
                 return self._peer_reply(got)
         if not self._authed():
             if path == "/":
-                return self._send(401, LOGIN_PAGE, "text/html")
+                return self._send(401, LOGIN_PAGE.replace(b"{wrong}", b"<p style='color:#c33'>That link or token "
+                                  b"didn't work: copy it again.</p>" if wrong else b""), "text/html",
+                                  [("Content-Security-Policy", LOGIN_CSP)])
             return self._err(401, "token required: open /?token=...")
         store = self.server.store
         if store.peers:   # a peer's session, id or file (pc:...): proxied to it (grovylib/peers.py)
@@ -480,7 +618,12 @@ class Http(http.server.BaseHTTPRequestHandler):
         if path == "/":
             self.server.refresh_index()
             index, csp = self.server.page   # one read: a reload in between can't pair a page with another's CSP
-            return self._send(200, index, "text/html", [("Content-Security-Policy", csp)])
+            extra = [("Content-Security-Policy", csp)]
+            if self.tls and self.server.token and re.search(r"(^|;)\s*grovy_token=", self.headers.get("Cookie", "")):
+                # A phone logged in over plain HTTP holds a cookie without Secure, which it would keep sending in
+                # the clear to the http:// address: swap it for the Secure one.
+                extra += self._cookies(self.server.token)
+            return self._send(200, index, "text/html", extra)
         if path == "/api/sessions":
             if store.peers:   # other machines' sessions too, and whether each is reachable
                 return self._send(200, {"sessions": store.peers.merge_sessions(store.list_sessions()), "now": time.time(),
@@ -516,6 +659,16 @@ class Http(http.server.BaseHTTPRequestHandler):
             if not entry:
                 return self._err(404, "not found")
             return self._send_file(entry["path"], entry["name"])
+        m = re.fullmatch(r"/api/sessions/([^/]+)/screen", path)
+        if m and core.valid_name(m.group(1)):   # `grovy logs pc:NAME` from the trunk: the pane's recent text
+            if self.headers.get("X-Grovy") != "1":
+                return self._err(403, "X-Grovy header missing")
+            n = parse_qs(url.query).get("lines", ["200"])[0]
+            try:
+                text = tmuxctl.capture(m.group(1), min(int(n), 5000) if n.isdigit() else 200)
+            except (ValueError, RuntimeError) as e:
+                return self._err(404, str(e))
+            return self._send(200, {"text": text})
         m = re.fullmatch(r"/api/sessions/([^/]+)/history", path)
         if m and core.valid_name(m.group(1)):
             qs = parse_qs(url.query)
@@ -572,6 +725,11 @@ class Http(http.server.BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/sessions/([^/]+)/attachments", urlsplit(self.path).path)
         if m:   # a raw file body, streamed to disk; octet-stream still forces a CORS preflight
             return self._upload(m.group(1), urlsplit(self.path).path)
+        m = re.fullmatch(r"/api/sessions/([^/]+)/terminal", urlsplit(self.path).path)
+        if m:   # `grovy attach pc:NAME` from the trunk (grovylib/terminal.py)
+            return self._terminal(m.group(1))
+        if urlsplit(self.path).path == "/api/shell":   # `grovy shell pc` from the trunk
+            return self._terminal(None)
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
             return self._err(415, "Content-Type must be application/json")
         try:
@@ -762,6 +920,34 @@ class Http(http.server.BaseHTTPRequestHandler):
             return wrap(*store.cancel_prompt(m.group(1)))
         return 404, {"error": "not found"}
 
+    def _terminal(self, name):
+        """A terminal on a session (name None: a login shell), for `grovy attach`/`grovy shell` from another machine:
+        only with GROVY_TERMINAL=on, only from a client that sends the Upgrade header (a browser page can't), then
+        relayed until either side ends it."""
+        if not terminal.enabled():
+            return self._err(403, "the terminal is off on this computer (its grovy setup, or GROVY_TERMINAL=on)")
+        if self.headers.get("X-Grovy") != "1" or self.headers.get("Upgrade") != terminal.UPGRADE:
+            return self._err(400, "not a terminal request")
+        if name is not None and (not core.valid_name(name) or not tmuxctl.tmux_alive(name)):
+            return self._err(404, f"no live session {name!r} here")
+        what = "a shell" if name is None else name
+        def num(h, d):
+            v = self.headers.get(h, "")
+            return int(v) if v.isascii() and v.isdigit() and 1 <= int(v) <= 1000 else d
+        rows, cols, term = num("X-Rows", 24), num("X-Cols", 80), self.headers.get("X-Term", "")
+        self.close_connection = True
+        self.send_response(101)
+        self.send_header("Upgrade", terminal.UPGRADE)
+        self.send_header("Connection", "Upgrade")
+        self.end_headers()
+        self.wfile.flush()
+        print(f"grovyd: terminal opened on {what}", file=sys.stderr, flush=True)
+        try:
+            terminal.serve(self.connection, name, rows, cols, term)
+        except Exception as e:   # the stream is ours now: never a traceback into the handler
+            print(f"grovyd: terminal on {what} ended: {e}", file=sys.stderr, flush=True)
+        print(f"grovyd: terminal closed on {what}", file=sys.stderr, flush=True)
+
     def _sse(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -832,6 +1018,25 @@ class HttpServer(http.server.ThreadingHTTPServer):
     last_client_error = 0
     allowed_hosts = {"localhost"}
     MAX_CONNECTIONS = 64
+    ssl_ctx = None      # HTTPS when set (grovylib/tls.py); replaced whole when the certificate files change
+    tls_paths = None
+    tls_stamp = None
+
+    def reload_tls(self):
+        """Load the certificate again if its files changed (`grovy tls init` again, a renewed Let's Encrypt
+        certificate). A bad file keeps the previous certificate. Returns False if nothing could be loaded."""
+        if not self.tls_paths:
+            return True
+        s = tls.stamp(*self.tls_paths)
+        if s is None or s == self.tls_stamp:
+            return self.ssl_ctx is not None
+        self.tls_stamp = s   # set even on failure: a half-written file is retried when it changes again
+        try:
+            self.ssl_ctx = tls.context(*self.tls_paths)
+        except (OSError, ValueError) as e:   # SSLError is an OSError
+            print(f"grovyd: can't load the HTTPS certificate {self.tls_paths[0]}: {e}" +
+                  ("; keeping the previous one" if self.ssl_ctx else ""), file=sys.stderr, flush=True)
+        return self.ssl_ctx is not None
 
     WAITING_PER_IP = 8   # connections from one address that haven't sent a request yet
 
@@ -912,6 +1117,17 @@ class HttpServer(http.server.ThreadingHTTPServer):
 
 def serve(bind, port):
     sdir = core.state_dir()
+    try:   # HTTPS only if there is a certificate; one that's there but broken stops the daemon rather than fall back
+        tls_paths = tls.cert_paths()
+    except ValueError as e:
+        core.die(str(e))
+    ctx, tls_stamp = None, None
+    if tls_paths:
+        tls_stamp = tls.stamp(*tls_paths)   # before loading: a change in between is picked up by the next reload
+        try:
+            ctx = tls.context(*tls_paths)
+        except (OSError, ValueError) as e:   # SSLError is an OSError
+            core.die(f"can't load the HTTPS certificate {tls_paths[0]}: {e} (fix it, or start with GROVY_TLS=off)")
     notifier = None
     if core.env("NOTIFY_CMD"):
         notifier = notify.Notifier(core.env("NOTIFY_CMD"), core.env("PUBLIC_URL"))
@@ -932,17 +1148,20 @@ def serve(bind, port):
 
     httpd = HttpServer((bind, port), Http)
     httpd.store = st
+    httpd.tls_paths, httpd.tls_stamp, httpd.ssl_ctx = tls_paths, tls_stamp, ctx
     # A token is always required, loopback included: other local users and DNS-rebinding pages can
     # reach 127.0.0.1 too. Generated once into the state dir; see `grovy url`. GROVY_AUTH=off keeps it
     # optional, e.g. while enrolling a phone that can only read the link through this page.
     loopback = bind in ("127.0.0.1", "::1", "localhost")
     httpd.token = core.load_token(create=True)
-    httpd.allowed_hosts = {"localhost", socket.gethostname().lower(), socket.getfqdn().lower()} | {
+    host = socket.gethostname().lower()
+    httpd.allowed_hosts = {"localhost", host, host.split(".")[0] + ".local", socket.getfqdn().lower()} | {
         h.strip().lower() for h in core.env("HOSTS", "").split(",") if h.strip()}
     httpd.enforce = core.env("AUTH", "on") != "off"
     httpd.refresh_index()
-    url = f"http://{bind}:{port}/"
+    url = f"{'https' if httpd.ssl_ctx else 'http'}://{bind}:{port}/"
     sock.url = url
+    sock.tls_cert = tls_paths[0] if tls_paths else None
 
     st.peers = peers.Peers(st)
     st.peers.reload()   # other machines' grovy, from ~/.config/grovy/peers.json (none: nothing changes)
@@ -970,6 +1189,10 @@ def serve(bind, port):
                 st.peers.reload()
             except Exception as e:
                 print(f"grovyd: peers reload error: {e}", file=sys.stderr)
+            try:
+                httpd.reload_tls()
+            except Exception as e:
+                print(f"grovyd: HTTPS certificate reload error: {e}", file=sys.stderr)
 
     threading.Thread(target=loop, daemon=True).start()
 

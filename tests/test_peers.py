@@ -7,6 +7,10 @@ import io
 import json
 import os
 import re
+import select
+import shlex
+import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -22,10 +26,16 @@ from unittest import mock
 import test_grovy as base   # its environment setup (private state, config and tmux) applies here too
 
 import grovyd  # noqa: E402
-from grovylib import core, pages, peers, sessions, store  # noqa: E402
+from grovylib import core, graft, pages, peers, remote, sessions, store, terminal, tmuxctl  # noqa: E402
 
 TMP = base.TMP
 PEER_TOKEN = "peer-token-0123456789"
+
+
+def graft_ssh_argv():
+    seen = []
+    graft.ssh("hub", "true", run=lambda argv, **k: seen.append(argv) or mock.Mock(returncode=0))
+    return seen[0]
 
 
 def ev(name, **kw):
@@ -440,6 +450,273 @@ class TestPeerLink(PeerLink):
         code, d = self.get("/api/sessions")
         self.assertNotIn("peers", d)
         self.assertEqual([s["name"] for s in d["sessions"]], ["a"])
+
+
+class TestRemoteCli(PeerLink):
+    """`grovy attach/logs/ls pc:NAME` on the trunk: straight to the graft's grovy through its socket. The terminal
+    is real: a tmux session on a private server, relayed by the graft's grovyd, driven from a pseudo-terminal."""
+
+    def setUp(self):
+        super().setUp()
+        TestRemoteCli.n = getattr(TestRemoteCli, "n", 0) + 1
+        self.tsock = f"grovy-term-{os.getpid()}-{TestRemoteCli.n}"   # one server per test: kill-server is async
+        real_tmux = tmuxctl.tmux
+        for p in (mock.patch.object(terminal, "TMUX", ["tmux", "-L", self.tsock]),
+                  mock.patch.object(tmuxctl, "tmux_alive", lambda n: n == "t1"),
+                  mock.patch.object(tmuxctl, "tmux", lambda *a, **k: real_tmux("-L", self.tsock, *a, **k)),
+                  mock.patch.object(peers, "config_path", lambda: self.conf)):
+            p.start()
+            self.addCleanup(p.stop)
+        subprocess.run(["tmux", "-L", self.tsock, "-f", "/dev/null", "new-session", "-d", "-s", "grovy-t1", "-x", "80",
+                        "-y", "24", "cat"], check=True)
+        self.addCleanup(subprocess.run, ["tmux", "-L", self.tsock, "kill-server"], capture_output=True)
+        self.peerc = peers.Peer("pc", {"socket": self.sock, "token": PEER_TOKEN, "tls": False}, None)
+
+    def attach_in_pty(self, keys, until, env_on=True, name="t1"):
+        """Run terminal.attach in a child on a pseudo-terminal; send `keys` once `until` shows; return the output.
+        The graft's server runs here, in the parent: GROVY_TERMINAL is set for it, for the whole call."""
+        import pty
+        env = mock.patch.dict(os.environ, {"GROVY_TERMINAL": "on" if env_on else "off"})
+        env.start()
+        self.addCleanup(env.stop)
+        pid, fd = pty.fork()
+        if pid == 0:
+            code = 1
+            try:
+                code = terminal.attach(self.peerc, name)
+            except Exception as e:
+                os.write(2, f"ERR {e}\n".encode())
+            os._exit(code)
+        out, sent, end = b"", False, time.time() + 15
+        while time.time() < end:
+            r, _, _ = select.select([fd], [], [], 0.2)
+            if r:
+                try:
+                    data = os.read(fd, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                out += data
+            if not sent and until in out:
+                for k in keys:
+                    os.write(fd, k)
+                    time.sleep(0.3)
+                sent = True
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if not done:   # still attached at the deadline: a failure, never a hang
+            os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
+        os.close(fd)
+        return out, os.waitstatus_to_exitcode(status)
+
+    def test_attach_types_and_detaches(self):
+        out, code = self.attach_in_pty([b"hello-from-trunk\r", b"\x02d"], b"")
+        self.assertIn(b"hello-from-trunk", out)
+        self.assertEqual(code, 0, out[-400:])
+        shown = tmuxctl.tmux("capture-pane", "-p", "-t", "=grovy-t1:").stdout
+        self.assertIn("hello-from-trunk", shown)          # it reached the session itself
+
+    def test_shell_opens_a_login_shell_in_its_own_tmux_session_and_rejoins_it(self):
+        # sent at once (no wait for a prompt: whatever yours looks like); the pty keeps it until the shell reads it
+        out, code = self.attach_in_pty([b"echo shell-$((6*7))\r", b"\x02d"], b"", name=None)
+        self.assertEqual(code, 0, out[-400:])
+        self.assertTrue(wait_for(lambda: "shell-42" in tmuxctl.tmux(   # the shell ran it, and it's still there
+            "capture-pane", "-p", "-t", "=" + terminal.SHELL_SESSION + ":").stdout))
+        out, code = self.attach_in_pty([b"\x02d"], b"shell-42", name=None)   # the next one joins it
+        self.assertEqual(code, 0, out[-400:])
+        self.assertIn(b"shell-42", out)
+        self.assertNotIn(terminal.SHELL_SESSION, tmuxctl.tmux_managed() if hasattr(tmuxctl, "tmux_managed") else [])
+
+    def test_shell_is_refused_unless_the_graft_allows_it(self):
+        out, code = self.attach_in_pty([], b"", env_on=False, name=None)
+        self.assertNotEqual(code, 0)
+        self.assertIn(b"the terminal is off on this computer", out)
+        with mock.patch.dict(os.environ, {"GROVY_TERMINAL": "on"}):
+            code, obj = self.peerc.call("POST", "/api/shell", {})   # no Upgrade: a browser can't
+        self.assertEqual(code, 400)
+
+    def test_shell_on_the_trunk_is_ssh_into_tmux(self):
+        with mock.patch.object(remote, "trunk_host", lambda: "me@hub"), mock.patch.object(os, "execvp") as ex, \
+                mock.patch.object(peers, "read_config", lambda: ({}, [])):
+            remote.cmd_shell(types.SimpleNamespace(machine="trunk"))
+        argv = ex.call_args[0][1]
+        self.assertEqual(argv[:2], ["ssh", "-t"])
+        self.assertIn("RemoteCommand=none", argv)
+        self.assertEqual(argv[-2:], ["me@hub", f"exec tmux new-session -A -s {terminal.SHELL_SESSION}"])
+        with mock.patch.object(remote, "trunk_host", lambda: None), mock.patch.object(peers, "read_config",
+                                                                                       lambda: ({}, [])):
+            with self.assertRaises(SystemExit):
+                remote.cmd_shell(types.SimpleNamespace(machine=None))
+
+    def test_attach_is_refused_unless_the_graft_allows_it(self):
+        out, code = self.attach_in_pty([], b"", env_on=False)
+        self.assertNotEqual(code, 0)
+        self.assertIn(b"the terminal is off on this computer", out)
+
+    def test_a_browser_cant_open_a_terminal(self):
+        """Without the Upgrade header (which fetch() can't send) the endpoint refuses."""
+        with mock.patch.dict(os.environ, {"GROVY_TERMINAL": "on"}):
+            code, obj = self.peerc.call("POST", "/api/sessions/t1/terminal", {})
+        self.assertEqual(code, 400)
+
+    def test_logs_and_ls_through_the_socket(self):
+        tmuxctl.tmux("send-keys", "-t", "=grovy-t1:", "visible-line", "Enter")
+        time.sleep(0.3)
+        code, obj = self.peerc.call("GET", "/api/sessions/t1/screen?lines=50")
+        self.assertEqual(code, 200)
+        self.assertIn("visible-line", obj["text"])
+        rows, notes = remote.peer_lines()
+        self.assertIn(("pc:a", "/pc/a"), [(r[0], r[2]) for r in rows], (rows, notes))
+
+    def test_names_pick_the_machine(self):
+        self.assertEqual(remote.split("pc:a"), ("pc", "a"))
+        self.assertEqual(remote.split("a"), (None, "a"))
+        kind, p = remote.resolve("pc")
+        self.assertEqual((kind, p.name), ("peer", "pc"))
+        with self.assertRaises(SystemExit):
+            remote.resolve("nope")
+
+    def test_ls_doesnt_wait_on_a_graft_that_never_answers(self):
+        """Review: a graft asleep behind its tunnel (the socket accepts, nothing answers) made `grovy ls` wait 20s
+        per graft before printing even the local sessions."""
+        dead = os.path.join(self.dir, "dead.sock")
+        srv = socket.socket(socket.AF_UNIX)
+        old = os.umask(0o177)
+        srv.bind(dead)
+        os.umask(old)
+        srv.listen(8)
+        self.addCleanup(srv.close)
+        peers.write_config({"pc": {"socket": self.sock, "token": PEER_TOKEN, "tls": False},
+                            "sleepy": {"socket": dead, "token": PEER_TOKEN, "tls": False},
+                            "sleepy2": {"socket": dead, "token": PEER_TOKEN, "tls": False}}, self.conf)
+        t = time.monotonic()
+        rows, notes = remote.peer_lines()
+        self.assertLess(time.monotonic() - t, remote.LS_TIMEOUT + 2)    # in parallel, short timeout
+        self.assertIn("pc:a", [r[0] for r in rows])
+        self.assertEqual(sorted(n.split(":")[0] for n in notes), ["sleepy", "sleepy2"])
+        t = time.monotonic()
+        rows, notes = remote.peer_lines("pc")                        # one graft: only that one is asked
+        self.assertLess(time.monotonic() - t, 2)
+        self.assertEqual(notes, [])
+
+    def serve_raw(self, handler):
+        """A graft socket that answers with `handler(conn)` (a hostile or broken grovy)."""
+        path = os.path.join(self.dir, f"raw{len(os.listdir(self.dir))}.sock")
+        srv = socket.socket(socket.AF_UNIX)
+        old = os.umask(0o177)
+        srv.bind(path)
+        os.umask(old)
+        srv.listen(8)
+        self.addCleanup(srv.close)
+
+        def loop():
+            while True:
+                try:
+                    c, _ = srv.accept()
+                except OSError:
+                    return
+                threading.Thread(target=handler, args=(c,), daemon=True).start()
+        threading.Thread(target=loop, daemon=True).start()
+        return path
+
+    def test_a_graft_trickling_its_answer_or_sending_junk_doesnt_hold_or_break_ls(self):
+        """Second review: one byte a second kept ls going forever (the timeout was per read); a deeply nested
+        answer raised RecursionError, which dropped every graft's rows."""
+        def trickle(c):
+            c.recv(4096)
+            c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100000\r\n\r\n")
+            try:
+                for _ in range(100):
+                    c.sendall(b" ")
+                    time.sleep(1)
+            except OSError:
+                pass
+
+        def nested(c):
+            c.recv(4096)
+            body = b"[" * 100000
+            c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+            c.close()
+        peers.write_config({"pc": {"socket": self.sock, "token": PEER_TOKEN, "tls": False},
+                            "slow": {"socket": self.serve_raw(trickle), "token": PEER_TOKEN, "tls": False},
+                            "deep": {"socket": self.serve_raw(nested), "token": PEER_TOKEN, "tls": False}}, self.conf)
+        t = time.monotonic()
+        rows, notes = remote.peer_lines()
+        self.assertLess(time.monotonic() - t, remote.LS_TIMEOUT + 2)
+        self.assertIn("pc:a", [r[0] for r in rows])
+        self.assertEqual(sorted(n.split(":")[0] for n in notes), ["deep", "slow"])
+
+    def test_what_a_graft_says_is_cleaned_before_it_is_printed(self):
+        """Review: a hostile graft's cwd reached the trunk's terminal raw (OSC 52 could write the clipboard)."""
+        evil = "/x\x1b]52;c;cHduZWQ=\x07\x1b[2Kfake"
+        with mock.patch.object(peers.Peer, "open") as op:
+            r = mock.Mock(status=200)
+            r.read1.side_effect = [json.dumps({"sessions": [{"name": "a", "state": "\x1b[31midle", "cwd": evil}]}).encode(),
+                                   b""]
+            op.return_value = (mock.Mock(), r)
+            rows, _ = remote.peer_lines("pc")
+        self.assertNotIn("\x1b", "".join(rows[0]))
+        self.assertNotIn("\x07", "".join(rows[0]))
+        with mock.patch.object(peers.Peer, "open") as op:   # a made-up row, and a lone surrogate print can't encode
+            r = mock.Mock(status=200)
+            r.read1.side_effect = [json.dumps({"sessions": [{"name": "a", "cwd": "/x\nlaptop:prod   idle   /home",
+                                                             "state": "\ud800"}]}).encode(), b""]
+            op.return_value = (mock.Mock(), r)
+            rows, _ = remote.peer_lines("pc")
+        self.assertNotIn("\n", rows[0][2])
+        "".join(rows[0]).encode("utf-8")      # would raise on a lone surrogate
+
+    def test_an_unknown_term_falls_back(self):
+        """Review: a TERM the graft had no terminfo for (kitty, ghostty...) made tmux refuse, and attach said 0."""
+        self.assertEqual(terminal.pick_term("xterm-ghostty-nope"), "xterm-256color")
+        self.assertEqual(terminal.pick_term(".."), "xterm-256color")     # a folder, not an entry
+        self.assertEqual(terminal.pick_term("bad/term"), "xterm-256color")
+        if terminal.has_terminfo("xterm"):
+            self.assertEqual(terminal.pick_term("xterm"), "xterm")
+
+    def test_tilde_dot_ends_it_from_here_and_resets_the_terminal(self):
+        out, code = self.attach_in_pty([b"typed-before\r~.", b""], b"")   # one read: what came first still goes
+        self.assertEqual(code, 0, out[-300:])
+        self.assertIn(b"closed with ~.", out)
+        self.assertIn(terminal.RESET, out)
+        self.assertTrue(wait_for(lambda: "typed-before" in tmuxctl.tmux("capture-pane", "-p", "-t", "=grovy-t1:").stdout))
+
+    def test_odd_size_headers_dont_break_the_relay(self):
+        """Review: a latin-1 digit passed isdigit() but not int(), after the 101 was sent."""
+        with mock.patch.dict(os.environ, {"GROVY_TERMINAL": "on"}):
+            c = self.peerc.connection()
+            c.connect()
+            c.sock.sendall(("POST /api/sessions/t1/terminal HTTP/1.1\r\nHost: localhost\r\n"
+                            f"Authorization: Bearer {PEER_TOKEN}\r\nX-Grovy: 1\r\nUpgrade: grovy-terminal\r\n"
+                            "X-Rows: \xb2\r\nContent-Length: 0\r\n\r\n").encode("latin-1"))
+            got, end = b"", time.time() + 5
+            while time.time() < end and (b" 101 " not in got or len(got.partition(b"\r\n\r\n")[2]) < 10):
+                r, _, _ = select.select([c.sock], [], [], 0.2)
+                if r:
+                    d = c.sock.recv(4096)
+                    if not d:
+                        break
+                    got += d
+            c.close()
+        self.assertIn(b" 101 ", got)
+        self.assertGreater(len(got.partition(b"\r\n\r\n")[2]), 10)   # and then the terminal itself (tmux drew)
+
+    def test_rename_and_new_guard_against_machine_mixups(self):
+        """Review: `rename pc:a lap:b` quietly renamed on pc; `new pc:x .` was resolved on the other machine."""
+        with self.assertRaises(SystemExit):
+            remote.run(types.SimpleNamespace(cmd="rename", name="pc:a", new="lap:b"))
+        with self.assertRaises(SystemExit):
+            remote.run(types.SimpleNamespace(cmd="new", name="pc:x", path=".", claude_args=[]))
+
+    def test_trunk_commands_go_over_ssh(self):
+        with mock.patch.object(remote, "trunk_host", lambda: "me@hub"), mock.patch.object(os, "execvp") as ex:
+            remote.run(types.SimpleNamespace(cmd="attach", name="trunk:Grovy"))
+        argv = ex.call_args[0][1]
+        self.assertEqual(argv[:2], ["ssh", "-t"])
+        self.assertEqual(argv[-3:-1], ["--", "me@hub"])
+        self.assertIn("RemoteCommand=none", argv)   # a RemoteCommand in your ssh config would make ssh refuse
+        self.assertIn("exec \"$g\" attach Grovy", argv[-1])
 
 
 class TestHostilePeer(PeerLink):
@@ -891,7 +1168,8 @@ class TestTunnel(unittest.TestCase):
         out = io.StringIO()
         clock = iter(range(0, 1000, 1))
         code = peers.run_tunnel("hub", "pc", 7333, run=lambda *a, **k: next(runs), popen=popen,
-                                sleep=sleeps.append, clock=lambda: next(clock), rounds=3, out=out)
+                                sleep=sleeps.append, clock=lambda: next(clock), rounds=3, out=out,
+                                config=lambda *a: None)
         self.assertEqual(code, 0)
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][calls[0].index("-R") + 1], "/h/.local/state/grovy/peers/pc.sock:127.0.0.1:7333")
@@ -905,7 +1183,7 @@ class TestTunnel(unittest.TestCase):
         run = mock.Mock()
         code = peers.run_tunnel("hub", "pc", 7333, remote="/h/s/pc.sock", run=run,
                                 popen=lambda argv, **k: calls.append(argv) or proc, sleep=lambda s: None,
-                                rounds=1, out=io.StringIO(), prepare=False)
+                                rounds=1, out=io.StringIO(), prepare=False, config=lambda *a: None)
         self.assertEqual(code, 0)
         run.assert_not_called()
         self.assertEqual(calls[0][calls[0].index("-R") + 1], "/h/s/pc.sock:127.0.0.1:7333")
@@ -921,6 +1199,106 @@ class TestTunnel(unittest.TestCase):
         self.assertEqual(peers.run_tunnel("hub", "pc", 7333, run=lambda *a, **k: bad, popen=mock.Mock(),
                                           sleep=lambda s: None, rounds=3, out=out), 2)
         self.assertIn("--remote-socket", out.getvalue())
+
+    USER_CONFIG = """Host hub
+  HostName 127.0.0.1
+  User bob
+  Port 2222
+  RemoteForward /run/user/jack/gnupg/S.gpg-agent /run/user/1000/gnupg/S.gpg-agent.extra
+  LocalForward 8080 localhost:80
+  DynamicForward 1080
+  ForwardAgent yes
+  ControlMaster auto
+  ControlPath ~/.ssh/cm-%r@%h:%p
+  RequestTTY yes
+  RemoteCommand tmux a
+  ProxyJump alice@jump:2200,other
+  IdentityFile ~/.ssh/id_ed25519
+  ServerAliveInterval 10
+  UserKnownHostsFile ~/.ssh/known_hosts_hub
+"""
+
+    def user_ssh(self):
+        """An ssh that reads USER_CONFIG as your ~/.ssh/config (ssh reads the passwd home's, not $HOME's)."""
+        d = tempfile.mkdtemp(dir=TMP)
+        cfg = os.path.join(d, "config")
+        with open(cfg, "w") as f:
+            f.write(self.USER_CONFIG)
+        exe = os.path.join(d, "ssh")
+        with open(exe, "w") as f:
+            f.write(f'#!/bin/sh\nfor a; do [ "$a" = -F ] && exec ssh "$@"; done\nexec ssh -F {cfg} "$@"\n')
+        os.chmod(exe, 0o755)
+        return exe, d
+
+    def resolved(self, argv):
+        """What ssh would do with this argv, from ssh -G: {key: [values]}."""
+        out = subprocess.run([argv[0], "-G", *argv[1:]], capture_output=True, text=True, check=True,
+                             stdin=subprocess.DEVNULL).stdout
+        conf = {}
+        for line in out.splitlines():
+            k, _, v = line.partition(" ")
+            conf.setdefault(k, []).append(v)
+        return conf
+
+    @unittest.skipUnless(shutil.which("ssh"), "needs ssh")
+    def test_tunnel_ignores_the_forwards_and_session_in_your_ssh_config(self):
+        # a RemoteForward for a gpg-agent socket in ~/.ssh/config made every connect fail (ExitOnForwardFailure)
+        ssh, d = self.user_ssh()
+        key = os.path.join(d, "grovy_tunnel")
+        open(key, "w").close()   # ssh leaves out a -i file that doesn't exist
+        text = peers.tunnel_config("hub", ssh, identity=key)
+        path = os.path.join(d, "tunnel.conf")
+        with open(path, "w") as f:
+            f.write(text)
+        conf = self.resolved(peers.tunnel_argv("hub", "/h/pc.sock", 7333, ssh, identity=key, config=path))
+        self.assertEqual(conf["remoteforward"], ["/h/pc.sock [127.0.0.1]:7333"])   # only the tunnel's own
+        for k in ("localforward", "dynamicforward", "remotecommand", "controlpath"):
+            self.assertNotIn(k, conf)
+        self.assertEqual(conf["forwardagent"], ["no"])
+        self.assertEqual(conf["controlmaster"], ["false"])
+        self.assertEqual(conf["exitonforwardfailure"], ["yes"])
+        self.assertEqual(conf["identityfile"], [key])   # the tunnel key only, not yours
+        # how to reach the hub is kept
+        self.assertEqual((conf["hostname"], conf["user"], conf["port"]), (["127.0.0.1"], ["bob"], ["2222"]))
+        self.assertEqual(conf["serveraliveinterval"], ["30"])   # the tunnel's options win
+        self.assertTrue(conf["userknownhostsfile"][0].endswith("/.ssh/known_hosts_hub"))
+        # ProxyJump becomes a ProxyCommand with your usual config for the jump hosts
+        self.assertNotIn("proxyjump", conf)
+        cmd = conf["proxycommand"][0]
+        self.assertEqual(shlex.split(cmd), [ssh, *peers.COMMAND_OPTS, "-J", "alice@jump:2200", "-W", "[%h]:%p",
+                                            "--", "other"])
+        jump = peers.jump_command("ssh", "alice@jump:2200")
+        self.assertEqual(shlex.split(jump)[-1], "ssh://alice@jump:2200")
+        self.assertEqual(shlex.split(peers.jump_command("ssh", "[::1]"))[-1], "[::1]")
+
+    @unittest.skipUnless(shutil.which("ssh"), "needs ssh")
+    def test_logins_that_run_a_command_ignore_forwards_and_remote_command(self):
+        ssh, _ = self.user_ssh()
+        conf = self.resolved([ssh, *peers.prepare_argv("hub", "pc")[1:-1]])
+        for k in ("remoteforward", "localforward", "dynamicforward", "remotecommand"):
+            self.assertNotIn(k, conf)
+        self.assertIn("ClearAllForwardings=yes", graft_ssh_argv())
+        self.assertIn("RemoteCommand=none", graft_ssh_argv())
+
+    def test_tunnel_config_file_is_used_and_removed(self):
+        seen = []
+        proc = mock.Mock()
+
+        def popen(argv, **kw):
+            path = argv[argv.index("-F") + 1]
+            with open(path) as f:
+                seen.append(f.read())
+            seen.append(path)
+            return proc
+        proc.wait.return_value = 0
+        peers.run_tunnel("hub", "pc", 7333, remote="/h/s/pc.sock", popen=popen, sleep=lambda s: None, rounds=1,
+                         out=io.StringIO(), prepare=False, config=lambda *a: "hostname 10.0.0.1\n")
+        self.assertEqual(seen[0], "hostname 10.0.0.1\n")
+        self.assertFalse(os.path.exists(seen[1]))
+        calls = []
+        peers.run_tunnel("hub", "pc", 7333, remote="/h/s/pc.sock", popen=lambda argv, **k: calls.append(argv) or proc,
+                         sleep=lambda s: None, rounds=1, out=io.StringIO(), prepare=False, config=lambda *a: None)
+        self.assertNotIn("-F", calls[0])   # ssh -G failed: your config as it is
 
     def test_cli_refuses_option_like_host(self):
         with self.assertRaises(SystemExit):

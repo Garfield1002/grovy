@@ -1,179 +1,68 @@
-# grovy
+<h1><img src="assets/logo.png" alt="" width="44" align="top" /> grovy</h1>
 
-Run Claude Code on your computer and keep working from your phone: see what each session is doing,
-approve or deny what Claude wants to run, answer its questions, and send it messages, from a web page
-on your home network or VPN. Nothing to install on the phone.
+**Your Claude sessions, in any browser.**<br/>
+<a href="#install">install</a> · <a href="docs/guide.md">guide</a> · <a href="docs/setup.md">setup</a> ·
+<a href="docs/customize.md">make it yours</a> · <a href="docs/troubleshooting.md">troubleshooting</a>
+
+<p align="center">
+  <img src="docs/img/desktop.png" alt="grovy on a computer: sessions in a sidebar, a conversation with a chart, a published page and a live progress card" height="400" />
+  &nbsp;
+  <img src="docs/img/phone.png" alt="grovy on a phone: Claude asks to run a command, with Deny and Allow once" height="400" />
+</p>
+
+Your Claude sessions run on your computer, in tmux, exactly as if you had typed `claude`. grovy gives them a web
+page you open on your phone (or any browser) over your home network or VPN. Nothing to install on the phone.
+
+- **See every session at a glance:** working, idle or waiting on you, with context used and the last thing it did.
+- **Approve from anywhere:** the full command or diff, then Allow or Deny. Nothing is approved without you, and the
+  terminal's own question stays there. [safety →](docs/safety.md)
+- **Talk to Claude:** queue messages while it works, steer it mid-task, follow its steps live, quote its replies,
+  attach photos and files, run `/` skills. [guide →](docs/guide.md)
+- **Rich answers:** tables, code, math, charts, checklists, and full HTML pages Claude publishes for you.
+- **Start, resume and stop** sessions in any trusted folder; continue or fork past conversations.
+- **Small fixes on the side:** an issue gets its own git worktree and branch, merged back in one tap.
+- **Several machines, one page:** your PC's sessions next to your server's, over SSH, no open port.
+  [another computer →](docs/setup.md#another-computer)
+- **Notifications** when a session needs you, finishes or fails.
+- **Desktop too:** a sidebar, right-click menus and keyboard shortcuts on a wide screen.
+- **Yours to change:** plain Python and one HTML file, no dependencies, nothing to build. Restyle it, add buttons
+  and widgets, or ask Claude to change grovy from inside grovy. [make it yours →](docs/customize.md)
 
 ## Install
 
 You need Linux (or macOS), Python 3.11+, tmux, and Claude Code signed in.
 
 ```sh
-git clone <this repo> ~/grovy && ~/grovy/grovy setup
+git clone https://github.com/Garfield1002/grovy ~/grovy && ~/grovy/grovy setup
 ```
 
-Setup asks two questions (which network address your phone will use — it suggests your VPN address if
-you have one — and which port, defaulting to 7333 but steering you to a free one if that's taken, e.g. by
-another user's grovy on a shared machine), installs grovy as a background service that starts at boot, and
-prints a link. **Open that link once on your phone**: it logs the phone in. Bookmark the page or "Add to
-Home Screen".
+Setup asks a few questions, shows what it will change, installs grovy as a background service, and ends with a QR
+code: scan it once on each device to log in. [setup in detail →](docs/setup.md)
 
-On macOS, or with `--no-service`, setup prints a command to start grovy yourself instead.
-`grovy setup --dry-run` shows what it would do without changing anything; rerunning it is safe.
-
-**One-time per project:** Claude asks whether you trust a folder the first time it runs there, and grovy can't
-see a session until that's answered. So run `claude` once in a new project on the computer (or `grovy attach`
-the session and answer it). The phone only offers folders that are already trusted.
-
-**Updating:** `cd ~/grovy && git pull && systemctl --user restart grovy`. Your sessions keep running. To give a
-running session the newest grovy, use **⋯ → Update session** on the phone.
-
-## What it is
-
-Each Claude session runs in its own tmux session on your computer, exactly as if you had started `claude`
-in a terminal. grovy listens to Claude's hooks and shows everything on a phone-friendly page:
-
-- **Sessions:** a list with live status (working, idle, needs you), context used, and the last activity.
-- **Background work:** subagents and commands Claude left running show as "idle · 2 running"; tap the strip above the
-  message box to see each one, how long it has run and what it is doing. Sessions started before you updated grovy
-  get this after ⋯ → Update session.
-- **Chat:** Claude's replies, rendered properly (tables, code, lists), plus what's happening now.
-- **Approvals:** when Claude wants to run a command or edit a file, you see the full command or diff and
-  tap Allow or Deny. Questions Claude asks you show up as cards you answer with a tap.
-- **Messages:** type to Claude; messages wait in a queue while Claude is busy. `/` lists the skills and
-  commands that work from the phone.
-- **Start, resume, rename, stop:** start Claude in any trusted folder, continue or fork a past conversation,
-  stop sessions and resume them later.
-- **Math:** formulas Claude writes in LaTeX (`$x^2$`, `$$\sum_i x_i$$`) show as real math.
-- **Widgets and pages:** Claude can answer with charts, checklists, diagrams, images or buttons to pick from, and
-  publish full HTML pages (reports, dashboards) that open full-screen. A page can be shared on your network
-  with a link.
-- **Shared files:** Claude can hand you any file it made — a report, a CSV, a zip, a log — as a card with a Download
-  button. The file isn't copied anywhere; grovy serves it straight from the project, just for you.
-- **Steering:** a message you send while Claude is working reaches it at its next step, so you can correct course
-  without waiting or interrupting (the button turns blue). With the box empty, the same button is ■ to stop Claude.
-- **Quote and copy:** each reply has Copy and Quote buttons; or select part of it and tap Quote selection. Tap a quote
-  to jump back to where it came from. "Worked for 2m · 14 tool calls" under a reply lists what Claude ran.
-- **Steps:** the ☰ button at the top shows what Claude writes and runs on the way to each answer, live as it works;
-  off, you see only the answers. Tap "Worked for …" under a reply to open or close just that one.
-- **Long messages:** once a message outgrows the box, it takes the whole screen; the ⤢ / ⤡ button in its corner switches by hand.
-- **Attachments:** tap the paperclip in the empty message box to send photos or files; Claude gets them as files it can open (kept for 7 days). Photos
-  show in your message.
-- **Live progress:** when Claude runs something long (a build, training, a batch job), its script can show a progress
-  bar, notes or the latest output lines in the chat while it runs. Sessions started before you updated grovy get
-  this after ⋯ → Update session.
-- **Issues:** ⋯ → New issue starts Claude on one small fix in a copy of the project of its own (a git worktree, on a
-  new branch). When it has committed, ⋯ → Finish issue shows the commits; one tap merges them into your main branch
-  and cleans everything up.
-- **New projects:** ⋯ → New project makes a blank repository or clones one into `~/dev` and starts Claude in it.
-  For a clone, you see first which of its files Claude would load (some can run commands) and say whether to trust it.
-- **Git:** ⋯ → Git shows the session's repository as a graph of branches and commits; tap a commit for its files
-  and diff. Branch names and commit hashes in Claude's replies are links to them.
-- **On a computer:** on a wide screen your sessions and pages stay in a sidebar. Ctrl+Enter sends, Alt+↑/↓ switches session,
-  Esc closes, Tab reaches every button.
-
-The terminal never goes away: `grovy attach NAME` puts you in the real session (detach with Ctrl-b d).
-
-## On the computer
+Then start Claude from the phone (＋) or the computer:
 
 ```sh
-grovy new api ~/src/api        # start Claude in a folder (also from the phone: +)
-grovy ls                       # sessions and their state
-grovy attach api               # the real terminal
-grovy resume api               # continue an ended session
-grovy kill api                 # stop it
-grovy url                      # the phone link again (also on the phone: ⋯ → Login link)
-grovy doctor                   # check that everything is in order
+grovy new api ~/src/api    # start Claude in a folder
+grovy ls                   # sessions and their state
+grovy attach api           # the real terminal (detach: Ctrl-b d)
 ```
 
-## Another computer
+**One thing to know:** Claude asks whether you trust a folder the first time it runs there, and grovy can't see a
+session until that's answered. Run `claude` once in a new project on the computer first.
 
-One grovy (the *hub*, say your server) can also show the sessions of another computer (say your PC, even one with
-no public address), next to its own. Each computer runs its own grovy as usual and keeps working on its own; the PC
-connects to the hub over SSH, so it needs no open port. Its sessions show as `pc:NAME` with a small "pc" label, and
-＋ asks which machine to start on.
+## Docs
 
-1. On the PC: install grovy (`grovy setup`; it can listen on this computer only). Check that `ssh HUB` works from
-   the PC with a key and no password prompt.
-2. Give the hub the PC's login token (from the PC):
-   `grovy peer token | ssh HUB '~/.local/bin/grovy peer add pc'`
-   (or run `grovy peer token` on the PC, then `grovy peer add pc` on the hub and paste it).
-3. On the PC, connect: `grovy peer tunnel HUB`. It reconnects by itself whenever the connection drops. To keep it
-   running, either in tmux (`tmux new -d -s grovy-tunnel grovy peer tunnel HUB`) or as a service:
+- [Guide](docs/guide.md): everything you can do from the phone and the computer, and all the commands
+- [Setup](docs/setup.md): install options, HTTPS, updating, another computer, uninstalling
+- [Make it yours](docs/customize.md): looks, extensions, your own buttons, widgets and plugins
+- [Safety](docs/safety.md): who can see what, and what Claude can and can't do through grovy
+- [Troubleshooting](docs/troubleshooting.md)
 
-   ```ini
-   # ~/.config/systemd/user/grovy-tunnel.service, then: systemctl --user enable --now grovy-tunnel
-   [Unit]
-   Description=grovy: show this computer's sessions on the hub
-   After=network-online.target
+## Development
 
-   [Service]
-   ExecStart=%h/.local/bin/grovy peer tunnel HUB --name pc
-   Restart=always
-   RestartSec=10
+How it works, the security model, failure modes and tests: [`docs/DESIGN.md`](docs/DESIGN.md). Rules for changing
+grovy, for people and for Claude: [`CLAUDE.md`](CLAUDE.md).
 
-   [Install]
-   WantedBy=default.target
-   ```
-
-   (A service has no ssh-agent: use a key without a passphrase for it, or set `SSH_AUTH_SOCK`.)
-
-**Mind the key:** the PC's ssh key logs in to the hub, so whoever controls the PC can act as you on the hub. To
-narrow it to the tunnel, use the restricted `authorized_keys` entry and `--no-prepare` described in `docs/DESIGN.md`
-("Other machines"); even then, treat the PC as trusted.
-
-`grovy peer ls` on the hub says whether the PC is online; `grovy peer rm pc` removes it. While the PC is off, its
-sessions show as "unknown" and the home screen says so. What works on the hub only (new issues, new projects) and
-other limits are in `docs/DESIGN.md` ("Other machines").
-
-## Make it yours
-
-- **Extensions:** ⋯ → Extensions on the home screen switches built-in parts on or off (math, widgets, git, issues...)
-  for all your devices; reload to apply.
-- **Looks:** edit `~/.config/grovy/custom.css`. It starts with the colour names you can change (your message
-  bubbles, accents, backgrounds, in light and dark mode). Reload the page to see it. It's outside the grovy
-  folder, so updates never overwrite it.
-- **Your own buttons, shortcuts and widgets:** `~/.config/grovy/custom.js` can add items to the ⋯ menu, keyboard
-  shortcuts, buttons under Claude's replies, or new kinds of widgets, and switch off or replace built-in parts such as
-  the context bar. It starts with examples to uncomment (if you
-  installed grovy before it existed, copy `examples/custom.js` there). Reload the page to see it. To tell Claude something in every session (for example how to use your new widget), write it in
-  `~/.config/grovy/instructions.md`.
-- **Behind the scenes:** a Python file in `~/.config/grovy/plugins/` can react to what your sessions do (log it, send
-  it somewhere, answer in your place) and give your `custom.js` its own data. See `examples/plugin.py`.
-- **Anything else:** grovy is plain Python and one HTML file, with no dependencies and nothing to build. The easiest way
-  to change it is to ask Claude, in a grovy session opened on the grovy folder: it knows how to change grovy safely
-  while you use it.
-
-## Safety
-
-- The page needs the login link (a secret token); without it, nothing is visible. Only expose grovy on a home
-  network or VPN you trust: it uses plain HTTP.
-- **Nothing is approved without you.** If you don't answer on the phone, Claude's normal question in the
-  terminal is still there. Your own Claude permission settings keep applying.
-- grovy only touches the sessions it started. Your other Claude windows and tmux sessions are left alone.
-- Claude can publish pages but can't share them; only you can, from the phone. Pages run in a sandbox: they
-  can't see grovy, your login, or send data out (one exception, and other limits, in `docs/DESIGN.md`).
-- Each grovy session gets about 450 tokens of instructions about widgets and pages. `GROVY_WIDGETS=0` in
-  grovy's environment turns that off.
-
-## Troubleshooting
-
-| what you see | what to do |
-|---|---|
-| a session stays "starting" | Claude is asking whether to trust the folder: `grovy attach NAME` and answer |
-| the link doesn't open on the phone | grovy listens only on the computer: rerun `grovy setup` and pick another address |
-| "grovy doesn't know the name …" | open it by IP address, or add the name to `GROVY_HOSTS` |
-| "claude not found" when starting from the phone | rerun `grovy setup` from a terminal where `claude` works |
-| "killed by the out-of-memory killer" | the computer ran out of memory, usually because of a big job; Resume continues. Start heavy jobs with a cap, e.g. `systemd-run --user --scope -p MemoryMax=40G …` |
-| "state unknown" | Claude did something the page couldn't follow (e.g. you answered in the terminal); the next send asks first |
-| "pc is offline: no tunnel" | on the PC, check that `grovy peer tunnel HUB` runs and what it prints; `grovy peer ls` on the hub |
-| `grovy peer tunnel` says "remote port forwarding failed" | the hub's sshd forbids it (`AllowStreamLocalForwarding`), or the socket path is wrong: compare with `grovy peer ls` on the hub |
-| anything else | `grovy doctor`, then `journalctl --user -u grovy` |
-
-**Uninstall:** `systemctl --user disable --now grovy`, then delete `~/.config/systemd/user/grovy.service`,
-`~/.local/bin/grovy`, `~/.config/grovy` and `~/.local/state/grovy`.
-
-## For developers
-
-How it works, the full security model, failure modes, limitations, settings and tests: [`docs/DESIGN.md`](docs/DESIGN.md).
-Rules for changing grovy (for people and Claude): [`CLAUDE.md`](CLAUDE.md).
+```sh
+python3 -m unittest discover -s tests    # ~2 min, no API key needed
+```

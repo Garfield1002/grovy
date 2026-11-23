@@ -77,8 +77,8 @@ def session_fingerprint(name):
     session whose recorded fingerprint differs is out of date (offer ⋯ → Update session)."""
     import hashlib
     blob = {"settings": session_settings(name), "env": SESSION_ENV_VERSION}
-    if core.env("CONFIG_DIR"):   # passed to the session's environment (only when set, so default setups don't change)
-        blob["config"] = core.env("CONFIG_DIR")
+    if core.home_env():   # passed to the session's environment (only when set, so default setups don't change)
+        blob["config"] = core.home_env()
     blob = json.dumps(blob, sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
