@@ -80,8 +80,9 @@ in a terminal. grovy listens to Claude's hooks and shows everything on a phone-f
   fails, even with grovy closed. The notification travels empty through your phone maker's push service; the phone
   then fetches what happened from grovy itself. On iPhone, open grovy from the home screen first (Share → Add to
   Home Screen).
-- **On a computer:** on a wide screen your sessions and pages stay in a sidebar. Ctrl+Enter sends, Alt+↑/↓ switches session,
-  Esc closes, Tab reaches every button.
+- **On a computer:** on a wide screen your sessions and pages stay in a sidebar beside the conversation. Right-click a
+  session, a page, a message or the conversation for what you can do with it. Ctrl+Enter sends, Alt+↑/↓ switches session, Esc closes, Tab
+  reaches every button.
 
 The terminal never goes away: `grovy attach NAME` puts you in the real session (detach with Ctrl-b d).
 

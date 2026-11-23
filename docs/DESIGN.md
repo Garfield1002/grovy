@@ -665,10 +665,28 @@ the `NewProjects` part of `Store`; the page side is `extensions/projects.js`).
   (post-checkout, post-merge) run as they would for you. Issue actions take `issue_lock` (one at a time) and run git
   outside `Store.lock`. Renaming an issue's session keeps the issue (the branch keeps its name).
 
-**Desktop.** At 1000px wide or more, a conversation gets a sidebar with all sessions (state dot, pending-request
-badge, last activity) and all pages, refreshed on any session's event at most every 400ms and only fetched while it's
-shown. There is then no header row: the pill and ⋯ float at the top right
-(over the margin beside the conversation; on a window just over 1000px they can overlap a message's corner). A page opened from the sidebar may belong to another session: the viewer looks pages up in both lists
+**Desktop.** At 1000px wide or more there is no home page: the session list is a sidebar beside every route, built
+by the same `listNodes()`/`sessCard()` as the phone's home screen (worktree nesting, peer warnings, pages), made
+compact by CSS, refreshed on any session's event at most every 400ms and only fetched while it's shown. `#/` shows
+"Pick a session" on the right. Sheets (menus, dialogs) are centred dialogs there, with a ✕ (`#sclose`), rows that
+highlight on hover, and their body scrolling under the ✕; the phone keeps the bottom sheet. The sidebar header has ＋ and a ⋯ with grovy's own menu (what the phone's home ⋯
+has, plus New session). There is no header row: the pill and the session's ⋯ float at the top right
+(over the margin beside the conversation; on a window just over 1000px they can overlap a message's corner). The grove
+backdrop stays, fainter, behind every route. Right-click (a mouse only: the event's `pointerType`, or `pointer: fine`
+when it has none) does what ⋯ menus and an item's own small buttons do on the phone (`#ctx`). Any node can carry items
+(`h(..., {ctx: el => [...]})`; extensions: `grovy.contextMenu(node, items)`); the menu lists the nearest one's, then
+each enclosing one's below a divider (a code block's Copy code, then its reply's Copy, Quote, Show tool calls). Items
+that mirror a button go through `press(button)`, which clicks that button, so its checks hold (Allow on a card too large
+to show stays disabled), and on a permission card the first, focused item is a Copy, so Enter in the menu never
+approves. Carriers: session cards (Open, Rename, Update, Resume, Stop, Remove), page cards (Open, new tab, its session,
+Delete), replies, your messages (Copy, Quote; Cancel while queued), subagent reports, code blocks, attachments, tool
+lines in "Worked for", permission cards (Copy, Deny, Allow once), folders in New session (Start here, Copy path). The
+conversation's background gives the open session's ⋯ items, the rest of the sidebar or an empty right side grovy's.
+With text selected in a message (`selectedText()`, what the phone's Quote button takes), it offers Quote selection and
+Copy; the docked Quote bar is then hidden (wide screen with a mouse), and letting go of a mouse selection in a
+message shows a small bar with ❝ Quote and Copy right above it (`#selbar`; gone when the selection is, on scroll or resize). Text boxes, a selection anywhere else, links and pictures inside a message, and Shift+right-click keep the
+browser's menu. Extensions' ⋯ items appear only for the open session: they act on `grovy.session`. Remove/Delete
+buttons are hidden in the sidebar (they are in the menu). ↑/↓ move in it, Esc or Tab closes it. A page opened from the sidebar may belong to another session: the viewer looks pages up in both lists
 (`pageOf`), so the conversation's refresh doesn't close it. Keyboard:
 Ctrl/Cmd+Enter sends (Enter stays a new line, as on the phone); typing with nothing focused goes to the message box;
 Alt+↑/↓ switch to the previous/next session (not from a full-screen message box); Esc closes a sheet or the page viewer, else the `/` picker, else shrinks a full-screen message box, else leaves

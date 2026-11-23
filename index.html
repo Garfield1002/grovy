@@ -72,13 +72,14 @@ main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px
 .machines { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 12px; }
 .machines .btn.sel { outline:2px solid var(--acc); }
 .sess .badge { font-size:12px; font-weight:700; color:#fff; background:var(--warn); border-radius:99px; padding:1px 8px; }
-.sess.wt { padding-left:22px; border-left:2px solid var(--line); }   /* a worktree, nested under its root project */
+.sess.nested { padding-left:22px; border-left:2px solid var(--line); }   /* a worktree, nested under its root project */
 .empty { text-align:center; color:var(--mut); padding:48px 10px; }
 /* the grove backdrop (from grove, the same author's tmux agent manager), only on the session list */
 #backdrop { display:none; position:fixed; right:-6vw; bottom:0; height:min(72vh, 640px); aspect-ratio:941/1672;
   background:var(--faint); opacity:.22; pointer-events:none; z-index:0;
   -webkit-mask:url(/assets/backdrop.svg) center bottom / contain no-repeat; mask:url(/assets/backdrop.svg) center bottom / contain no-repeat; }
 body.home #backdrop { display:block; }
+@media (prefers-color-scheme: dark) { #backdrop { background:var(--mut); } }   /* --faint barely shows on a dark page */
 #main { position:relative; z-index:1; }
 #logo { display:none; border-radius:7px; flex:none; } body.home #logo { display:block; }
 
@@ -181,6 +182,24 @@ body.home #backdrop { display:block; }
 #sheet .grab { width:40px; height:4px; border-radius:2px; background:var(--line); margin:4px auto 12px; }
 #sheet h2 { font-size:17px; margin:4px 0 12px; }
 @keyframes fadebg { from { background:rgba(0,0,0,0) } }
+#sclose { display:none; }
+/* a wide screen: a centred dialog with a close button, its body scrolling under it */
+@media (min-width: 1000px) {
+  #sheet { align-items:center; justify-content:center; padding:24px; }
+  #sheet .panel { position:relative; display:flex; flex-direction:column; width:min(600px, 100%); max-height:min(80vh, 760px);
+    overflow:hidden; padding:0; border-radius:14px; border:1px solid var(--line); box-shadow:0 18px 50px rgba(0,0,0,.28);
+    animation:popin .16s ease-out; }
+  #sheet .grab { display:none; }
+  #sheetbody { overflow-y:auto; min-height:0; padding:16px 20px 20px; }
+  #sheet h2 { margin:0 40px 14px 0; font-size:18px; }
+  #sclose { display:grid; place-items:center; position:absolute; top:10px; right:10px; z-index:1; width:32px; height:32px;
+    border:0; border-radius:8px; background:none; color:var(--mut); font-size:16px; }
+  #sclose:hover { background:var(--code); color:var(--fg); }
+  #sheet .item { min-height:44px; padding:10px 8px; margin:0 -8px; width:calc(100% + 16px); border-radius:8px; border-bottom-color:transparent; }
+  #sheet .item:hover:not([disabled]) { background:var(--code); }
+  #sheet .sect { padding:0; }
+}
+@keyframes popin { from { opacity:0; transform:scale(.97) } to { opacity:1; transform:none } }
 .item { display:flex; align-items:center; gap:12px; width:100%; text-align:left; border:0; background:none;
   padding:12px 4px; min-height:52px; border-bottom:1px solid var(--line); font-size:16px; }
 .item.danger { color:var(--bad); } .item .sub { font-size:13px; color:var(--mut); }
@@ -350,41 +369,83 @@ textarea:focus-visible, input:focus-visible { outline:none; }
 .cmd.on { background:color-mix(in srgb, var(--busy) 14%, var(--card)); box-shadow:inset 3px 0 0 var(--busy); }
 .cmd:focus-visible { outline-offset:-2px; }   /* the list scrolls: an outer ring would be clipped */
 
-/* sidebar: the other sessions, beside a conversation on a wide screen */
+/* sidebar: on a wide screen the session list sits beside the conversation, always (there is no home page) */
 #side { display:none; }
 @media (min-width: 1000px) {
-  body:not(.home) { padding-left:280px; }
-  body:not(.home) #side { display:flex; flex-direction:column; position:fixed; left:0; top:0; bottom:0; width:280px; z-index:6;
+  body { padding-left:300px; }
+  #side { display:flex; flex-direction:column; position:fixed; left:0; top:0; bottom:0; width:300px; z-index:6;
     background:var(--bg); border-right:1px solid var(--line); padding-top:env(safe-area-inset-top); }
   /* the sidebar names the session: no header row, just the pill and ⋯ floating at the top right, over the empty
      margin beside the conversation */
-  body:not(.home) header { position:fixed; top:0; left:280px; right:0; min-height:0; padding:0 10px; background:none;
+  header { position:fixed; top:0; left:300px; right:0; min-height:0; padding:0 10px; background:none;
     border:0; pointer-events:none; }
-  body:not(.home) header > * { pointer-events:auto; }
-  body:not(.home) #back, body:not(.home) #title { display:none; }
-  body:not(.home) #pill { margin:6px 0 0 auto; }
-  body:not(.home) #live, body:not(.home) #menu { margin-top:6px; background:var(--card); border:1px solid var(--line); border-radius:99px; }
-  body:not(.home) #live { padding:3px 10px; } body:not(.home) #menu { min-height:32px; min-width:36px; font-size:18px; }
-  body:not(.home) main { padding-top:12px; }
-  body:not(.home) #err { left:292px; }
+  header > * { pointer-events:auto; }
+  #back, #title, #logo, #add, body.home #menu { display:none !important; }
+  #pill { margin:6px 0 0 auto; }
+  #live, #menu { margin-top:6px; background:var(--card); border:1px solid var(--line); border-radius:99px; }
+  #live { padding:3px 10px; } #menu { min-height:32px; min-width:36px; font-size:18px; }
+  body.home #live { margin-left:auto; }
+  main { padding-top:12px; }
+  #err { left:312px; }
+  /* the grove stays, faint, in the margin beside every conversation */
+  #backdrop { display:block; }
+  .empty.pick { padding-top:30vh; }
 }
-#side .sh { display:flex; align-items:center; gap:8px; padding:3px 6px 3px 14px; min-height:46px; border-bottom:1px solid var(--line); }
+#side .sh { display:flex; align-items:center; gap:2px; padding:3px 6px 3px 14px; min-height:46px; border-bottom:1px solid var(--line); }
 #side .sh a { flex:1; display:flex; align-items:center; gap:8px; font-weight:650; font-size:17px; color:inherit; text-decoration:none; }
 #side .sh img { border-radius:6px; }
+#side .sh .hbtn { font-size:19px; min-width:34px; min-height:34px; border-radius:8px; }
+#side .sh .hbtn:hover { background:var(--code); }
+/* the session list's own cards, made compact for the sidebar */
 #slist { flex:1; overflow-y:auto; padding:6px; }
-.srow { display:flex; gap:10px; align-items:flex-start; width:100%; text-align:left; border:0; background:none;
-  padding:8px 8px; border-radius:10px; }
-.srow:hover { background:var(--code); }
-.srow.cur { background:color-mix(in srgb, var(--busy) 13%, var(--bg)); }
-.srow .dot { margin-top:6px; }
-.srow .body { flex:1; min-width:0; }
-.srow .top { display:flex; gap:6px; align-items:baseline; }
-.srow .name { font-weight:650; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.srow .when { font-size:12px; color:var(--mut); flex:none; }
-.srow .sub { font-size:12.5px; color:var(--mut); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.srow .badge { font-size:11px; font-weight:700; color:#fff; background:var(--warn); border-radius:99px; padding:0 7px; }
-#slist .ssec { font-size:12px; font-weight:650; color:var(--mut); text-transform:uppercase; letter-spacing:.04em; margin:16px 8px 4px; }
-.srow .pi { margin-top:1px; color:var(--mut); }
+#slist .sess { gap:10px; padding:8px 8px; border:0; border-radius:10px; }
+#slist .sess:hover { background:var(--code); }
+#slist .sess.cur { background:color-mix(in srgb, var(--busy) 13%, var(--bg)); }
+#slist .sess .dot { margin-top:6px; }
+#slist .sess .name { font-size:15px; white-space:nowrap; }
+#slist .sess .when { font-size:12px; }
+#slist .sess .sub { font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#slist .sess .prev { font-size:13px; color:var(--mut); -webkit-line-clamp:1; margin-top:1px; }
+#slist .sess .badge { font-size:11px; padding:0 7px; }
+#slist .sess .rm { padding:3px 9px; font-size:12px; }
+#slist .sess.nested { margin-left:10px; width:calc(100% - 10px); padding-left:12px; border-left:2px solid var(--line); border-radius:0 10px 10px 0; }
+#slist .warnline { font-size:13px; margin:4px 8px 8px; }
+#slist .sech { margin:16px 8px 4px; font-size:12px; }
+#slist .pagecard { margin:2px 0; padding:7px 8px; gap:10px; border:0; border-radius:10px; background:none; }
+#slist .pagecard:hover { background:var(--code); }
+#slist .pagecard .pi { width:28px; height:28px; }
+#slist .pagecard b { font-size:14px; } #slist .pagecard span { font-size:12px; }
+#slist .pagecard .rm, #slist .sess .rm { display:none; }   /* removing and deleting are in the right-click menu here */
+#slist .earlier { font-size:13px; }
+#slist .empty { padding:24px 8px; font-size:14px; }
+/* right-click menu (a mouse only): the ⋯ menus' items, at the pointer */
+#ctx { position:fixed; z-index:45; min-width:220px; max-width:320px; max-height:80vh; overflow-y:auto; padding:4px;
+  background:var(--card); border:1px solid var(--line); border-radius:10px; box-shadow:0 8px 28px rgba(0,0,0,.18); }
+#ctx .ct { font-size:12px; font-weight:650; color:var(--mut); padding:6px 10px 4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#ctx .sect { margin:6px 0 2px; padding:4px 10px 0; border-top:1px solid var(--line); font-size:10px; }
+#ctx .sect.first { border:0; margin-top:0; }
+#ctx .item { min-height:0; padding:6px 10px; border:0; border-radius:6px; font-size:14px; gap:8px; display:block; }
+#ctx .item:hover:not([disabled]), #ctx .item:focus-visible { background:var(--code); outline:none; }
+#ctx .item[disabled] { opacity:.45; }
+#ctx .sep { height:1px; background:var(--line); margin:4px 6px; }
+/* on a computer, a selection gets a small floating bar right above it instead of the docked one */
+#selbar { position:fixed; z-index:44; display:flex; gap:2px; padding:3px; background:var(--card); border:1px solid var(--line);
+  border-radius:9px; box-shadow:0 6px 20px rgba(0,0,0,.18); }
+#selbar button { border:0; background:none; color:var(--fg); font-size:13.5px; font-weight:600; padding:5px 10px; border-radius:6px; }
+#selbar button:hover { background:var(--code); }
+@media (min-width: 1000px) and (pointer: fine) { #quotesel { display:none !important; } }
+#ctx .item .sub { font-size:12px; }
+/* a mouse: scrollbars as thin, faint lines with no track (Chrome/Safari: ::-webkit-scrollbar, which the standard
+   properties would override there; Firefox: the standard ones) */
+@media (pointer: fine) {
+  ::-webkit-scrollbar { width:6px; height:6px; background:transparent; }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:color-mix(in srgb, var(--fg) 16%, transparent); border-radius:3px; }
+  ::-webkit-scrollbar-thumb:hover { background:color-mix(in srgb, var(--fg) 32%, transparent); }
+  @supports not selector(::-webkit-scrollbar) {
+    * { scrollbar-width:thin; scrollbar-color:color-mix(in srgb, var(--fg) 16%, transparent) transparent; }
+  }
+}
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation:none !important; transition:none !important; } }
 </style>
 </head>
@@ -399,7 +460,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   <button id="menu" class="hbtn hidden" aria-label="Menu">⋯</button>
 </header>
 <nav id="side" aria-label="Sessions"><div class="sh"><a href="#/" aria-label="All sessions and pages"><img src="/assets/icon-64.png" alt="" width="22" height="22">grovy</a>
-  <button id="sadd" class="hbtn" aria-label="New session">＋</button></div><div id="slist"></div></nav>
+  <button id="sadd" class="hbtn" aria-label="New session">＋</button><button id="smenu" class="hbtn" aria-label="Menu">⋯</button></div><div id="slist"></div></nav>
 <div id="backdrop" aria-hidden="true"></div>
 <main id="main"></main>
 <div id="typing" class="hidden">
@@ -436,7 +497,9 @@ textarea:focus-visible, input:focus-visible { outline:none; }
 <div id="viewer" class="hidden"><div class="vh"><button id="vclose" aria-label="Close">✕</button><b id="vtitle"></b>
   <span id="vver"></span><button id="vshare">Share</button><a id="vtab" target="_blank" rel="noopener">New tab</a></div><iframe id="vframe" title="page"
   sandbox="allow-scripts allow-forms allow-modals allow-downloads" referrerpolicy="no-referrer"></iframe></div>
-<div id="sheet" class="hidden"><div class="panel"><div class="grab"></div><div id="sheetbody"></div></div></div>
+<div id="ctx" class="hidden" role="menu"></div>
+<div id="selbar" class="hidden" role="toolbar" aria-label="Selection"></div>
+<div id="sheet" class="hidden"><div class="panel"><div class="grab"></div><button id="sclose" aria-label="Close">✕</button><div id="sheetbody"></div></div></div>
 <script>
 "use strict";
 // Map of this script (each part starts with a "// ----" line):
@@ -466,6 +529,7 @@ function h(tag, attrs, ...kids) {           // never uses innerHTML: all text is
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (k === "class") e.className = v;
+    else if (k === "ctx") e._ctx = v;   // its right-click items (see "context menu")
     else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
     else e.setAttribute(k, v);
   }
@@ -642,7 +706,7 @@ function md(src) {
       }
       const btn = h("button", {class: "copy"}, "Copy");
       btn.onclick = () => copyText(text, btn);
-      root.append(h("div", {class: "cb"}, h("pre", {}, h("code", {}, text)), btn));
+      root.append(h("div", {class: "cb", ctx: () => [press(btn, "Copy code")]}, h("pre", {}, h("code", {}, text)), btn));
       continue;
     }
     if (!l.trim()) { flush(); i++; continue; }
@@ -719,7 +783,10 @@ function orderSessions(sessions) {
 }
 
 function sessCard(s, nested) {
-  return h("button", {class: "sess" + (nested ? " wt" : ""), "data-fk": "s:" + s.name, onclick: () => go("#/s/" + s.name)},
+  const open = s.name === view;
+  return h("button", {class: "sess" + (nested ? " nested" : "") + (open ? " cur" : ""), "data-fk": "s:" + s.name, "data-name": s.name,
+      ctx: () => sessionEntries(s.name, s.name === view && cur ? cur : s),
+      ...(open ? {"aria-current": "page"} : {}), onclick: () => go("#/s/" + s.name)},
     h("span", {class: dotClass(s)}),
     h("div", {class: "body"},
       h("div", {class: "top"}, h("span", {class: "name"}, ...nameNode(s.name)),
@@ -734,30 +801,39 @@ function sessCard(s, nested) {
 }
 
 let showAllPages = false;
-async function renderList() {
-  document.body.classList.add("home");
-  const [{sessions, now: srv, peers: machines}, {pages: all}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
-  if (typeof srv === "number") skew = srv - Date.now() / 1000;
-  if (view !== null) return;
+// The session list: the home screen on a phone, the sidebar on a wide screen (the same cards in both).
+function listNodes(sessions, all, machines) {
   const down = (machines || []).filter(m => m.state !== "online").map(m => h("div", {class: "warnline", "data-fk": "peer:" + m.name},
     m.state === "offline" ? `${m.name} is offline (last seen ${m.last_seen ? ago(m.last_seen) + (ago(m.last_seen) === "now" ? "" : " ago") : "never"})`
       + (m.error ? `: ${m.error}` : "") : m.state === "stale" ? `${m.name} isn't answering: ${m.error || "?"}`
       : `Connecting to ${m.name}…` + (m.error ? ` (${m.error})` : "")));
+  const shown = showAllPages ? all : all.slice(0, 5), known = Object.fromEntries(all.map(p => [p.id, p]));
+  const pageSection = all.length ? [h("div", {class: "sech"}, "Pages"),
+    shown.map(p => pageCard(p.id, p.title, `${p.session} · v${p.version} · ${ago(p.updated)}`, true, known)),
+    all.length > shown.length ? h("button", {class: "earlier", onclick: () => { showAllPages = true; refresh(); refreshSide(true); }},
+      `Show all ${all.length} pages`) : null] : [];
+  const dead = sessions.filter(s => s.state === "exited").map(s => s.name);
+  return [...down, ...(sessions.length ? orderSessions(sessions).map(([s, nested]) => sessCard(s, nested))
+    : [h("div", {class: "empty"}, "No sessions yet. Tap ＋ to start one.")]),
+    ...(dead.length > 1 ? [h("button", {class: "earlier", onclick: () => removeSessions(dead)}, `Remove all ${dead.length} ended sessions`)] : []),
+    ...pageSection.flat().filter(Boolean)];
+}
+async function renderList() {
+  document.body.classList.add("home");
+  if (wide.matches) {   // a wide screen has no home page: the list is the sidebar, and this side waits for a session
+    refreshSide(true);
+    paint(main, h("div", {class: "empty pick", "data-fk": "pick"}, "Pick a session, or start one with ＋."));
+    return;
+  }
+  const [{sessions, now: srv, peers: machines}, {pages: all}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
+  if (typeof srv === "number") skew = srv - Date.now() / 1000;
+  if (view !== null) return;
   pages = Object.fromEntries(all.map(p => [p.id, p]));
   if (viewing && !pages[viewing.id]) closeViewer();
   else if (viewing && (pages[viewing.id].version !== viewing.version || pages[viewing.id].share !== viewing.share))
     openPage(viewing.id);
-  const shown = showAllPages ? all : all.slice(0, 5);
-  const pageSection = all.length ? [h("div", {class: "sech"}, "Pages"),
-    shown.map(p => pageCard(p.id, p.title, `${p.session} · v${p.version} · ${ago(p.updated)}`, true)),
-    all.length > shown.length ? h("button", {class: "earlier", onclick: () => { showAllPages = true; refresh(); }},
-      `Show all ${all.length} pages`) : null] : [];
   document.title = "grovy" + (sessions.some(s => s.pending_permissions || s.state === "needs_input") ? " (!)" : "");
-  paint(main, ...down, ...(sessions.length ? orderSessions(sessions).map(([s, nested]) => sessCard(s, nested))
-    : [h("div", {class: "empty"}, "No sessions yet. Tap ＋ to start one.")]),
-    ...(() => { const dead = sessions.filter(s => s.state === "exited").map(s => s.name);
-      return dead.length > 1 ? [h("button", {class: "earlier", onclick: () => removeSessions(dead)}, `Remove all ${dead.length} ended sessions`)] : []; })(),
-    ...pageSection.flat().filter(Boolean));
+  paint(main, ...listNodes(sessions, all, machines));
 }
 
 async function removeSessions(names) {
@@ -776,9 +852,11 @@ const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
 const attUrl = p => { const [s, f] = p.split("/").slice(-2); const m = machineOf(view);   // a peer's files are on the peer
   return `/api/attachments/${encodeURIComponent(m ? m + ":" + s : s)}/${encodeURIComponent(f)}`; };
 function attNode(path) {   // a picture shows as a thumbnail (tap: full size); anything else, or a gone file, as a chip
-  const chip = () => h("span", {class: "attl", title: path}, "📎 " + attName(path));
+  const ctx = () => [...(IMAGE.test(path) ? [{label: "Open", run: () => window.open(attUrl(path), "_blank", "noopener")}] : []),
+    {label: "Copy path", sub: path, run: () => copyQuiet(path)}];
+  const chip = () => h("span", {class: "attl", title: path, ctx}, "📎 " + attName(path));
   if (!IMAGE.test(path)) return chip();
-  const a = h("a", {class: "attimg", href: attUrl(path), target: "_blank", rel: "noopener"});
+  const a = h("a", {class: "attimg", href: attUrl(path), target: "_blank", rel: "noopener", ctx});
   a.append(h("img", {src: attUrl(path), alt: attName(path), loading: "lazy", onerror: () => a.replaceWith(chip())}));
   return a;
 }
@@ -836,6 +914,8 @@ function machineNode(kind, text) {
   const btn = h("button", {class: "more"}, "Show report");
   btn.onclick = () => { el.classList.toggle("collapsed"); btn.textContent = el.classList.contains("collapsed") ? "Show report" : "Hide"; };
   el.append(btn);
+  el._ctx = () => [press(btn, btn.textContent === "Hide" ? "Hide report" : "Show report"), {label: "Copy report", run: () => copyQuiet(body)},
+    {label: "Quote", run: () => quoteInto(body, "Claude")}];
   return el;
 }
 function liveNode(d) {   // a widget a script in the session shows and updates in place (`import grovy`)
@@ -853,7 +933,8 @@ function workedNode(d) {   // "Worked for 2m 10s · 14 tools ›" in the reply's
   const n = d.tool_count || 0, tools = Array.isArray(d.tools) ? d.tools : [];
   const text = "Worked for " + dur(d.worked) + (n ? ` · ${n} tool${n > 1 ? "s" : ""}` : "");
   if (!tools.length) return {label: h("span", {class: "wkb"}, text), list: null};
-  const list = h("ol", {class: "wkl hidden"}, ...tools.map(x => h("li", {}, h("b", {}, String(x.tool || "")), x.arg ? " " + x.arg : "")),
+  const list = h("ol", {class: "wkl hidden"}, ...tools.map(x => h("li", {ctx: () => [{label: "Copy", sub: `${x.tool || ""} ${x.arg || ""}`.trim(),
+      run: () => copyQuiet(`${x.tool || ""} ${x.arg || ""}`.trim())}]}, h("b", {}, String(x.tool || "")), x.arg ? " " + x.arg : "")),
     ...(n > tools.length ? [h("li", {class: "wn"}, `…and ${n - tools.length} more`)] : []));
   const label = h("button", {class: "wkb more-t", "aria-expanded": "false",
     onclick: () => { const open = list.classList.toggle("hidden") === false; label.setAttribute("aria-expanded", String(open)); }}, text);
@@ -866,7 +947,7 @@ function eventNode(e, isLatestReply) {
     case "UserPromptSubmit": {
       const m = String(d.prompt || "").match(MACHINE);
       if (m) return machineNode(m[1], d.prompt);      // not typed by you: subagent reports, task notices
-      return h("div", {class: "u"}, ...userText(unwrap(d.prompt)), h("span", {class: "st in"}, sent(d.sent || e.ts), READ()));
+      return h("div", {class: "u", ctx: () => userCtx(unwrap(d.prompt))}, ...userText(unwrap(d.prompt)), h("span", {class: "st in"}, sent(d.sent || e.ts), READ()));
     }
     case "Stop": {
       const text = d.last_assistant_message || "";
@@ -882,15 +963,21 @@ function eventNode(e, isLatestReply) {
       if (d.background_tasks) el.append(sysLine(d.background_tasks + " still running in background" +
         (Array.isArray(d.background_names) ? ": " + d.background_names.join(", ") : "")));
       const copy = h("button", {onclick: () => copyText(text, copy)}, "Copy");
-      el.append(h("div", {class: "acts"}, ...(wk ? [wk.label] : []), h("span", {class: "ar"}, copy,
-        h("button", {onclick: () => quoteInto(el.querySelector(".md").innerText, "Claude")}, "Quote"))), ...(wk && wk.list ? [wk.list] : []));
+      const quote = h("button", {onclick: () => quoteInto(el.querySelector(".md").innerText, "Claude")}, "Quote");
+      el.append(h("div", {class: "acts"}, ...(wk ? [wk.label] : []), h("span", {class: "ar"}, copy, quote)), ...(wk && wk.list ? [wk.list] : []));
+      el._ctx = () => {
+        const more = el.querySelector(":scope > .more"), tools = wk && wk.list;
+        return [press(copy, "Copy"), press(quote, "Quote"),
+          ...(more ? [press(more)] : []),
+          ...(tools ? [press(wk.label, tools.classList.contains("hidden") ? "Show tool calls" : "Hide tool calls", wk.label.textContent)] : [])];
+      };
       return el;
     }
     case "StopFailure": return h("div", {class: "err"}, "⚠ " + (d.error || "error") + (d.last_assistant_message ? "\n" + d.last_assistant_message : ""));
     case "SessionStart": return sysLine(SOURCE[d.source] || "session started");
     case "SessionEnd": return sysLine("Claude exited", d.reason && d.reason !== "other" ? " (" + d.reason.replace(/_/g, " ") + ")" : "");
     case "Exited": return sysLine("terminal closed");
-    case "Steered": return h("div", {class: "u"}, ...userText(unwrap(d.prompt)), h("span", {class: "st in", title: "sent while Claude worked: it read it at its next step"}, sent(d.sent || e.ts), READ()));
+    case "Steered": return h("div", {class: "u", ctx: () => userCtx(unwrap(d.prompt))}, ...userText(unwrap(d.prompt)), h("span", {class: "st in", title: "sent while Claude worked: it read it at its next step"}, sent(d.sent || e.ts), READ()));
     case "Killed": return h("div", {class: "err"}, "⚠ Killed by the system's out-of-memory killer: memory ran short on this machine, "
       + "probably because of a big job (here or elsewhere). Resume continues the conversation.");
     case "Interrupted": return sysLine("■ interrupted from the phone");
@@ -1066,7 +1153,10 @@ function permNode(p) {
     allow.disabled = true;
     note.textContent = "Too large to show completely here. Review and allow it in the terminal, or deny.";
   }
-  return h("div", {class: "perm"}, h("div", {class: "h"}, "🔐 Claude wants to use " + p.tool_name), ...toolBody(p), note,
+  const input = p.tool_input || {}, what = typeof input.command === "string" ? ["Copy command", input.command]
+    : typeof input.file_path === "string" ? ["Copy path", input.file_path] : ["Copy input", JSON.stringify(input, null, 2)];
+  return h("div", {class: "perm", ctx: () => [{label: what[0], run: () => copyQuiet(what[1])}, press(deny, "Deny", null, true),
+      press(allow, "Allow once")]}, h("div", {class: "h"}, "🔐 Claude wants to use " + p.tool_name), ...toolBody(p), note,
     h("div", {class: "row"}, deny, allow));
 }
 // WhatsApp-style receipts: ✓ grovy has it, ✓✓ typed into Claude Code, blue ✓✓ Claude read it (its hook fired).
@@ -1084,7 +1174,7 @@ function promptNode(p) {
     : PSTATUS[p.status] || [0, p.status, ""];
   const cancel = p.status === "queued" ? h("button", {class: "link", onclick: async () => {
     try { await api(`/api/prompts/${encodeURIComponent(p.id)}/cancel`, {}); } catch (e) { say(e.message); } refresh(); }}, "cancel") : null;
-  return h("div", {class: "u pending"}, ...userText(p.text),
+  return h("div", {class: "u pending", ctx: () => [...userCtx(p.text), ...(cancel ? [press(cancel, "Cancel sending", null, true)] : [])]}, ...userText(p.text),
     h("span", {class: "st " + cls}, sent(p.created), ...(n ? [ticks(n)] : []), label, p.error && p.status !== "unconfirmed" ? ": " + p.error : "", cancel));
 }
 function cached(key, make) {
@@ -1429,6 +1519,29 @@ function quoteInto(text, who) {   // add "> Who:" and the quoted lines to the dr
   input.focus(); input.setSelectionRange(input.value.length, input.value.length);
   input.classList.remove("flash"); void input.offsetWidth; input.classList.add("flash");
 }
+// With a mouse on a wide screen, letting go of a selection in a message shows Quote and Copy right above it.
+function closeSelbar() { $("selbar").classList.add("hidden"); $("selbar").replaceChildren(); }
+document.addEventListener("pointerup", e => {
+  if (e.pointerType !== "mouse" || e.button !== 0 || !wide.matches || sheetOpen() || viewing) return;
+  setTimeout(() => {   // after the browser has settled the selection (a click inside it clears it)
+    const text = selectedText(), who = selWho, sel = getSelection();
+    if (!text || !sel.rangeCount) return closeSelbar();
+    const r = sel.getRangeAt(0).getBoundingClientRect(), bar = $("selbar");
+    const done = () => { closeSelbar(); };
+    bar.replaceChildren(
+      h("button", {onclick: () => { done(); selText = ""; quoteBtn.classList.add("hidden"); quoteInto(text, who); }}, "❝ Quote"),
+      h("button", {onclick: e2 => { copyText(text, e2.currentTarget); setTimeout(done, 700); }}, "Copy"));
+    bar.classList.remove("hidden");
+    const b = bar.getBoundingClientRect();
+    const top = r.top - b.height - 8 >= 4 ? r.top - b.height - 8 : r.bottom + 8;   // above it, or below near the top
+    bar.style.left = Math.max(4, Math.min(r.left + r.width / 2 - b.width / 2, innerWidth - b.width - 4)) + "px";
+    bar.style.top = Math.min(top, innerHeight - b.height - 4) + "px";
+  });
+});
+for (const ev of ["pointerdown", "mousedown"]) $("selbar").addEventListener(ev, e => e.preventDefault());   // keep the selection
+document.addEventListener("selectionchange", () => { if (!selectedText()) closeSelbar(); });
+document.addEventListener("scroll", closeSelbar, true);
+addEventListener("resize", closeSelbar);
 quoteBtn.onclick = () => {
   if (!selText) return;
   const t = selText;
@@ -1463,6 +1576,7 @@ function say(msg) {
     h("div", {style: "display:flex"}, h("button", {class: "btn", onclick: closeSheet}, "OK")));
 }
 $("sheet").addEventListener("click", e => { if (e.target.id === "sheet") closeSheet(); });
+$("sclose").onclick = closeSheet;
 
 async function switcher() {   // tap the title: jump to another session
   const {sessions} = await api("/api/sessions");
@@ -1473,18 +1587,20 @@ async function switcher() {   // tap the title: jump to another session
 }
 $("title").onclick = () => { if (view) switcher(); };
 
-function sessionMenu() {
-  const s = cur || {}, name = view;
+// What can be done to a session: the ⋯ menu of the open one, and the right-click menu of any (s: its list entry or
+// the open session's detail). Searching and pages are about the conversation on screen, so only for the open one.
+function sessionEntries(name, s) {
   const act = async (verb, ok) => {
     closeSheet();
     try { const r = await api(`/api/sessions/${encodeURIComponent(name)}/${verb}`, {}); if (ok) ok(r); }
     catch (e) { say(e.message); }
-    refresh();
+    refresh(); refreshSide(true);
   };
-  const C = "Conversation", S = "Session";   // Login link lives in the home menu only, not here
-  const entries = [
-    {section: C, node: h("button", {class: "item", onclick: searchSheet}, "Search this conversation")},
-    {section: C, node: Object.keys(pages).length ? h("button", {class: "item", onclick: () => pagesSheet(name)}, "Pages",
+  const C = "Conversation", S = "Session", open = name === view;   // Login link lives in the home menu only, not here
+  return [
+    {section: C, node: open ? null : h("button", {class: "item", onclick: () => { closeSheet(); go("#/s/" + name); }}, "Open")},
+    {section: C, node: open ? h("button", {class: "item", onclick: searchSheet}, "Search this conversation") : null},
+    {section: C, node: open && Object.keys(pages).length ? h("button", {class: "item", onclick: () => pagesSheet(name)}, "Pages",
       h("div", {class: "sub"}, Object.keys(pages).length + " published by Claude")) : null},
     {section: S, node: h("button", {class: "item", onclick: () => renameSheet(name)}, "Rename")},
     {section: S, node: s.state !== "exited" && s.outdated ? h("button", {class: "item", onclick: () => updateSession(name)},
@@ -1497,12 +1613,19 @@ function sessionMenu() {
           ask(`Stop session "${name}"? Claude exits; the conversation can be resumed later.`, "Stop", {danger: true})
             .then(yes => yes && act("kill"));
         }}, "Stop session")}]),
-    ...extItems("session"),
+    // extensions' items act on grovy.session (the open one): on another session's card they'd hit the wrong one
+    ...(open ? extItems("session") : []),
   ];
+}
+function sessionMenu() {
+  const s = cur || {}, name = view;
   openSheet(h("h2", {}, name),
-    ...grouped([C, S, "More"], "More", entries),
+    ...grouped(["Conversation", "Session", "More"], "More", sessionEntries(name, s)),
     h("div", {class: "sub", style: "padding:10px 4px;color:var(--mut);font-size:13px"}, s.cwd || ""));
 }
+const homeEntries = () => [h("button", {class: "item", onclick: () => { closeSheet(); newSession(); }}, "New session"),
+  ...extItems("home").map(e => e.node), extensionsItem(), loginItem()];
+const homeMenu = () => openSheet(h("h2", {}, "grovy"), ...homeEntries());
 const loginItem = () => h("button", {class: "item", onclick: loginSheet}, "Login link",
   h("div", {class: "sub"}, "Sign in on another device"));
 async function loginSheet() {   // the link `grovy url` prints, for the address this page was opened on
@@ -1540,8 +1663,7 @@ function extensionsSheet() {   // the switches save at once (for every device); 
     h("div", {style: "display:flex;gap:10px"}, reload));
   pending();
 }
-$("menu").onclick = () => view ? sessionMenu()
-  : openSheet(h("h2", {}, "grovy"), ...extItems("home").map(e => e.node), extensionsItem(), loginItem());
+$("menu").onclick = () => view ? sessionMenu() : homeMenu();
 async function updateSession(name) {   // the server decides whether it's safe; forcing is a separate, explicit tap
   if (!await ask(`Update "${name}"? Claude restarts with the latest grovy and resumes the same conversation.`, "Update")) return;
   const post = force => api(`/api/sessions/${encodeURIComponent(name)}/restart`, {force});
@@ -1656,7 +1778,8 @@ async function newSession(state = {}) {
   const draw = () => list.replaceChildren(...(!folders.length ? [h("div", {class: "sys", style: "padding:12px 4px;text-align:left"},
       "No trusted folders yet. On the computer, run claude once in a project folder and accept its trust prompt; "
       + "the folder then appears here.")] : []), ...folders.filter(f => f.toLowerCase().includes(filter.value.toLowerCase())).map(f =>
-    h("button", {class: "item" + (f === picked ? " sel" : ""), onclick: () => {
+    h("button", {class: "item" + (f === picked ? " sel" : ""), ctx: el => [press(el, "Start a session here"),
+        {label: "Copy path", sub: f, run: () => copyQuiet(f)}], onclick: () => {
       picked = f; if (!name.value || name.dataset.auto) { name.value = unique(base(f)); name.dataset.auto = "1"; }
       draw(); valid(); loadConvs(); }},
       h("div", {}, base(f), h("div", {class: "sub"}, f)))));
@@ -1715,11 +1838,11 @@ async function newSession(state = {}) {
 $("add").onclick = newSession;
 
 // ---------------------------------------------------------------- pages
-function pageCard(id, title, sub, deletable = false) {
-  const gone = !pages[id];
-  return h("button", {class: "pagecard" + (gone ? " gone" : ""), "data-fk": "pg:" + id, onclick: () => gone ? null : openPage(id)},
-    lockIcon(!gone && !!pages[id].share), h("div", {}, h("b", {}, title || "page"),
-      h("span", {}, gone ? "deleted" : sub + (pages[id].share ? " · public" : " · private"))),
+function pageCard(id, title, sub, deletable = false, known = pages) {   // known: the pages it may be one of
+  const gone = !known[id];
+  return h("button", {class: "pagecard" + (gone ? " gone" : ""), "data-fk": "pg:" + id, ctx: () => gone ? [] : pageEntries(id), onclick: () => gone ? null : openPage(id)},
+    lockIcon(!gone && !!known[id].share), h("div", {}, h("b", {}, title || "page"),
+      h("span", {}, gone ? "deleted" : sub + (known[id].share ? " · public" : " · private"))),
     gone ? null : deletable
       ? h("span", {class: "rm", role: "button", tabindex: "0", "data-fk": "pgrm:" + id, "aria-label": "Delete " + (title || "page"),
           onclick: ev => { ev.stopPropagation(); deletePage(id, title); }}, "Delete")
@@ -1735,7 +1858,7 @@ function lockIcon(open) {   // closed padlock: only you (with the token); open: 
 async function deletePage(id, title) {
   if (!await ask(`Delete the page "${title || "page"}"? Its link stops working.`, "Delete", {danger: true})) return;
   try { await api(`/api/pages/${encodeURIComponent(id)}/delete`, {}); } catch (e) { return say(e.message); }
-  refresh();
+  refresh(); refreshSide(true);
 }
 function syncViewer() {   // the open page was deleted, republished (reload) or its sharing changed
   const p = viewing && pageOf(viewing.id);
@@ -1798,30 +1921,21 @@ async function pagesSheet(session) {
 const wide = matchMedia("(min-width: 1000px)"), finePointer = matchMedia("(pointer: fine)");
 let sideTimer = null, sideList = [], sidePages = {};   // every session's pages, for the sidebar
 function refreshSide(now = false) {
-  if (!view || !wide.matches || (sideTimer && !now)) return;
+  if (!wide.matches || (sideTimer && !now)) return;
   clearTimeout(sideTimer);
   sideTimer = setTimeout(() => { sideTimer = null; renderSide().catch(() => {}); }, now ? 0 : 400);
 }
 async function renderSide() {
-  const [{sessions, now: srv}, {pages: all}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
+  const [{sessions, now: srv, peers: machines}, {pages: all}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
   if (typeof srv === "number") skew = srv - Date.now() / 1000;
-  sideList = sessions; sidePages = Object.fromEntries(all.map(p => [p.id, p]));
-  if (!view) return;
+  sideList = orderSessions(sessions).map(([s]) => s); sidePages = Object.fromEntries(all.map(p => [p.id, p]));
+  if (!wide.matches) return;
+  if (!view) {   // no conversation to keep pages in step with: these are every page
+    pages = sidePages;
+    document.title = "grovy" + (sessions.some(s => s.pending_permissions || s.state === "needs_input") ? " (!)" : "");
+  }
   syncViewer();
-  const pageRows = all.length ? [h("div", {class: "ssec"}, "Pages"), ...all.map(p => h("button", {class: "srow", "data-fk": "pg:" + p.id,
-      onclick: () => openPage(p.id)}, lockIcon(!!p.share),
-    h("div", {class: "body"}, h("div", {class: "top"}, h("span", {class: "name"}, p.title || "page"), h("span", {class: "when"}, ago(p.updated))),
-      h("div", {class: "sub"}, `${p.session} · v${p.version}`))))] : [];
-  paint($("slist"), ...pageRows.length ? [h("div", {class: "ssec"}, "Sessions")] : [], ...sessions.map(s => h("button", {class: "srow" + (s.name === view ? " cur" : ""), "data-fk": "s:" + s.name,
-      "data-name": s.name, ...(s.name === view ? {"aria-current": "page"} : {}), onclick: () => go("#/s/" + s.name)},
-    h("span", {class: dotClass(s)}),
-    h("div", {class: "body"},
-      h("div", {class: "top"}, h("span", {class: "name"}, ...nameNode(s.name)),
-        s.background && s.state !== "exited" ? runMark(s.background, true) : null,
-        s.pending_permissions ? h("span", {class: "badge"}, String(s.pending_permissions)) : null,
-        h("span", {class: "when"}, ago(s.last_event))),
-      h("div", {class: "sub"}, s.state === "idle" || s.state === "working" ? s.activity || LABEL[s.state] : LABEL[s.state] || s.state)))),
-    ...pageRows);
+  paint($("slist"), ...listNodes(sessions, all, machines));
 }
 function markSide() {   // highlight the open session at once, before the next fetch
   for (const r of $("slist").children) {
@@ -1830,16 +1944,113 @@ function markSide() {   // highlight the open session at once, before the next f
     if (on) { r.setAttribute("aria-current", "page"); r.scrollIntoView({block: "nearest"}); } else r.removeAttribute("aria-current");
   }
 }
-wide.addEventListener("change", () => refreshSide(true));
+wide.addEventListener("change", () => { refresh(); refreshSide(true); });
 $("sadd").onclick = newSession;
+$("smenu").onclick = homeMenu;
 async function stepSession(d) {   // Alt+↑/↓: the previous/next session, in the list's order
   let list = sideList;
-  if (!wide.matches || !list.length) { try { list = sideList = (await api("/api/sessions")).sessions; } catch (e) { return; } }
+  if (!wide.matches || !list.length) {
+    try { list = sideList = orderSessions((await api("/api/sessions")).sessions).map(([s]) => s); } catch (e) { return; }
+  }
   if (!list.length) return;
   const i = list.findIndex(s => s.name === view);
   const j = i < 0 ? (d > 0 ? 0 : list.length - 1) : (i + d + list.length) % list.length;
   if (list[j].name !== view) go("#/s/" + list[j].name);
 }
+
+// ---------------------------------------------------------------- context menu (a mouse: right-click)
+// On a computer, right-click does what ⋯ menus and an item's own small buttons do on the phone. Anything can carry its
+// items: h(..., {ctx: el => [...]}) (extensions: grovy.contextMenu). The nearest one to the pointer wins; the
+// conversation itself gives the open session's menu, the rest of the sidebar grovy's own. An item is a node, a
+// {section, node} (the ⋯ menus' entries) or {label, sub, run, danger, disabled, section}; press(button) makes one that
+// clicks an existing button, so it keeps that button's checks (a disabled Allow stays disabled). Text boxes and any
+// right-click while text is selected keep the browser's menu, links and images too unless they carry items, and
+// Shift+right-click always does. Never on touch: a long press there selects or quotes.
+function press(btn, label = btn.textContent, sub = null, danger = false) {
+  return {label, sub, danger, disabled: !!btn.disabled, run: () => btn.click()};
+}
+function copyQuiet(text) { copyText(String(text), h("span")); }
+const userCtx = text => [{label: "Copy", run: () => copyQuiet(text)}, {label: "Quote", run: () => quoteInto(text, "You")}];
+function ctxEntry(e) {   // -> {section, node}
+  if (!e) return null;
+  if (e instanceof Node) return {node: e};
+  if (e.node !== undefined) return e;
+  return {section: e.section, node: h("button", {class: "item" + (e.danger ? " danger" : ""), ...(e.disabled ? {disabled: ""} : {}),
+    onclick: () => { try { e.run(); } catch (err) { showError(err); } }}, e.label, e.sub ? h("div", {class: "sub"}, e.sub) : null)};
+}
+function closeCtx() { const c = $("ctx"); if (c.classList.contains("hidden")) return; c.classList.add("hidden"); c.replaceChildren(); }
+function openCtx(x, y, title, entries) {
+  const list = entries.map(ctxEntry).filter(e => e && e.node);
+  if (!list.length) return false;
+  const c = $("ctx"), named = list.some(e => e.section);
+  c.replaceChildren(...(title ? [h("div", {class: "ct"}, title)] : []),
+    ...(named ? grouped(["Conversation", "Session", "More"], "More", list) : list.map(e => e.node)));
+  for (const b of c.querySelectorAll("button")) b.setAttribute("role", "menuitem");
+  c.classList.remove("hidden");
+  const r = c.getBoundingClientRect();
+  c.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 4)) + "px";
+  c.style.top = Math.max(4, Math.min(y, innerHeight - r.height - 4)) + "px";
+  const first = c.querySelector("button:not([disabled])"); if (first) first.focus({preventScroll: true});
+  return true;
+}
+function pageEntries(id) {
+  const p = sidePages[id] || pages[id]; if (!p) return [];
+  return [{label: "Open", run: () => openPage(id)},
+    {label: "Open in a new tab", run: () => window.open(`/p/${encodeURIComponent(id)}?v=${encodeURIComponent(p.version)}`, "_blank", "noopener")},
+    ...(p.session !== view ? [{label: "Go to its session", sub: p.session, run: () => go("#/s/" + p.session)}] : []),
+    {label: "Delete", danger: true, run: () => deletePage(id, p.title)}];
+}
+function ctxTitle(el) {
+  const n = el.getAttribute("data-name"); if (n) return n;
+  if (el.classList.contains("pagecard")) return (el.querySelector("b") || {}).textContent || "page";
+  return "";
+}
+document.addEventListener("contextmenu", e => {
+  if (e.shiftKey) return;   // Shift+right-click: always the browser's own
+  if (e.pointerType ? e.pointerType !== "mouse" : !finePointer.matches) return;   // a long press on a touch screen: not ours
+  const t = e.target instanceof Element ? e.target : null;
+  if (!t || viewing || t.closest("#ctx, input, textarea, select, [contenteditable]")) return;
+  const sel = getSelection();
+  if (sel && !sel.isCollapsed && String(sel).trim()) {   // text selected in a message: quote or copy it; else the browser's
+    const text = !sheetOpen() && selectedText(), who = selWho;
+    if (text && openCtx(e.clientX, e.clientY, "", [{label: "Quote selection", run: () => { selText = ""; quoteBtn.classList.add("hidden"); quoteInto(text, who); }},
+        {label: "Copy", run: () => copyQuiet(text)}])) e.preventDefault();
+    return;
+  }
+  let own = t; while (own && !own._ctx) own = own.parentElement;
+  if (own && (!sheetOpen() || $("sheet").contains(own))) {
+    const link = t.closest("a[href]"), img = t.closest("img");
+    if (link && link !== own && own.contains(link)) return;           // a link in a reply: open it, copy its address
+    if (img && !link && own.contains(img)) return;                    // a picture in a reply: save it
+    // the nearest one's items first, then each enclosing one's (a code block's, then its reply's), divided
+    let entries = [];
+    try {
+      for (let n = own; n; n = n.parentElement) if (n._ctx) {
+        const more = (n._ctx(n) || []).filter(Boolean);
+        if (more.length) entries.push(...(entries.length ? [h("div", {class: "sep", role: "separator"})] : []), ...more);
+      }
+    } catch (err) { showError(err); return; }
+    if (openCtx(e.clientX, e.clientY, ctxTitle(own), entries)) e.preventDefault();
+    return;
+  }
+  if (sheetOpen() || t.closest("a[href]:not(#side .sh a), img, pre")) return;
+  let title, entries;
+  if (t.closest("#side") || !view) { title = "grovy"; entries = homeEntries(); }
+  else if (t.closest("main, header")) { title = view; entries = sessionEntries(view, cur || {}); }
+  else return;
+  if (openCtx(e.clientX, e.clientY, title, entries)) e.preventDefault();
+});
+$("ctx").addEventListener("click", e => { if (e.target.closest("button")) setTimeout(closeCtx); });
+document.addEventListener("pointerdown", e => { if (!$("ctx").contains(e.target)) closeCtx(); }, true);
+addEventListener("blur", closeCtx); addEventListener("resize", closeCtx);
+document.addEventListener("scroll", closeCtx, true);
+$("ctx").addEventListener("keydown", e => {
+  const items = [...$("ctx").querySelectorAll("button")], i = items.indexOf(document.activeElement);
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeCtx(); }
+  else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault(); items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].focus();
+  } else if (e.key === "Tab") { e.preventDefault(); closeCtx(); }
+});
 
 // ---------------------------------------------------------------- keyboard
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([type=hidden]), textarea, select, [tabindex]:not([tabindex="-1"])';
@@ -1927,7 +2138,7 @@ function route() {
   document.body.classList.toggle("home", !view);
   if (view) { $("title").setAttribute("tabindex", "0"); $("title").setAttribute("role", "button"); }
   else { $("title").removeAttribute("tabindex"); $("title").removeAttribute("role"); }
-  if (view) { markSide(); refreshSide(true); }
+  markSide(); refreshSide(true);
   if (view && finePointer.matches) input.focus({preventScroll: true});   // a desktop: ready to type (a phone would pop its keyboard)
   refresh();
   emit("route", view);
@@ -2104,6 +2315,14 @@ window.grovy = Object.freeze({
     if (!["session", "home", "both"].includes(where)) throw new Error(`grovy.menu: where must be "session", "home" or "both"`);
     ext.menu.push({label: String(label), run: fnArg(run, "grovy.menu"), where, sub: String(sub), section: String(section),
                    when: when == null ? null : fnArg(when, "grovy.menu when")});
+  },
+  // right-click items for a node you drew (a mouse only): items() returns [{label, run, sub, danger, disabled}]
+  contextMenu(node, items) {
+    if (!(node instanceof Element)) throw new Error("grovy.contextMenu: node must be an element");
+    const fn = fnArg(items, "grovy.contextMenu");
+    node._ctx = () => { const r = runExt("contextMenu", fn); return Array.isArray(r) ? r.map(x => x && {
+      label: String(x.label), sub: x.sub ? String(x.sub) : null, danger: !!x.danger, disabled: !!x.disabled,
+      run: () => runExt("contextMenu " + x.label, fnArg(x.run, "grovy.contextMenu item"))}) : []; };
   },
   key(combo, run) {   // a keyboard shortcut (see combosOf above)
     ext.keys.push({combo: normCombo(combo), run: fnArg(run, "grovy.key")});

@@ -25,6 +25,8 @@
                                         when: state => true/false to show it only sometimes (state: the open
                                         session's, null on the home screen); add section: "Conversation" | "Session"
                                         | your own name to group it under a header in the session menu
+     grovy.contextMenu(node, items)     right-click items (a mouse only) for a node you drew, e.g. in render:
+                                        items() returns [{label, run, sub, danger, disabled}]
      grovy.key(combo, run)              a shortcut such as "Ctrl+K", "Alt+Shift+N", "Ctrl+?" or "F2" (Cmd counts as
                                         Ctrl). It needs Ctrl or Alt (F-keys excepted) and can't be one of grovy's own.
      grovy.on("render", (node, event))  a message was drawn: add to it
