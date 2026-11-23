@@ -1,6 +1,6 @@
 # grovy: design and internals
 
-For people changing grovy (and Claude sessions doing it: see `CLAUDE.md`). Users: see `README.md`.
+For people changing grovy (and Claude sessions doing it: see `CLAUDE.md`). Users: see `README.md` and the guides it links to.
 
 ```
 claude ──hooks──► grovy hook NAME ──unix socket──► grovyd ──HTTP+SSE──► phone
