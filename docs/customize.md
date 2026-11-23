@@ -6,6 +6,9 @@ Everything here lives in `~/.config/grovy/`, outside the grovy folder, so update
 
 - **Extensions:** ⋯ → Extensions on the home screen switches built-in parts on or off (math, widgets, git,
   issues...) for all your devices; reload to apply.
+- **Themes:** ⋯ → Theme on the home screen picks a look for all your devices (grovy comes with *nature*: ink on
+  paper, serif titles). To make your own, copy [`themes/nature.css`](../themes/nature.css) to
+  `~/.config/grovy/themes/NAME.css` and change it; it shows up in the list.
 - **Looks:** edit `~/.config/grovy/custom.css`. It starts with the colour names you can change (your message
   bubbles, accents, backgrounds, in light and dark mode). Reload the page to see it.
 - **Your own buttons, shortcuts and widgets:** `~/.config/grovy/custom.js` can add items to the ⋯ menu or the

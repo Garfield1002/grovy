@@ -2130,6 +2130,63 @@ class TestSetupAndCustomCss(unittest.TestCase):
                 f.write("not json")
             self.assertEqual(grovyd.extensions_off(), [])
 
+    def test_theme_is_chosen_for_every_device_and_added_before_custom_css(self):
+        """⋯ → Theme: kept in the state dir; the theme's CSS goes after grovy's styles and before custom.css; the
+        user's own themes are listed too, and one with a built-in's name replaces it."""
+        cfg = tempfile.mkdtemp(dir=TMP)
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": tempfile.mkdtemp(dir=TMP), "GROVY_CONFIG_DIR": cfg}):
+            base, csp = grovyd.load_index()
+            self.assertNotIn(b"theme-css", base)                                   # the default look: no theme
+            self.assertIn(b'<meta name="grovy-theme" content="{&quot;theme&quot;: null, &quot;themes&quot;: '
+                          b'[&quot;nature&quot;]}">', base)                       # the built-in one ships
+            self.assertEqual(grovyd.set_theme("nature"), (200, {"theme": "nature"}))
+            with open(os.path.join(cfg, "custom.css"), "w") as f:
+                f.write(":root { --user:#123456; }")
+            html, csp2 = grovyd.load_index()
+            self.assertEqual(csp, csp2)                                             # styles don't touch script hashes
+            with open(os.path.join(ROOT, "themes", "nature.css"), "rb") as f:
+                self.assertIn(b'<style id="theme-css">\n' + f.read(), html)
+            self.assertLess(html.index(b"</style>"), html.index(b"theme-css"))
+            self.assertLess(html.index(b"theme-css"), html.index(b"custom-css"))    # custom.css keeps the last word
+            os.makedirs(os.path.join(cfg, "themes"))
+            for name, css in (("nature", "/* mine */"), ("dusk", ":root{--bg:#000}"), ("Bad Name", "x{}")):
+                with open(os.path.join(cfg, "themes", name + ".css"), "w") as f:
+                    f.write(css)
+            self.assertEqual(grovyd.themes(), ["dusk", "nature"])
+            self.assertIn(b'<style id="theme-css">\n/* mine */', grovyd.load_index()[0])   # the user's replaces it
+            for bad in ("nope", "../custom", "", 3, "Bad Name"):
+                self.assertEqual(grovyd.set_theme(bad)[0], 400, bad)
+            self.assertEqual(grovyd.current_theme(), "nature")
+            with open(os.path.join(cfg, "themes", "dusk.css"), "w") as f:
+                f.write("a{}</style><script>alert(1)</script>")
+            self.assertEqual(grovyd.set_theme("dusk")[0], 200)
+            with mock.patch("sys.stderr", io.StringIO()):
+                self.assertNotIn(b"theme-css", grovyd.load_index()[0])           # can't close the style block
+            os.unlink(os.path.join(cfg, "themes", "dusk.css"))
+            self.assertNotIn(b"theme-css", grovyd.load_index()[0])                # gone: the default look
+            self.assertEqual(grovyd.set_theme(None), (200, {"theme": None}))
+            srv = grovyd.HttpServer.__new__(grovyd.HttpServer)                    # the page follows without a restart:
+            srv.index_mtime = None
+            srv.refresh_index()
+            self.assertNotIn(b"theme-css", srv.index)
+            grovyd.set_theme("nature")                                             # a new choice
+            srv.refresh_index()
+            self.assertIn(b'<style id="theme-css">\n/* mine */', srv.index)
+            with open(os.path.join(cfg, "themes", "nature.css"), "w") as f:       # an edited theme
+                f.write("/* mine, edited */")
+            srv.refresh_index()
+            self.assertIn(b"/* mine, edited */", srv.index)
+            os.unlink(os.path.join(cfg, "themes", "nature.css"))                  # removed: the built-in is back
+            srv.refresh_index()
+            self.assertIn(b"--title-font", srv.index)
+            grovyd.set_theme(None)
+            with open(grovyd.theme_path(), "w") as f:                              # a hand-edited file
+                json.dump({"theme": '"><script>'}, f)
+            self.assertIsNone(grovyd.current_theme())
+            with open(grovyd.theme_path(), "w") as f:
+                f.write("[1]")
+            self.assertIsNone(grovyd.current_theme())
+
     def test_every_builtin_extension_says_what_it_is(self):
         for f in grovyd.builtin_extensions():
             with open(f, encoding="utf-8") as fh:

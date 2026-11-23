@@ -185,7 +185,7 @@ those started before keep their `--settings` until ⋯ → Update session. `--no
 | `GROVY_AUTH` | `on` | `off` = don't require the token (enrollment only) |
 | `GROVY_STATE_DIR` | `$XDG_STATE_HOME/grovy` → `~/.local/state/grovy` | all state, mode 0700 |
 | `GROVY_TERMINAL` | `off` | `on` = another machine (this one's trunk) may open a terminal on this machine's sessions (`grovy attach pc:NAME`, see "Other machines") |
-| `GROVY_HOME` | `$XDG_CONFIG_HOME/grovy` → `~/.config/grovy` | your own files: `custom.css`/`custom.js`, `instructions.md`, `plugins/`, `peers.json` (`GROVY_CONFIG_DIR` is the older name; `GROVY_HOME` wins). Passed on to sessions started from it |
+| `GROVY_HOME` | `$XDG_CONFIG_HOME/grovy` → `~/.config/grovy` | your own files: `custom.css`/`custom.js`, `themes/`, `instructions.md`, `plugins/`, `peers.json` (`GROVY_CONFIG_DIR` is the older name; `GROVY_HOME` wins). Passed on to sessions started from it |
 | `GROVY_PERMISSION_TIMEOUT` | `600` | seconds a permission waits for the phone (fixed per session at `grovy new`) |
 | `GROVY_CLAUDE` | `claude` | claude executable |
 | `GROVY_PROJECTS_DIR` | `~/dev` | where ⋯ → New project makes projects |
@@ -241,7 +241,9 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
 
 * **Built-in extensions** are `extensions/*.js` in the grovy folder, loaded in file-name order right after grovy's own
   script. They are ordinary features written against `window.grovy` only: `context-bar.js` (the line above the message
-  box, see "Status info"), `git.js` (see "Git"), `issues.js` (see "Issues"), `math.js` (see "Math") and `widgets.js` (the widget types, see "Widgets"). Each registers with `grovy.extension(name, setup, {about})`; the setups run at start-up,
+  box, see "Status info"), `git.js` (see "Git"), `issues.js` (see "Issues"), `math.js` (see "Math"), `swatch.js` (a dot of the colour in front of inline code that is exactly a hex colour,
+  `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`: the only thing put in its `style`, after that check; code blocks are left
+  alone) and `widgets.js` (the widget types, see "Widgets"). Each registers with `grovy.extension(name, setup, {about})`; the setups run at start-up,
   after `custom.js`, so `grovy.disable(name)` there turns one off (or replace it: disable it and copy it under another
   name).
 * **⋯ → Extensions** (home menu, `index.html`) lists every named extension with its `about` line and a switch. A switch
@@ -252,6 +254,17 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   It applies on reload only ("Reload to apply" shows while the switches differ from what's running), since an
   extension can't be undone live. One turned off in `custom.js` shows as such and can't be switched on here. Turning
   off an extension whose daemon plugin stays on (git, push) only hides its page side.
+* **Themes** (⋯ → Theme, home menu) are CSS files: built-in ones in `themes/` in the grovy folder (`nature.css`), the
+  user's in `~/.config/grovy/themes/NAME.css` (NAME `[a-z0-9][a-z0-9_-]{0,31}`; one with a built-in's name replaces
+  it). `POST /api/theme {theme}` (a listed name, or `null` for the default look) saves the choice to `theme.json` in
+  the state dir, for every device; the page then reloads. `load_index()` adds the chosen theme as
+  `<style id="theme-css">` right after the built-in styles (so before extension styles and `custom.css`, which keep
+  the last word), read with the same rules as `custom.css`, and lists the themes and the choice in a
+  `<meta name="grovy-theme">` tag. A choice whose file is gone or refused means the default look. The default look
+  has a few tokens only themes need: `--title-font` (titles, session names, reply headings, widget titles, section
+  labels), `--grain` (an image under the page and its bars), `--tree` and `--tree-opacity` (the backdrop). Themes
+  may restyle anything else too, but only the tokens are a stable API. The logo, the icons and the working dot are
+  grovy's own and not themed (the logo is a mask filled with `--fg`).
 * **`custom.css`** is added after the built-in styles (a later rule with the same selector wins).
 * **`custom.js`** is added after the built-in extensions, as its own inline `<script>`. It is documented in
   `examples/custom.js`. `window.grovy` is a frozen object defined in the "extensions" part of `index.html`:
@@ -323,7 +336,7 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   * A plugin that failed can't use its `Api` any more, even from a thread it left running.
   * A callback or route that raises is logged (a route answers 500), and the rest carries on.
 
-The daemon rereads `extensions/`, `custom.css` and `custom.js` when they change (next page reload, no restart). Each
+The daemon rereads `extensions/`, `custom.css`, `custom.js`, the theme folders and `theme.json` when they change (next page reload, no restart). Each
 script's CSP hash is computed from exactly the block grovyd inserts, so nothing is loosened: only that text runs.
 grovyd skips a file, with a line in the log, when it:
 * is not a regular file;
@@ -1129,7 +1142,7 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
 * Events emitted while the daemon is down are not replayed.
 * **Peers** (other machines, see "Other machines"):
   * ⋯ → New issue and ⋯ → New project work on the hub only (an issue session that already exists on a peer can be
-    finished or discarded from the hub). ⋯ → Extensions, the login link, `custom.css`/`custom.js` are the hub's.
+    finished or discarded from the hub). ⋯ → Extensions, ⋯ → Theme, the login link, `custom.css`/`custom.js` are the hub's.
   * The hub's plugins see peers' sessions only through `notify`; `grovy.on("event")`,
     `grovy.on("state")`, `grovy.sessions()`, `grovy.session()` and `grovy.send()` cover local sessions only. The hub's
     `grovy` command (`ls`, `attach`, `logs`, `kill`, ...) is local too: the terminal of a peer's session is on the peer.

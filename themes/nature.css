@@ -1,0 +1,26 @@
+/* Nature print: ink on paper. A built-in theme for grovy (⋯ → Theme), and an example of one: a theme is a CSS file
+   added after grovy's own styles, so it sets the colour tokens (--bg, --fg, ... see the top of index.html) and may
+   restyle anything else. Your own go in ~/.config/grovy/themes/NAME.css; one named "nature" replaces this. */
+:root { --fg:#24231f; --card:#fcfbf8;
+  --acc:#3e5482; --user:#e6e9dc; --ok:#5b7a48; --warn:#b07a1e; --bad:#9e3a30; --busy:#3e5482;
+  --title-font:"Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  --tree:var(--fg); --tree-opacity:.27;
+  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .2 0 0 0 0 .18 0 0 0 0 .12 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+@media (prefers-color-scheme: dark) { :root { --fg:#d9d4c7; --mut:#958f82;
+  --acc:#93a7d8; --user:#2c3427; --ok:#93b27b; --warn:#d8a64c; --bad:#d97a68; --busy:#93a7d8;
+  --tree:var(--fg); --tree-opacity:.18;
+  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .95 0 0 0 0 .93 0 0 0 0 .86 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); } }
+
+/* the tree printed large, like a botanical plate */
+#backdrop { height:min(100vh, 1000px); }
+/* serif titles, a touch larger so the serif can breathe */
+header h1, .sess .name, #sheet h2, .md :is(h1, h2, h3, h4), .wt { font-weight:600; letter-spacing:.005em; }
+header h1 { font-size:19px; }
+body.home header h1, #side .sh a { font-size:21px; font-weight:500; letter-spacing:.02em; }
+.sess .name { font-size:19px; } #slist .sess .name { font-size:17px; }
+.md h1 { font-size:1.35em } .md h2 { font-size:1.22em } .md h3, .md h4 { font-size:1.08em }
+.wt { font-size:1.06em; }
+.sect { font-size:12.5px; letter-spacing:.14em; font-weight:500; }
+#side .sh .logo { width:24px; height:24px; }
+/* an ink send button */
+#send { background:var(--fg); color:var(--bg); }

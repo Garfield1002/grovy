@@ -248,6 +248,75 @@ def set_extension(name, on):
     return 200, {"off": sorted(off)}
 
 
+# Themes (⋯ → Theme): a CSS file added after grovy's own styles, before custom.css. Built-in ones are in themes/ in
+# the grovy folder; the user's own in ~/.config/grovy/themes/, where one with the same name replaces a built-in. The
+# choice is kept in the state dir, for every device; none (or a theme that is gone) means grovy's default look.
+THEMES_DIR = os.path.join(core.HERE, "themes")
+THEME_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+
+
+def theme_dirs():
+    return [os.path.join(core.config_dir(), "themes"), THEMES_DIR]   # the user's first: theirs wins
+
+
+def themes():
+    """The names of the themes there are, sorted."""
+    names = set()
+    for d in theme_dirs():
+        try:
+            names.update(f[:-4] for f in os.listdir(d) if f.endswith(".css") and THEME_NAME.fullmatch(f[:-4]))
+        except OSError:
+            pass
+    return sorted(names)[:100]
+
+
+def theme_files():
+    """Every theme folder and the files in them, for the page's reload check (a theme added, edited or removed)."""
+    out = []
+    for d in theme_dirs():
+        out.append(d)
+        try:
+            out += [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith(".css")][:100]
+        except OSError:
+            pass
+    return out
+
+
+def theme_css(name):
+    """The CSS of theme `name` (the user's file if there is one), or b"" (see page_file)."""
+    if not name or not THEME_NAME.fullmatch(name):
+        return b""
+    for d in theme_dirs():
+        path = os.path.join(d, name + ".css")
+        if os.path.lexists(path):
+            return page_file(path, CUSTOM["custom.css"])
+    return b""
+
+
+def theme_path():
+    return os.path.join(core.state_dir(), "theme.json")
+
+
+def current_theme():
+    try:
+        with open(theme_path(), encoding="utf-8") as f:
+            name = json.load(f).get("theme")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return name if isinstance(name, str) and THEME_NAME.fullmatch(name) else None
+
+
+def set_theme(name):
+    """⋯ → Theme: name, or None for grovy's default look. It applies when a page next loads."""
+    if name is not None and (not isinstance(name, str) or name not in themes()):
+        return 400, {"error": "no such theme"}
+    try:
+        core.atomic_write_json(theme_path(), {"theme": name})
+    except OSError as e:
+        return 500, {"error": f"couldn't save it: {e}"}
+    return 200, {"theme": name}
+
+
 def load_index():
     with open(INDEX_PATH, "rb") as f:   # LF, as the browser sees it (a CR LF checkout would break the hash)
         html = f.read().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
@@ -255,9 +324,15 @@ def load_index():
     # what ⋯ → Extensions turned off, read by the page before its extensions start
     off = html_escape(json.dumps(extensions_off())).encode()
     html = html.replace(b"</head>", b'<meta name="grovy-off" content="' + off + b'">\n</head>', 1)
+    theme = current_theme()
+    html = html.replace(b"</head>", b'<meta name="grovy-theme" content="'
+                        + html_escape(json.dumps({"theme": theme, "themes": themes()})).encode() + b'">\n</head>', 1)
     css = custom_file("custom.css")
     if css:   # after the built-in styles, so the same selectors and tokens override them
         html = html.replace(b"</style>", b"</style>\n<style id=\"custom-css\">\n" + css + b"\n</style>", 1)
+    css = theme_css(theme)
+    if css:   # right after the built-in styles too, so before custom.css, which keeps the last word
+        html = html.replace(b"</style>", b"</style>\n<style id=\"theme-css\">\n" + css + b"\n</style>", 1)
     # After grovy's script, which starts the page only once it is all parsed: built-in extensions, then custom.js.
     added = [b"\n" + js + b"\n" for js in [page_file(p, CUSTOM["custom.js"]) for p in builtin_extensions()]
              + [custom_file("custom.js")] if js]
@@ -878,6 +953,8 @@ class Http(http.server.BaseHTTPRequestHandler):
                                       body.get("resume"), body.get("fork")))
         if path == "/api/extensions":   # ⋯ → Extensions
             return set_extension(body.get("name"), body.get("on"))
+        if path == "/api/theme":   # ⋯ → Theme
+            return set_theme(body.get("theme"))
         if path == "/api/projects/new":
             return _res(*store.new_project(body.get("kind"), body.get("name"), body.get("url")))
         if path == "/api/projects/start":
@@ -1098,13 +1175,14 @@ class HttpServer(http.server.ThreadingHTTPServer):
         return self.page[1]
 
     def refresh_index(self):
-        """Pick up edits to index.html, extensions/, custom.css and custom.js without a daemon restart (CSP hashes
-        included)."""
+        """Pick up edits to index.html, extensions/, custom.css, custom.js and themes (the files, which exist, and
+        the choice) without a daemon restart (CSP hashes included)."""
         try:
             m = [os.stat(INDEX_PATH).st_mtime_ns]
         except OSError:
             return
-        for path in [custom_path(name) for name in CUSTOM] + builtin_extensions() + [extensions_off_path()]:
+        for path in ([custom_path(name) for name in CUSTOM] + builtin_extensions() + [extensions_off_path(), theme_path()]
+                     + theme_files()):
             try:
                 c = os.stat(path)
                 m.append((path, c.st_mtime_ns, c.st_size))
