@@ -6,18 +6,34 @@ import re
 import sys
 import time
 
-from . import cleanup, client, core, hook, install, projects, scriptlib, sessions, setupflow, tmuxctl
+from . import cleanup, client, core, hook, install, projects, remote, scriptlib, sessions, setupflow, tmuxctl
 
 
-def cmd_ls(_):
+def cmd_ls(a):
+    machine = getattr(a, "machine", None)
+    if machine:   # another machine's sessions only
+        kind, where = remote.resolve(machine.rstrip(":"))
+        if kind == "trunk":
+            return remote.on_trunk(where, ["ls"])
+        rows, notes = remote.peer_lines()
+        rows = [r for r in rows if r[0].startswith(machine.rstrip(":") + ":")]
+        for r in rows:
+            print(f"{r[0]:<16} {r[1]:<12} {r[2]}")
+        for n in notes:
+            if n.startswith(machine.rstrip(":") + ":"):
+                print(n, file=sys.stderr)
+        return 0
     reg, live = sessions.registry(), tmuxctl.tmux_managed()
     try:
         status = (client.sock_request({"type": "status"}) or {}).get("sessions", {})
     except (OSError, ValueError):
         status = None
     names = sorted(set(reg) | set(live))
-    if not names:
+    rows, notes = remote.peer_lines()   # a trunk's grafts (none: nothing)
+    if not names and not rows:
         print("no sessions")
+        for n in notes:
+            print(n, file=sys.stderr)
         return 0
     print(f"{'NAME':<16} {'STATE':<12} PATH")
     for n in names:
@@ -28,6 +44,10 @@ def cmd_ls(_):
         else:
             st = status.get(n, {}).get("state", "unknown")
         print(f"{n:<16} {st:<12} {reg.get(n, {}).get('cwd', '?')}")
+    for r in rows:
+        print(f"{r[0]:<16} {r[1]:<12} {r[2]}")
+    for n in notes:
+        print(n, file=sys.stderr)
     if status is None:
         print("(grovyd not reachable: state shown from tmux only)", file=sys.stderr)
     return 0
@@ -277,7 +297,9 @@ def main(argv=None):
     s.add_argument("name"), s.add_argument("path")
     s.add_argument("claude_args", nargs=argparse.REMAINDER, help="extra claude arguments, after --")
     s.set_defaults(fn=cmd_new)
-    sub.add_parser("ls", help="list sessions").set_defaults(fn=cmd_ls)
+    s = sub.add_parser("ls", help="list sessions (a trunk's grafts' too; `ls MACHINE` for one other machine only)")
+    s.add_argument("machine", nargs="?", help="pc (a graft, on its trunk) or trunk (on a graft)")
+    s.set_defaults(fn=cmd_ls)
     for cmd, fn, h in (("attach", cmd_attach, "attach to the tmux session"),
                        ("kill", cmd_kill, "terminate a session"),
                        ("forget", cmd_forget, "remove an exited session from the registry")):
@@ -349,4 +371,6 @@ def main(argv=None):
     from . import peers   # imported here: hooks never load it
     peers.add_parser(sub)
     a = p.parse_args(argv)
+    if a.cmd in remote.COMMANDS and remote.split(getattr(a, "name", None))[0]:
+        return remote.run(a)   # MACHINE:NAME: another machine's session
     return a.fn(a)

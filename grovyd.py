@@ -27,7 +27,7 @@ from collections import deque
 from html import escape as html_escape
 from urllib.parse import urlsplit, parse_qs, quote, unquote
 
-from grovylib import claude, client, commands, core, newproject, notify, oom, pages, peers, plugins, tls
+from grovylib import claude, client, commands, core, newproject, notify, oom, pages, peers, plugins, terminal, tls, tmuxctl
 from grovylib.store import Store
 
 
@@ -658,6 +658,16 @@ class Http(http.server.BaseHTTPRequestHandler):
             if not entry:
                 return self._err(404, "not found")
             return self._send_file(entry["path"], entry["name"])
+        m = re.fullmatch(r"/api/sessions/([^/]+)/screen", path)
+        if m and core.valid_name(m.group(1)):   # `grovy logs pc:NAME` from the trunk: the pane's recent text
+            if self.headers.get("X-Grovy") != "1":
+                return self._err(403, "X-Grovy header missing")
+            n = parse_qs(url.query).get("lines", ["200"])[0]
+            try:
+                text = tmuxctl.capture(m.group(1), min(int(n), 5000) if n.isdigit() else 200)
+            except (ValueError, RuntimeError) as e:
+                return self._err(404, str(e))
+            return self._send(200, {"text": text})
         m = re.fullmatch(r"/api/sessions/([^/]+)/history", path)
         if m and core.valid_name(m.group(1)):
             qs = parse_qs(url.query)
@@ -714,6 +724,9 @@ class Http(http.server.BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/sessions/([^/]+)/attachments", urlsplit(self.path).path)
         if m:   # a raw file body, streamed to disk; octet-stream still forces a CORS preflight
             return self._upload(m.group(1), urlsplit(self.path).path)
+        m = re.fullmatch(r"/api/sessions/([^/]+)/terminal", urlsplit(self.path).path)
+        if m:   # `grovy attach pc:NAME` from the trunk (grovylib/terminal.py)
+            return self._terminal(m.group(1))
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
             return self._err(415, "Content-Type must be application/json")
         try:
@@ -903,6 +916,33 @@ class Http(http.server.BaseHTTPRequestHandler):
         if m and core.ID_RE.match(m.group(1)):
             return wrap(*store.cancel_prompt(m.group(1)))
         return 404, {"error": "not found"}
+
+    def _terminal(self, name):
+        """A terminal on a session, for `grovy attach` from another machine: only with GROVY_TERMINAL=on, only from
+        a client that sends the Upgrade header (a browser page can't), then relayed until either side ends it."""
+        if not terminal.enabled():
+            return self._err(403, "the terminal is off on this computer (its grovy setup, or GROVY_TERMINAL=on)")
+        if self.headers.get("X-Grovy") != "1" or self.headers.get("Upgrade") != terminal.UPGRADE:
+            return self._err(400, "not a terminal request")
+        if not core.valid_name(name) or not tmuxctl.tmux_alive(name):
+            return self._err(404, f"no live session {name!r} here")
+        def num(h, d):
+            v = self.headers.get(h, "")
+            return int(v) if v.isdigit() and 1 <= int(v) <= 1000 else d
+        term = self.headers.get("X-Term", "")
+        self.close_connection = True
+        self.send_response(101)
+        self.send_header("Upgrade", terminal.UPGRADE)
+        self.send_header("Connection", "Upgrade")
+        self.end_headers()
+        self.wfile.flush()
+        print(f"grovyd: terminal opened on {name}", file=sys.stderr, flush=True)
+        try:
+            terminal.serve(self.connection, name, num("X-Rows", 24), num("X-Cols", 80),
+                           term if terminal.TERM_RE.fullmatch(term) else "xterm-256color")
+        except OSError:
+            pass
+        print(f"grovyd: terminal closed on {name}", file=sys.stderr, flush=True)
 
     def _sse(self):
         self.send_response(200)

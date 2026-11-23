@@ -90,6 +90,7 @@ def current(rec):
         rec["bind"] = env["GROVY_BIND"]
     if env.get("GROVY_PORT", "").isdigit() and not rec.get("port"):
         rec["port"] = int(env["GROVY_PORT"])
+    rec.setdefault("terminal", env.get("GROVY_TERMINAL") == "on")
     if "https" not in rec:   # HTTPS is on when there is a certificate and the unit doesn't turn it off
         rec["https"] = os.path.exists(tls.own_cert()) and env.get("GROVY_TLS") != "off"
     rec.setdefault("role", "graft" if os.path.exists(graft.UNIT) else "trunk")
@@ -196,7 +197,7 @@ def cert_names(bind):
 
 # --- the changes --------------------------------------------------------------------------------------------------
 
-def plan_trunk(bind, port, https, systemd, rec, role="trunk"):
+def plan_trunk(bind, port, https, systemd, rec, role="trunk", terminal=False):
     """[(label, action)] for what has to change; empty if everything is already so. A graft's own grovy is planned
     the same way (on this computer only, without HTTPS), with role="graft"."""
     steps = []
@@ -231,7 +232,7 @@ def plan_trunk(bind, port, https, systemd, rec, role="trunk"):
     old = {k: rec.get(k) for k in ("bind", "port", "https")}
     was = f" (was {old['bind']}:{old['port']})" if old["bind"] and (old["bind"], old["port"]) != (bind, port) else ""
     if systemd:
-        unit = install.service_unit(bind, port, tls_off=not https)
+        unit = install.service_unit(bind, port, tls_off=not https, terminal=terminal)
         current = open(UNIT).read() if os.path.exists(UNIT) else None
         if current != unit:
             def do_unit():
@@ -269,9 +270,10 @@ def plan_trunk(bind, port, https, systemd, rec, role="trunk"):
             graft.leave(g, "now a trunk")
             install.update_record(graft=None)
         steps.append((f"stop the tunnel to {g.get('trunk') or 'the trunk'} and take this computer off it", do_leave))
-    if (old["bind"], old["port"], bool(old["https"])) != (bind, port, https) or rec.get("role") != role:
+    if (old["bind"], old["port"], bool(old["https"]), bool(rec.get("terminal"))) != (bind, port, https, terminal) or \
+            rec.get("role") != role:
         steps.append((None,   # not shown: grovy's own note of the answers, for cleanup and the next setup
-                      lambda: install.update_record(role=role, bind=bind, port=port, https=https,
+                      lambda: install.update_record(role=role, bind=bind, port=port, https=https, terminal=terminal,
                                                     **({"home": core.home_env()} if core.home_env() else {}))))
     return steps
 
@@ -445,9 +447,14 @@ def _setup_graft(a, rec, total):
     trunk, taken = graft.ask_trunk(rec, a.trunk)
     name = graft.ask_name(rec, taken, a.name)
     port = a.port if a.port is not None else ask_port("127.0.0.1", rec, _own_port())
+    term = tui.select(f"Let {trunk} open a terminal on this computer's sessions (grovy attach {name}:SESSION)?", [
+        {"label": "Yes", "value": True, "hint": f"a full terminal: whoever controls {trunk} can then run commands here"},
+        {"label": "No", "value": False, "hint": "the trunk can still list, start, stop and message them"},
+    ], default=0 if rec.get("terminal", True) else 1)
     systemd = not a.no_service and have_systemd()
     tui.step(4, total, "Review")
-    steps = plan_trunk("127.0.0.1", port, False, systemd, rec, role="graft") + graft.plan(trunk, name, port, systemd, rec)
+    steps = plan_trunk("127.0.0.1", port, False, systemd, rec, role="graft", terminal=term) + \
+        graft.plan(trunk, name, port, systemd, rec)
     if not review_and_apply(f"Ready to graft this computer onto {trunk} as {name}:", steps, a.dry_run):
         return 0 if a.dry_run or tui.interactive() else 2
     tui.say()

@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import select
 import socket
 import stat
 import subprocess
@@ -22,7 +23,7 @@ from unittest import mock
 import test_grovy as base   # its environment setup (private state, config and tmux) applies here too
 
 import grovyd  # noqa: E402
-from grovylib import core, pages, peers, sessions, store  # noqa: E402
+from grovylib import core, pages, peers, remote, sessions, store, terminal, tmuxctl  # noqa: E402
 
 TMP = base.TMP
 PEER_TOKEN = "peer-token-0123456789"
@@ -440,6 +441,103 @@ class TestPeerLink(PeerLink):
         code, d = self.get("/api/sessions")
         self.assertNotIn("peers", d)
         self.assertEqual([s["name"] for s in d["sessions"]], ["a"])
+
+
+class TestRemoteCli(PeerLink):
+    """`grovy attach/logs/ls pc:NAME` on the trunk: straight to the graft's grovy through its socket. The terminal
+    is real: a tmux session on a private server, relayed by the graft's grovyd, driven from a pseudo-terminal."""
+
+    def setUp(self):
+        super().setUp()
+        self.tsock = f"grovy-term-{os.getpid()}"
+        real_tmux = tmuxctl.tmux
+        for p in (mock.patch.object(terminal, "TMUX", ["tmux", "-L", self.tsock]),
+                  mock.patch.object(tmuxctl, "tmux_alive", lambda n: n == "t1"),
+                  mock.patch.object(tmuxctl, "tmux", lambda *a, **k: real_tmux("-L", self.tsock, *a, **k)),
+                  mock.patch.object(peers, "config_path", lambda: self.conf)):
+            p.start()
+            self.addCleanup(p.stop)
+        subprocess.run(["tmux", "-L", self.tsock, "-f", "/dev/null", "new-session", "-d", "-s", "grovy-t1", "-x", "80",
+                        "-y", "24", "cat"], check=True)
+        self.addCleanup(subprocess.run, ["tmux", "-L", self.tsock, "kill-server"], capture_output=True)
+        self.peerc = peers.Peer("pc", {"socket": self.sock, "token": PEER_TOKEN, "tls": False}, None)
+
+    def attach_in_pty(self, keys, until, env_on=True):
+        """Run terminal.attach in a child on a pseudo-terminal; send `keys` once `until` shows; return the output.
+        The graft's server runs here, in the parent: GROVY_TERMINAL is set for it, for the whole call."""
+        import pty
+        env = mock.patch.dict(os.environ, {"GROVY_TERMINAL": "on" if env_on else "off"})
+        env.start()
+        self.addCleanup(env.stop)
+        pid, fd = pty.fork()
+        if pid == 0:
+            code = 1
+            try:
+                code = terminal.attach(self.peerc, "t1")
+            except Exception as e:
+                os.write(2, f"ERR {e}\n".encode())
+            os._exit(code)
+        out, sent, end = b"", False, time.time() + 15
+        while time.time() < end:
+            r, _, _ = select.select([fd], [], [], 0.2)
+            if r:
+                try:
+                    data = os.read(fd, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                out += data
+            if not sent and until in out:
+                for k in keys:
+                    os.write(fd, k)
+                    time.sleep(0.3)
+                sent = True
+        _, status = os.waitpid(pid, 0)
+        os.close(fd)
+        return out, os.waitstatus_to_exitcode(status)
+
+    def test_attach_types_and_detaches(self):
+        out, code = self.attach_in_pty([b"hello-from-trunk\r", b"\x02d"], b"")
+        self.assertIn(b"hello-from-trunk", out)
+        self.assertEqual(code, 0, out[-400:])
+        shown = tmuxctl.tmux("capture-pane", "-p", "-t", "=grovy-t1:").stdout
+        self.assertIn("hello-from-trunk", shown)          # it reached the session itself
+
+    def test_attach_is_refused_unless_the_graft_allows_it(self):
+        out, code = self.attach_in_pty([], b"", env_on=False)
+        self.assertNotEqual(code, 0)
+        self.assertIn(b"the terminal is off on this computer", out)
+
+    def test_a_browser_cant_open_a_terminal(self):
+        """Without the Upgrade header (which fetch() can't send) the endpoint refuses."""
+        with mock.patch.dict(os.environ, {"GROVY_TERMINAL": "on"}):
+            code, obj = self.peerc.call("POST", "/api/sessions/t1/terminal", {})
+        self.assertEqual(code, 400)
+
+    def test_logs_and_ls_through_the_socket(self):
+        tmuxctl.tmux("send-keys", "-t", "=grovy-t1:", "visible-line", "Enter")
+        time.sleep(0.3)
+        code, obj = self.peerc.call("GET", "/api/sessions/t1/screen?lines=50")
+        self.assertEqual(code, 200)
+        self.assertIn("visible-line", obj["text"])
+        rows, notes = remote.peer_lines()
+        self.assertIn(("pc:a", "/pc/a"), [(r[0], r[2]) for r in rows], (rows, notes))
+
+    def test_names_pick_the_machine(self):
+        self.assertEqual(remote.split("pc:a"), ("pc", "a"))
+        self.assertEqual(remote.split("a"), (None, "a"))
+        kind, p = remote.resolve("pc")
+        self.assertEqual((kind, p.name), ("peer", "pc"))
+        with self.assertRaises(SystemExit):
+            remote.resolve("nope")
+
+    def test_trunk_commands_go_over_ssh(self):
+        with mock.patch.object(remote, "trunk_host", lambda: "me@hub"), mock.patch.object(os, "execvp") as ex:
+            remote.run(types.SimpleNamespace(cmd="attach", name="trunk:Grovy"))
+        argv = ex.call_args[0][1]
+        self.assertEqual(argv[:4], ["ssh", "-t", "--", "me@hub"])
+        self.assertIn("exec \"$g\" attach Grovy", argv[4])
 
 
 class TestHostilePeer(PeerLink):

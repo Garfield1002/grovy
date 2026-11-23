@@ -167,14 +167,15 @@ WantedBy=default.target
 """
 
 
-def service_unit(bind, port, path=None, tls_off=False):
+def service_unit(bind, port, path=None, tls_off=False, terminal=False):
     path = path if path is not None else os.environ.get("PATH", "/usr/bin:/bin")
     path = ":".join(dict.fromkeys(p for p in path.split(":") if p))   # de-duplicated, order kept
     q = lambda v: str(v).replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')   # noqa: E731  systemd: % specifiers, quotes
     dirs = "".join(f'Environment="{k}={q(v)}"\n' for k, v in (("GROVY_HOME", core.home_env()),
                                                                ("GROVY_STATE_DIR", core.env("STATE_DIR"))) if v)
     return SERVICE_UNIT.format(exe=q(os.path.join(core.HERE, "grovy")), bind=q(bind), port=int(port), path=q(path),
-                               tls="Environment=GROVY_TLS=off\n" if tls_off else "", dirs=dirs)
+                               tls=("Environment=GROVY_TLS=off\n" if tls_off else "") +
+                               ("Environment=GROVY_TERMINAL=on\n" if terminal else ""), dirs=dirs)
 
 
 def _port_busy(bind, port):

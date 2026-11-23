@@ -173,6 +173,7 @@ wipe a home. It refuses to run inside a grovy session, which it would cut off. T
 | `GROVY_TLS` | on | `off` = plain HTTP even if there is a certificate |
 | `GROVY_AUTH` | `on` | `off` = don't require the token (enrollment only) |
 | `GROVY_STATE_DIR` | `$XDG_STATE_HOME/grovy` → `~/.local/state/grovy` | all state, mode 0700 |
+| `GROVY_TERMINAL` | `off` | `on` = another machine (this one's trunk) may open a terminal on this machine's sessions (`grovy attach pc:NAME`, see "Other machines") |
 | `GROVY_HOME` | `$XDG_CONFIG_HOME/grovy` → `~/.config/grovy` | your own files: `custom.css`/`custom.js`, `instructions.md`, `plugins/`, `peers.json` (`GROVY_CONFIG_DIR` is the older name; `GROVY_HOME` wins). Passed on to sessions started from it |
 | `GROVY_PERMISSION_TIMEOUT` | `600` | seconds a permission waits for the phone (fixed per session at `grovy new`) |
 | `GROVY_CLAUDE` | `claude` | claude executable |
@@ -781,6 +782,22 @@ revokes it too. Sharing exists **only on the phone**: there is no CLI or socket 
 session can publish pages but can't make one public.
 
 ## Other machines (peers)
+
+**The CLI on another machine's sessions (`grovylib/remote.py`).** `MACHINE:NAME` names a session elsewhere (local
+names never hold a colon). On a trunk, MACHINE is a graft from peers.json: `attach`, `logs`, `kill`, `resume`,
+`forget`, `rename`, `new` (no extra claude arguments, no `--fresh`) go straight to that graft's grovy through its
+tunnel socket with the token from peers.json (`peers.Peer` without a hub; the daemon isn't involved), and `grovy ls`
+lists every graft's sessions after the local ones (`grovy ls pc`: that graft's only; an offline graft is a line on
+stderr). On a graft, MACHINE is `trunk`: the command runs there as `ssh [-t] TRUNK sh -c 'exec grovy …'` with your
+usual ssh (the tunnel's key can't run commands). `logs` reads `GET /api/sessions/NAME/screen?lines=N` (X-Grovy).
+**attach** (`grovylib/terminal.py`): `POST /api/sessions/NAME/terminal` with the token, `X-Grovy: 1` and `Upgrade:
+grovy-terminal` (a browser can't send Upgrade) gets `101`, then the graft's grovyd runs `tmux attach-session -t
+=grovy-NAME` in a pseudo-terminal (TERM and size from `X-Term`/`X-Rows`/`X-Cols`) and relays it: its output as
+raw bytes; input as frames (type byte, 2-byte length; type 0 keys, type 1 rows+cols). Detaching (C-b d) or the
+session ending closes it; either side closing kills the attach. Only with `GROVY_TERMINAL=on` in the graft's
+environment (setup asks a graft, default yes, and writes it into the unit): it is a full terminal (tmux runs
+commands), so whoever holds the token, i.e. the trunk, can then run anything as you on the graft. Off, the trunk
+still lists, starts, stops and messages the sessions, as the phone does.
 
 **Setting one up (`grovy setup`, role "graft", `grovylib/graft.py`).** In setup's words the hub is the *trunk* and a
 peer is a *graft*. Setup on the PC: picks the trunk (Host entries of `~/.ssh/config`, or a typed `user@host`) and
