@@ -1142,14 +1142,20 @@ def prepare_script(name, remote=None):
     return f's={path} && mkdir -p "$(dirname "$s")" && rm -f "$s" && printf "%s\\n" "$s"'
 
 
-def prepare_argv(host, name, remote=None, ssh="ssh"):
+def _key_opts(identity):
+    """ssh options to log in with this key only (grovy setup's dedicated tunnel key), not the agent's others."""
+    return ["-i", identity, "-o", "IdentitiesOnly=yes"] if identity else []
+
+
+def prepare_argv(host, name, remote=None, ssh="ssh", identity=None):
     # The remote login shell parses the command line: one sh -c with the script quoted, the same in sh, bash and zsh.
-    return [ssh, *SSH_OPTS, "--", host, "sh -c " + shlex.quote(prepare_script(name, remote))]
+    # A key restricted by grovy setup runs its forced command instead, which does the same for its one socket.
+    return [ssh, *SSH_OPTS, *_key_opts(identity), "--", host, "sh -c " + shlex.quote(prepare_script(name, remote))]
 
 
-def tunnel_argv(host, sock, port, ssh="ssh", local="127.0.0.1"):
+def tunnel_argv(host, sock, port, ssh="ssh", local="127.0.0.1", identity=None):
     # 127.0.0.1, not "localhost" (which may resolve to ::1 first, where grovy doesn't listen by default)
-    return [ssh, *SSH_OPTS, *TUNNEL_OPTS, "-R", f"{sock}:{local}:{port}", "--", host]
+    return [ssh, *SSH_OPTS, *_key_opts(identity), *TUNNEL_OPTS, "-R", f"{sock}:{local}:{port}", "--", host]
 
 
 def check_remote_socket(path):
@@ -1160,7 +1166,8 @@ def check_remote_socket(path):
 
 
 def run_tunnel(host, name, port, remote=None, ssh="ssh", run=subprocess.run, popen=subprocess.Popen,
-               sleep=time.sleep, clock=time.monotonic, rounds=None, out=sys.stderr, local="127.0.0.1", prepare=True):
+               sleep=time.sleep, clock=time.monotonic, rounds=None, out=sys.stderr, local="127.0.0.1", prepare=True,
+               identity=None):
     """Keep the reverse tunnel up: prepare, connect, wait for ssh to end, back off, repeat (forever unless rounds).
     prepare=False skips the remote shell (for a key restricted to forwarding): remote is then the absolute path, and
     a stale socket is the hub's sshd's business (StreamLocalBindUnlink yes)."""
@@ -1172,7 +1179,7 @@ def run_tunnel(host, name, port, remote=None, ssh="ssh", run=subprocess.run, pop
         start = clock()
         try:
             if prepare:
-                r = run(prepare_argv(host, name, remote, ssh), capture_output=True, text=True, timeout=60,
+                r = run(prepare_argv(host, name, remote, ssh, identity), capture_output=True, text=True, timeout=60,
                         stdin=subprocess.DEVNULL)
                 lines = (r.stdout or "").strip().splitlines()
             else:
@@ -1187,7 +1194,7 @@ def run_tunnel(host, name, port, remote=None, ssh="ssh", run=subprocess.run, pop
             else:
                 sock = lines[-1]
                 say(f"forwarding {host}:{sock} -> {local}:{port}")
-                p = popen(tunnel_argv(host, sock, port, ssh, local), stdin=subprocess.DEVNULL)
+                p = popen(tunnel_argv(host, sock, port, ssh, local, identity), stdin=subprocess.DEVNULL)
                 try:
                     code = p.wait()
                 except KeyboardInterrupt:
@@ -1217,6 +1224,8 @@ def cmd_tunnel(a):
     if a.no_prepare and (rs is None or check_remote_socket(rs)):
         core.die("--no-prepare needs --remote-socket with the socket's absolute path on the hub (no ~: no remote "
                  "shell expands it), e.g. --remote-socket /home/you/.local/state/grovy/peers/pc.sock")
+    if a.identity and not os.path.isfile(os.path.expanduser(a.identity)):
+        core.die(f"--identity: no key file {a.identity!r}")
     if not re.fullmatch(r"[0-9a-fA-F.:]{2,45}|localhost", a.local_host):
         core.die("--local-host: an IP address (where this machine's grovy listens)")
     try:
@@ -1225,7 +1234,8 @@ def cmd_tunnel(a):
         print(f"grovy peer tunnel: warning: nothing answers on {a.local_host}:{a.port} yet (is grovy serving here?)",
               file=sys.stderr)
     try:
-        return run_tunnel(a.host, a.name, a.port, a.remote_socket, local=a.local_host, prepare=not a.no_prepare)
+        return run_tunnel(a.host, a.name, a.port, a.remote_socket, local=a.local_host, prepare=not a.no_prepare,
+                          identity=os.path.expanduser(a.identity) if a.identity else None)
     except KeyboardInterrupt:
         return 0
 
@@ -1249,6 +1259,7 @@ def add_parser(sub):
     x.add_argument("--remote-socket", help="socket path on the hub (default: ~/.local/state/grovy/peers/NAME.sock)")
     x.add_argument("--port", type=int, default=core.env_int("PORT", 7333), help="this machine's grovy port")
     x.add_argument("--local-host", default="127.0.0.1", help="the address this machine's grovy listens on")
+    x.add_argument("--identity", help="log in with this ssh key only (grovy setup uses ~/.ssh/grovy_tunnel)")
     x.add_argument("--no-prepare", action="store_true",
                    help="run no command on the hub, only the forward (for a key restricted to forwarding); "
                         "needs --remote-socket ABSOLUTE-PATH, its folder made once by hand")

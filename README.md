@@ -98,43 +98,24 @@ grovy doctor                   # check that everything is in order
 
 ## Another computer
 
-One grovy (the *hub*, say your server) can also show the sessions of another computer (say your PC, even one with
-no public address), next to its own. Each computer runs its own grovy as usual and keeps working on its own; the PC
-connects to the hub over SSH, so it needs no open port. Its sessions show as `pc:NAME` with a small "pc" label, and
-＋ asks which machine to start on.
+One grovy (the *trunk*, or hub, say your server) can also show the sessions of another computer (a *graft*, or
+worker, say your PC, even one with no public address), next to its own. Each computer runs its own grovy and keeps
+working on its own; the PC connects to the trunk over SSH, so it needs no open port. Its sessions show as `pc:NAME`
+with a small "pc" label, and ＋ asks which machine to start on.
 
-1. On the PC: install grovy (`grovy setup`; it can listen on this computer only). Check that `ssh HUB` works from
-   the PC with a key and no password prompt.
-2. Give the hub the PC's login token (from the PC):
-   `grovy peer token | ssh HUB '~/.local/bin/grovy peer add pc'`
-   (or run `grovy peer token` on the PC, then `grovy peer add pc` on the hub and paste it).
-3. On the PC, connect: `grovy peer tunnel HUB`. It reconnects by itself whenever the connection drops. To keep it
-   running, either in tmux (`tmux new -d -s grovy-tunnel grovy peer tunnel HUB`) or as a service:
+1. Set up the trunk first (`grovy setup` there, "Trunk").
+2. On the PC, run `grovy setup` and pick **Graft**. It asks which machine is the trunk (from your `~/.ssh/config`,
+   or an address), checks it, and asks this computer's name there. It then makes a key just for the connection,
+   adds it on the trunk (your usual ssh login, once; a password is fine), and runs the connection as a service that
+   reconnects by itself. It ends by checking that the trunk sees the PC.
 
-   ```ini
-   # ~/.config/systemd/user/grovy-tunnel.service, then: systemctl --user enable --now grovy-tunnel
-   [Unit]
-   Description=grovy: show this computer's sessions on the hub
-   After=network-online.target
+**Mind the key:** the trunk only lets that key keep the connection (no shell, no other commands), but treat the PC
+as trusted all the same: details in `docs/DESIGN.md` ("Other machines").
 
-   [Service]
-   ExecStart=%h/.local/bin/grovy peer tunnel HUB --name pc
-   Restart=always
-   RestartSec=10
-
-   [Install]
-   WantedBy=default.target
-   ```
-
-   (A service has no ssh-agent: use a key without a passphrase for it, or set `SSH_AUTH_SOCK`.)
-
-**Mind the key:** the PC's ssh key logs in to the hub, so whoever controls the PC can act as you on the hub. To
-narrow it to the tunnel, use the restricted `authorized_keys` entry and `--no-prepare` described in `docs/DESIGN.md`
-("Other machines"); even then, treat the PC as trusted.
-
-`grovy peer ls` on the hub says whether the PC is online; `grovy peer rm pc` removes it. While the PC is off, its
-sessions show as "unknown" and the home screen says so. What works on the hub only (new issues, new projects) and
-other limits are in `docs/DESIGN.md` ("Other machines").
+`grovy peer ls` on the trunk says whether the PC is online. `grovy cleanup` on the PC removes it from the trunk too.
+While the PC is off, its sessions show as "unknown" and the home screen says so. What works on the trunk only (new
+issues, new projects) and other limits are in `docs/DESIGN.md` ("Other machines"). (By hand, without setup:
+`grovy peer token | ssh HUB '~/.local/bin/grovy peer add pc'`, then `grovy peer tunnel HUB --name pc` on the PC.)
 
 ## Make it yours
 

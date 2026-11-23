@@ -39,7 +39,7 @@ for _k in ("GROVY_HOME", "CCS_HOME", "GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
     os.environ.pop(_k, None)
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
-from grovylib import plugins, claude, cleanup, client, setupflow, tui, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tls, tmuxctl, uploads  # noqa: E402
+from grovylib import peers, plugins, claude, cleanup, client, graft, setupflow, tui, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tls, tmuxctl, uploads  # noqa: E402
 
 
 def ev(name, **kw):
@@ -912,7 +912,7 @@ class TestCleanup(unittest.TestCase):
     def test_dry_run_changes_nothing(self):
         link = self.link(os.path.join(core.HERE, "grovy"))
         rc, out = self.run_cleanup("--dry-run", "--remove-home")
-        self.assertIn("remove " + link, out)
+        self.assertIn("remove ~/.local/bin/grovy", out)
         self.assertTrue(os.path.lexists(link) and os.path.isdir(self.state) and os.path.isdir(self.cfg))
 
     def test_never_removes_a_folder_that_isnt_grovys(self):
@@ -1039,6 +1039,149 @@ class TestSetupFlow(unittest.TestCase):
                 mock.patch.object(tui, "select", lambda q, opts, default=0: "remove"), \
                 mock.patch.object(cleanup, "cmd_cleanup", lambda a: 7) as c:
             self.assertEqual(grovy.main(["setup"]), 7)
+
+
+class TestGraft(unittest.TestCase):
+    """The graft half of setup: probing the trunk, the scripts it runs there, the tunnel key and unit, cleanup."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(dir=TMP)
+        for p in (mock.patch.object(graft, "KEY", os.path.join(self.home, ".ssh", "grovy_tunnel")),
+                  mock.patch.object(graft, "UNIT", os.path.join(self.home, "grovy-tunnel.service"))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_remote(self, script, stdin, home=None):
+        """Run a trunk-side script for real, in a fake trunk home whose `grovy` logs its arguments and stdin."""
+        home = home or self.home
+        os.makedirs(os.path.join(home, ".local", "bin"), exist_ok=True)
+        fake = os.path.join(home, ".local", "bin", "grovy")
+        with open(fake, "w") as f:
+            f.write('#!/bin/sh\nif [ "$1 $2" = "peer -h" ]; then exit 0; fi\n'
+                    'printf "%s|%s\\n" "$*" "$(cat)" >> "$HOME/grovy.log"\n')
+        os.chmod(fake, 0o755)
+        env = {"HOME": home, "PATH": "/usr/bin:/bin"}
+        return subprocess.run(["sh", "-c", script], input=stdin, capture_output=True, text=True, env=env, timeout=20)
+
+    def keypair(self):
+        os.makedirs(os.path.dirname(graft.KEY), exist_ok=True)
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "t", "-f", graft.KEY], check=True,
+                       capture_output=True)
+        return graft.public_key()
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_add_script_writes_a_restricted_line_and_keeps_the_others(self):
+        trunk = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(trunk, ".ssh"))
+        ak = os.path.join(trunk, ".ssh", "authorized_keys")
+        with open(ak, "w") as f:
+            f.write("ssh-ed25519 AAAAothersothersothersothers me@laptop\n")
+        pub = self.keypair()
+        script = graft.ADD_SCRIPT.replace("@NAME@", "pc").replace("@RMOLD@", ":")
+        for _ in range(2):   # a rerun replaces our line rather than adding a second
+            r = self.run_remote(script, f"TOKEN123\n{pub}\n", trunk)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        sock = os.path.join(trunk, ".local", "state", "grovy", "peers", "pc.sock")
+        self.assertIn("SOCKET=" + sock, r.stdout)
+        lines = open(ak).read().splitlines()
+        self.assertEqual(lines[0], "ssh-ed25519 AAAAothersothersothersothers me@laptop")
+        self.assertEqual(lines[1:], [f'restrict,port-forwarding,permitopen="127.0.0.1:9",'
+                                     f'command="rm -f {sock}; echo {sock}" {pub} grovy-tunnel:pc'])
+        self.assertEqual(os.stat(os.path.join(trunk, ".local", "state", "grovy", "peers")).st_mode & 0o777, 0o700)
+        log = open(os.path.join(trunk, "grovy.log")).read()
+        self.assertIn(f"peer add pc --socket {sock}|TOKEN123", log)     # the token on stdin, never in argv
+        out = subprocess.run(["ssh-keygen", "-l", "-f", ak], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)                   # OpenSSH reads our line, options and all
+        self.assertIn("grovy-tunnel:pc", out.stdout)
+
+    def test_add_script_refuses_an_empty_key(self):
+        """An empty pattern would make `grep -v` drop every line of authorized_keys."""
+        trunk = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(trunk, ".ssh"))
+        ak = os.path.join(trunk, ".ssh", "authorized_keys")
+        with open(ak, "w") as f:
+            f.write("ssh-ed25519 AAAAkeepkeepkeepkeepkeep me\n")
+        r = self.run_remote(graft.ADD_SCRIPT.replace("@NAME@", "pc").replace("@RMOLD@", ":"), "TOKEN\n\n", trunk)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(open(ak).read(), "ssh-ed25519 AAAAkeepkeepkeepkeepkeep me\n")
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_remove_script_takes_only_our_line(self):
+        trunk = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(trunk, ".ssh"))
+        pub = self.keypair()
+        ak = os.path.join(trunk, ".ssh", "authorized_keys")
+        with open(ak, "w") as f:
+            f.write(f"ssh-ed25519 AAAAkeepkeepkeepkeepkeep me\nrestrict,command=\"x\" {pub} grovy-tunnel:pc\n")
+        r = self.run_remote(graft.REMOVE_SCRIPT.replace("@NAME@", "pc"), pub + "\n", trunk)
+        self.assertIn("REMOVED", r.stdout)
+        self.assertEqual(open(ak).read(), "ssh-ed25519 AAAAkeepkeepkeepkeepkeep me\n")
+        self.assertIn("peer rm pc", open(os.path.join(trunk, "grovy.log")).read())
+
+    def test_probe_reads_the_trunk(self):
+        def answer(out, code=0, err=""):
+            return lambda argv, **kw: subprocess.CompletedProcess(argv, code, out, err)
+        names, why = graft.probe("hub", run=answer("OK\npc\t/s/pc.sock\tonline\nbox\t/s/box.sock\toffline, last seen\n"))
+        self.assertEqual(names, {"pc": "online", "box": "offline, last seen"})
+        self.assertIn("isn't installed", graft.probe("hub", run=answer("NOGROVY\n"))[1])
+        self.assertIn("too old", graft.probe("hub", run=answer("OLDGROVY\n"))[1])
+        self.assertIn("Permission denied", graft.probe("hub", run=answer("", 255, "Permission denied"))[1])
+        self.assertIn("isn't an ssh destination", graft.probe("-oProxyCommand=x")[1])
+
+    def test_ssh_hosts_and_default_name(self):
+        cfg = os.path.join(self.home, "config")
+        with open(cfg, "w") as f:
+            f.write("Host *\n  User x\nHost hub hub2\n  HostName 1.2.3.4\nhost !bad box-*  srv\n")
+        self.assertEqual(graft.ssh_hosts(cfg), ["hub", "hub2", "srv"])
+        with mock.patch.object(socket, "gethostname", lambda: "My_Laptop.local"):
+            self.assertEqual(graft.default_name(), "my_laptop")
+        with mock.patch.object(socket, "gethostname", lambda: "..."):
+            self.assertEqual(graft.default_name(), "pc")
+
+    def test_tunnel_unit_and_the_tunnel_uses_the_key(self):
+        u = graft.tunnel_unit("me@hub%1", "pc", 7334, path="/bin")
+        self.assertIn(f"peer tunnel me@hub%%1 --name pc --port 7334 --identity {graft.KEY}", u)
+        self.assertIn("Restart=always", u)
+        argv = peers.tunnel_argv("hub", "/s/pc.sock", 7334, identity="/k")
+        self.assertEqual(argv[argv.index("-i") + 1], "/k")
+        self.assertIn("IdentitiesOnly=yes", argv)
+        self.assertNotIn("-i", peers.tunnel_argv("hub", "/s/pc.sock", 7334))
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_plan_makes_the_key_adds_to_the_trunk_and_records_it(self):
+        sent = {}
+
+        def fake_ssh(host, script, input=None, **kw):
+            sent.update(host=host, script=script, input=input)
+            return subprocess.CompletedProcess([], 0, "SOCKET=/h/.local/state/grovy/peers/pc.sock\n", "")
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": os.path.join(self.home, "st-grovy")}), \
+                mock.patch.object(graft, "ssh", fake_ssh), mock.patch.object(core, "load_token", lambda **k: "TOK"):
+            steps = graft.plan("hub", "pc", 7334, False, {})
+            self.assertEqual(len(steps), 2)          # key, trunk (no systemd: no unit)
+            for _, act in steps:
+                act()
+            rec = install.read_record()
+            self.assertEqual(rec["graft"], {"trunk": "hub", "name": "pc", "socket": "/h/.local/state/grovy/peers/pc.sock",
+                                            "key": graft.KEY})
+            self.assertEqual(sent["input"].splitlines(), ["TOK", graft.public_key()])
+            self.assertNotIn("TOK", sent["script"])  # the token travels on stdin only
+            self.assertEqual(graft.plan("hub", "pc", 7334, False, rec), [])   # same answers: nothing to do
+
+    def test_cleanup_takes_the_graft_off_its_trunk_and_removes_the_key(self):
+        os.makedirs(os.path.dirname(graft.KEY))
+        for p in (graft.KEY, graft.KEY + ".pub"):
+            open(p, "w").close()
+        rec = {"graft": {"trunk": "hub", "name": "pc", "key": graft.KEY}}
+        with mock.patch.object(graft, "remove_on_trunk") as rm, mock.patch.object(client, "sock_request",
+                                                                                 mock.Mock(side_effect=OSError)):
+            steps, _ = cleanup.plan(rec, False)
+            labels = [l for l, _ in steps]
+            self.assertIn("on hub: remove this computer (pc) and its tunnel key line", labels)
+            for label, act in steps:
+                if "hub" in label or "tunnel key" in label:
+                    act()
+        rm.assert_called_once_with(rec["graft"])
+        self.assertFalse(os.path.exists(graft.KEY) or os.path.exists(graft.KEY + ".pub"))
 
 
 class TestSetupAndCustomCss(unittest.TestCase):

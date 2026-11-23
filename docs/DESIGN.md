@@ -768,6 +768,27 @@ session can publish pages but can't make one public.
 
 ## Other machines (peers)
 
+**Setting one up (`grovy setup`, role "graft", `grovylib/graft.py`).** In setup's words the hub is the *trunk* and a
+peer is a *graft*. Setup on the PC: picks the trunk (Host entries of `~/.ssh/config`, or a typed `user@host`) and
+probes it over your usual ssh (`grovy peer -h` there: missing or too old grovy is said so before anything changes),
+asks the name (the short host name by default), and plans the graft's own grovy on 127.0.0.1 (no HTTPS) plus: a
+dedicated key `~/.ssh/grovy_tunnel` (ed25519, no passphrase: the service has no agent), one ssh run on the trunk
+(`graft.ADD_SCRIPT`: this grovy's token and the public key on stdin, never in argv; it replaces any line holding the
+same key in `~/.ssh/authorized_keys` and appends
+`restrict,port-forwarding,permitopen="127.0.0.1:9",command="rm -f SOCK; echo SOCK" KEY grovy-tunnel:NAME`, makes
+the socket's folder 0700, runs `grovy peer add NAME --socket SOCK`, prints the path; it refuses an empty key, since
+an empty `grep -v` pattern would drop every line, and a socket path with characters outside `[A-Za-z0-9/._-]`), and
+the `grovy-tunnel` user service (`grovy peer tunnel TRUNK --name NAME --port PORT --identity KEY`, `Restart=always`).
+The forced command *is* the tunnel's preparation for that one socket (remove a stale one, print the path), so the
+normal `grovy peer tunnel` works with the restricted key whatever the trunk's `StreamLocalBindUnlink`. Setup's own
+logins share one ssh connection (`ControlMaster`, a private temporary `ControlPath`, closed at exit), so a password
+is asked once. It ends by polling `grovy peer ls` on the trunk until the graft shows online (30s), else it says where
+to look. `grovy cleanup` on the graft runs `graft.REMOVE_SCRIPT` on the trunk (drops the key's line, `grovy peer rm
+NAME`; best effort, printing what to run there by hand if the trunk can't be reached) and deletes the key it made.
+Checked against OpenSSH 10.0 (a private sshd, default `StreamLocalBindUnlink no`): a command asked for over the key
+runs the forced command instead, `-L` is refused, and the tunnel comes up over a stale socket.
+
+
 One grovy (the **hub**) can show and command the sessions of grovy daemons on other machines (**peers**, e.g. a PC
 with no public address) next to its own. All of it is `grovylib/peers.py`. Its state (each link, the peer's last
 session and page lists) is not `Store` state: it lives in `Peers`/`Peer` under their own locks, and they call

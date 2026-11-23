@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-from . import claude, client, cleanup, core, install, qr, tls, tui
+from . import claude, client, cleanup, core, graft, install, qr, tls, tui
 
 UNIT = os.path.expanduser("~/.config/systemd/user/grovy.service")
 
@@ -173,8 +173,9 @@ def cert_names(bind):
 
 # --- the changes --------------------------------------------------------------------------------------------------
 
-def plan_trunk(bind, port, https, systemd, rec):
-    """[(label, action)] for what has to change; empty if everything is already so."""
+def plan_trunk(bind, port, https, systemd, rec, role="trunk"):
+    """[(label, action)] for what has to change; empty if everything is already so. A graft's own grovy is planned
+    the same way (on this computer only, without HTTPS), with role="graft"."""
     steps = []
     bindir = os.path.expanduser("~/.local/bin")
     link, target = os.path.join(bindir, "grovy"), os.path.join(core.HERE, "grovy")
@@ -235,9 +236,9 @@ def plan_trunk(bind, port, https, systemd, rec):
                                        ": without it grovy starts when you log in")
                 install.update_record(linger=True)
             steps.append(("keep running after you log out (linger)", do_linger))
-    if (old["bind"], old["port"], bool(old["https"])) != (bind, port, https) or rec.get("role") != "trunk":
+    if (old["bind"], old["port"], bool(old["https"])) != (bind, port, https) or rec.get("role") != role:
         steps.append((None,   # not shown: grovy's own note of the answers, for cleanup and the next setup
-                      lambda: install.update_record(role="trunk", bind=bind, port=port, https=https,
+                      lambda: install.update_record(role=role, bind=bind, port=port, https=https,
                                                     **({"home": core.home_env()} if core.home_env() else {}))))
     return steps
 
@@ -337,11 +338,13 @@ def cmd_setup(a):
 def _setup(a):
     rec = install.read_record()
     set_up = bool(rec.get("role")) or os.path.exists(UNIT)
-    flags = a.bind or a.port or a.role
+    flags = a.bind or a.port or a.role or a.trunk
     welcome()
     if set_up and not flags and tui.interactive():
         tui.say()
         where = f"{rec.get('bind')}:{rec.get('port')}" if rec.get("bind") else "settings unknown"
+        if rec.get("role") == "graft" and (rec.get("graft") or {}).get("trunk"):
+            where = f"on {rec['graft']['trunk']} as {rec['graft'].get('name')}"
         what = tui.select(f"grovy is set up here ({rec.get('role', 'trunk')}, {where}"
                           f"{', HTTPS' if rec.get('https') else ''}). What now?", [
             {"label": "Change settings", "value": "change", "hint": "your current answers are preselected"},
@@ -360,16 +363,14 @@ def _setup(a):
     tui.step(2, total, "Role")
     role = a.role or ask_role(rec)
     if role == "graft":
-        core.die("graft: not ready yet (it's the next part of this change)")
+        return _setup_graft(a, rec, total)
     tui.step(3, total, "Network")
     bind = a.bind or ask_bind(rec)
     try:
         ipaddress.ip_address(bind)
     except ValueError:
         core.die(f"{bind!r} is not an IP address")
-    st = daemon_status()
-    m = re.match(r"https?://.+:(\d+)", st.get("url", ""))
-    port = a.port if a.port is not None else ask_port(bind, rec, int(m.group(1)) if m else None)
+    port = a.port if a.port is not None else ask_port(bind, rec, _own_port())
     https = a.https if a.https is not None else ask_https(bind, rec)
     systemd = not a.no_service and have_systemd()
     tui.step(4, total, "Review")
@@ -382,9 +383,43 @@ def _setup(a):
     return 0
 
 
+def _own_port():
+    m = re.match(r"https?://.+:(\d+)", daemon_status().get("url", ""))
+    return int(m.group(1)) if m else None
+
+
+def _setup_graft(a, rec, total):
+    if not shutil.which("ssh") or not shutil.which("ssh-keygen"):
+        core.die("a graft needs ssh and ssh-keygen (OpenSSH client): install them first")
+    tui.step(3, total, "Trunk")
+    trunk, taken = graft.ask_trunk(rec, a.trunk)
+    name = graft.ask_name(rec, taken, a.name)
+    port = a.port if a.port is not None else ask_port("127.0.0.1", rec, _own_port())
+    systemd = not a.no_service and have_systemd()
+    tui.step(4, total, "Review")
+    steps = plan_trunk("127.0.0.1", port, False, systemd, rec, role="graft") + graft.plan(trunk, name, port, systemd, rec)
+    if not review_and_apply(f"Ready to graft this computer onto {trunk} as {name}:", steps, a.dry_run):
+        return 0
+    tui.say()
+    if not systemd:
+        tui.warn("no systemd user session here: start grovy and the tunnel yourself, e.g. in tmux:")
+        tui.say(f"    tmux new -d -s grovyd 'GROVY_PORT={port} {os.path.join(core.HERE, 'grovy')} serve'")
+        tui.say(f"    {graft.tunnel_command(trunk, name, port)}")
+    tui.note(f"  waiting for {trunk} to see this computer…")
+    if graft.wait_online(trunk, name):
+        tui.ok(f"Connected to {trunk}. This computer's sessions now appear there as {name}:…")
+    else:
+        tui.warn(f"{trunk} doesn't see this computer yet. Check the tunnel: journalctl --user -u grovy-tunnel "
+                 f"(and on {trunk}: grovy peer ls)")
+    next_steps()
+    return 0
+
+
 def add_parser(sub):
     s = sub.add_parser("setup", help="guided install: the grovy command, the service, the login link (grovy cleanup undoes it)")
     s.add_argument("--role", choices=("trunk", "graft"), help="trunk: a grovy of its own (default); graft: join a trunk")
+    s.add_argument("--trunk", help="graft: the trunk's ssh address (user@host, or a name from ~/.ssh/config)")
+    s.add_argument("--name", help="graft: this computer's name on the trunk (default: its host name)")
     s.add_argument("--bind", help="address to listen on (asked if omitted)")
     s.add_argument("--port", type=int, help="TCP port to listen on (asked if omitted)")
     s.add_argument("--https", action=argparse.BooleanOptionalAction, default=None, help="serve HTTPS (--no-https: plain HTTP)")

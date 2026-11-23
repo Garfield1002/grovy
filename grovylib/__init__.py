@@ -22,6 +22,7 @@ Claude sessions (used by the CLI and the daemon):
 Command line:
   cli.py         the `grovy` subcommands
   setupflow.py   `grovy setup`: the guided install (questions, one review, then apply)
+  graft.py       setup's graft role: joining a trunk over ssh with a restricted key (and its cleanup)
   install.py     doctor, url, tls init, and what setup and cleanup share (service unit, setup record, links)
   cleanup.py     `grovy cleanup`: undoes setup (from its record, setup.json)
   tls.py         optional HTTPS: which certificate the daemon serves; the one `grovy tls init` makes
