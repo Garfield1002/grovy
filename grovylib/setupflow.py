@@ -100,7 +100,7 @@ def current(rec):
 # --- the questions ------------------------------------------------------------------------------------------------
 
 def welcome():
-    tui.tree(["grovy", "Claude Code sessions in tmux,", "followed and driven from a browser.",
+    tui.tree(["grovy", "", "Claude Code sessions in tmux,", "followed and driven from a browser.",
               "Close the laptop: they keep going."])
     tui.say()
     tui.say("Setup will ask a few questions, show you everything it will change, and change nothing until you say "

@@ -61,8 +61,17 @@ class TestTui(unittest.TestCase):
         with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
             self.assertEqual(tui.paint("x", "bold", stream=tty), "x")
 
-    def test_tree_has_one_width(self):
+    def test_tree_fits_and_its_text_goes_below_when_narrow(self):
         self.assertLessEqual(max(len(x) for x in tui.TREE), 42)
+        side = ["grovy", "", "Claude Code sessions in tmux,"]
+        for cols, beside in ((100, True), (50, False)):
+            out = io.StringIO()
+            with mock.patch.object(tui, "width", lambda: cols), mock.patch("sys.stdout", out):
+                tui.tree(side)
+            lines = out.getvalue().splitlines()
+            self.assertTrue(all(len(x) <= cols for x in lines), lines)
+            self.assertEqual(lines[0].endswith("grovy"), beside)
+            self.assertIn("Claude Code sessions in tmux,", lines[2] if beside else lines[-1])
 
     def test_arrow_keys_in_a_real_terminal(self):
         """The termios path: cbreak mode, an escape sequence for ↓, enter; and the terminal restored after."""

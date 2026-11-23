@@ -84,23 +84,36 @@ def step(n, total, title):
     say(paint(f"[{n}/{total}] ", "dim") + paint(title, "bold"))
 
 
-TREE = [  # drawn for grovy, not copied from anywhere; plain, in the terminal's own colour
-    "            ▄▄▄▄▄▄",
-    "         ▄██████████▄        ▄▄▄",
-    "        ████████████████    ▄█████▄",
-    "        ▀██████████████▀    ▀█████▀",
-    "           ▀▀▀▐██▌▀▀▀         ▐█▌",
-    "              ▐██▌            ▐█▌",
-    "      ▁▁▁▁▁▁▁▁▟██▙▁▁▁▁▁▁▁▁▁▁▁▁▟█▙▁▁▁▁▁▁",
+TREE = [  # the user's drawing; braille, plain, in the terminal's own colour
+    '                  ⣠⠄⣀⣼⠿⠇',
+    '                 ⠴⣿⣻⡿⣿⠓⢀',
+    '      ⢐⣶⣤⣦ ⡀  ⣀⡄⢰⣄⢀⣁⠑⡁⠶⣿⡟⣠⣀',
+    '       ⠁⠘⢣⣴⣿⣧⡄⢹⣿⣿⣿⠛⡿⢿⣧⣶⠙⡟⠻⠛',
+    '    ⢰⣾⣶⣷⠶⣈⡉⢻⡟⢷⣿⢻⠟⣿⡛⣿⣦⣼⢹⠿⡟⠦',
+    '         ⠈ ⠈⠉⠒⠬⡻⠛⡇⠻⣿⡿⣙⠁  ⡀⡀ ⡀',
+    '       ⣀⡀ ⣤⣄⢠⡀ ⠈⠲⡇   ⠘⠄ ⠘⡻⢛⡾⣧⡶⠆',
+    '      ⠤⡼⣿⣿⣿⠿⣻⠷⠂  ⠱⡀  ⢰⢀⠗⠚⠉⠉⠁ ⠁',
+    '    ⠠⣴⣶⡤⠿⣿⣿⡶⠘⣢⣴⣟⣿⠤⠱⡀ ⡸⠁',
+    '     ⠉⠉⠁ ⠘⠙⠁⠐⠛⢻⣏⡉⠢⡀⢱⣠⠇  ⣄⡀⣾⠄⣀',
+    ' ⢠⡀⡀        ⠐⢿⠿⣿⣶⡗⣙⢄⡿ ⢤⣴⣿⣻⣻⡶⣿⣄',
+    ' ⢨⣻⠓⣼⢿⣀  ⢠⣦⣴⣦ ⣶⣧⣼⡏⣡⣈⡧⠰⣦⡟⢻⣧⣤⣁⡈',
+    '  ⠻⢉⢠⡟⢉⣲⣷⣦⡟⢿⢿⠷⠾⣻⠜⠛⠃⠈⢹  ⢸⠥⠘⠯⠿⢿⣏⡀',
+    '   ⠉⠃⢈⡢⢍⣏⡉⠈⢪   ⢸    ⢸⡀⠠⠁     ⠉',
 ]
 
 
 def tree(side=()):
-    """The welcome tree, with optional lines of text beside it (from the second line down)."""
+    """The welcome tree with lines of text beside it, the first in bold (below it on a terminal too narrow)."""
     side = list(side)
+    col = max(len(x) for x in TREE) + 4
+    beside = col + max((len(t) for t in side), default=0) <= width()
     for i, line in enumerate(TREE):
-        text = side[i - 1] if 1 <= i <= len(side) else ""
-        say(line + (" " * max(42 - len(line), 2) + (paint(text, "bold") if i == 1 else text) if text else ""))
+        text = side[i] if beside and i < len(side) else ""
+        say(line + (" " * (col - len(line)) + (paint(text, "bold") if i == 0 else text) if text else ""))
+    if not beside:
+        say()
+        for i, text in enumerate(side):
+            say(paint(text, "bold") if i == 0 else text)
 
 
 # --- questions ------------------------------------------------------------------------------------------------
