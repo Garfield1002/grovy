@@ -1069,6 +1069,7 @@ class TestCleanup(unittest.TestCase):
 
 class TestCompletion(unittest.TestCase):
     """bash's tab: `grovy __complete LINE` answers from the CLI's own parser."""
+    real_other_names = staticmethod(completion.other_names)   # setUp replaces it
 
     def complete(self, line, wordbreaks=":"):
         out = io.StringIO()
@@ -1081,7 +1082,8 @@ class TestCompletion(unittest.TestCase):
                   mock.patch.object(completion, "machines", lambda: {"pc": "peer", "trunk": "trunk"}),
                   mock.patch.object(remote, "peer_lines", lambda only=None: ([("pc:build", "idle", "/x")], [])),
                   mock.patch.object(remote, "trunk_host", lambda: "me@hub"),
-                  mock.patch.object(remote, "trunk_lines", lambda host: ([("trunk:Tups", "idle", "/y")], []))):
+                  mock.patch.object(remote, "trunk_lines", lambda host: ([("trunk:Tups", "idle", "/y")], [])),
+                  mock.patch.object(completion, "other_names", lambda: [])):
             p.start()
             self.addCleanup(p.stop)
 
@@ -1108,6 +1110,30 @@ class TestCompletion(unittest.TestCase):
         self.assertEqual(self.complete("grovy logs trunk:T"), ["Tups"])
         self.assertEqual(self.complete("grovy ls "), ["pc", "trunk"])
         self.assertEqual(self.complete("grovy attach 'Tu"), ["Tups"])        # an unfinished quote
+
+    def test_other_machines_names_alone_when_unambiguous(self):
+        with mock.patch.object(completion, "other_names", lambda: ["pc:build", "pc:Grovy", "pc:x", "trunk:x"]):
+            # build: on pc only; Grovy: here wins; x: on two machines, so it needs its MACHINE:
+            self.assertEqual(self.complete("grovy attach "), ["Grovy", "Tups", "build", "pc:", "trunk:"])
+
+    def test_the_names_cache_is_refreshed_in_the_background(self):
+        spawned = []
+        with mock.patch.object(completion, "other_names", self.real_other_names), \
+                mock.patch.object(completion.subprocess, "Popen", lambda argv, **kw: spawned.append((argv, kw))):
+            if os.path.exists(completion.cache_path()):
+                os.unlink(completion.cache_path())
+            self.assertEqual(completion.other_names(), [])   # never waits: nothing known yet
+            self.assertEqual(len(spawned), 1)
+            self.assertEqual(spawned[0][0][-2:], ["__complete", "--refresh"])
+            self.assertTrue(spawned[0][1]["start_new_session"])
+            completion.other_names()                          # a refresh is under way: no second one
+            self.assertEqual(len(spawned), 1)
+            with mock.patch.object(remote, "elsewhere", lambda: (["pc:build"], [])):
+                self.assertEqual(completion.complete(["--refresh"]), 0)
+            self.assertEqual(completion.other_names(), ["pc:build"])
+            with mock.patch.object(completion.time, "time", lambda: 10 ** 11):
+                completion.other_names()                      # stale: asked again
+            self.assertEqual(len(spawned), 2)
 
     def test_a_failure_prints_nothing(self):
         with mock.patch.object(completion, "candidates", mock.Mock(side_effect=RuntimeError("x"))):
@@ -1182,9 +1208,58 @@ class TestTrunkFromAGraft(unittest.TestCase):
             out.truncate(0)
             cli.main(["ls", "--here"])
             self.assertNotIn("trunk:", out.getvalue())
-            with self.assertRaises(SystemExit):
-                cli.main(["attach", "Tups"])
-        self.assertIn("grovy attach trunk:Tups", err.getvalue())
+            with mock.patch.object(remote, "run", lambda a: a.name):
+                self.assertEqual(cli.main(["attach", "Tups"]), "trunk:Tups")   # the name alone is enough
+        self.assertIn("(Tups is trunk:Tups)", err.getvalue())
+
+
+class TestPlainNamesAcrossMachines(unittest.TestCase):
+    """A session name without MACHINE: that isn't here is looked for on the other machines (the user: local and
+    remote should be as transparent as possible)."""
+
+    def main(self, argv, found, local=False):
+        ran, err = [], io.StringIO()
+        with mock.patch.object(remote, "find", mock.Mock(return_value=(found, ["laptop: offline"]))) as find, \
+                mock.patch.object(cli, "here", lambda n: local), \
+                mock.patch.object(remote, "run", lambda a: ran.append(("remote", a.name, getattr(a, "new", None)))), \
+                mock.patch.object(cli, "cmd_attach", lambda a: ran.append(("local", a.name))), \
+                mock.patch.object(cli, "cmd_rename", lambda a: ran.append(("local", a.name))), \
+                mock.patch("sys.stderr", err):
+            try:
+                cli.main(argv)
+            except SystemExit:
+                ran.append("died")
+        return ran, find, err.getvalue()
+
+    def test_one_machine_has_it(self):
+        ran, _, _ = self.main(["attach", "Tups"], ["pc:Tups"])
+        self.assertEqual(ran, [("remote", "pc:Tups", None)])
+        ran, _, _ = self.main(["rename", "Tups", "T2"], ["pc:Tups"])
+        self.assertEqual(ran, [("remote", "pc:Tups", "T2")])
+
+    def test_here_wins_and_isnt_looked_up(self):
+        ran, find, _ = self.main(["attach", "Tups"], ["pc:Tups"], local=True)
+        self.assertEqual(ran, [("local", "Tups")])
+        find.assert_not_called()
+
+    def test_two_machines_ask_which(self):
+        ran, _, err = self.main(["attach", "Tups"], ["pc:Tups", "laptop:Tups"])
+        self.assertEqual(ran, ["died"])
+        self.assertIn("pc:Tups or laptop:Tups", err)
+
+    def test_nowhere_is_the_usual_error_with_the_machines_that_didnt_answer(self):
+        ran, _, err = self.main(["attach", "Tups"], [])
+        self.assertEqual(ran, [("local", "Tups")])
+        self.assertIn("laptop: offline", err)
+
+    def test_new_stays_here(self):
+        with mock.patch.object(cli, "cmd_new", lambda a: "local"), mock.patch.object(remote, "find") as find:
+            self.assertEqual(cli.main(["new", "t9", "/tmp"]), "local")
+        find.assert_not_called()
+
+    def test_find_matches_whole_names(self):
+        with mock.patch.object(remote, "elsewhere", lambda: (["pc:Tups", "pc:Tups2", "trunk:Tups"], [])):
+            self.assertEqual(remote.find("Tups"), (["pc:Tups", "trunk:Tups"], []))
 
 
 class TestSetupFlow(unittest.TestCase):

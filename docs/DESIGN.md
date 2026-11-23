@@ -808,8 +808,15 @@ move a session between machines; `new` needs an absolute folder (it is resolved 
 usual ssh (the tunnel's key can't run commands). A graft's plain `grovy ls` adds the trunk's own sessions as
 `trunk:NAME`: `grovy ls --here` there over ssh with `BatchMode=yes` (a login that needs a password is a note on stderr,
 never a prompt in the middle of the list) and a 5s bound; rows whose name isn't a plain session name (the trunk's grafts,
-this one included) are left out, and the fields are cleaned like a graft's. `attach NAME` that finds nothing here
-points to `trunk:NAME`. `logs` reads `GET /api/sessions/NAME/screen?lines=N` (X-Grovy).
+this one included) are left out, and the fields are cleaned like a graft's. **A plain name works across machines**
+(local and remote as transparent as possible): for `attach`, `logs`, `kill`, `resume`, `forget`, `rename`, a NAME that
+isn't this computer's (registry or tmux; `cli.here`) is looked for on the others (`remote.find`, the same bounded
+asking as `ls`): on one machine it runs there (`(NAME is pc:NAME)` on stderr), on several it stops and lists them
+(never a guess, `kill` included), on none it's the usual error plus the machines that didn't answer. This computer's
+session always wins and costs no lookup. `new` always means here. Tab completion offers the other machines' names
+alone too when they're unambiguous, from `$STATE/completion-names.json`, written by `grovy ls` and by a detached
+`grovy __complete --refresh` started when it's over 30s old (a tab never waits for the network; the file is marked
+fresh before the refresh starts, so a burst of tabs starts one). `logs` reads `GET /api/sessions/NAME/screen?lines=N` (X-Grovy).
 **attach** (`grovylib/terminal.py`): `POST /api/sessions/NAME/terminal` with the token, `X-Grovy: 1` and `Upgrade:
 grovy-terminal` (a browser can't send Upgrade) gets `101`, then the graft's grovyd runs `tmux attach-session -t
 =grovy-NAME` in a pseudo-terminal (TERM and size from `X-Term`/`X-Rows`/`X-Cols`) and relays it: its output as

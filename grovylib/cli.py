@@ -37,6 +37,7 @@ def cmd_ls(a):
             r, n = remote.trunk_lines(host)
             rows, notes = rows + r, notes + n
         got.update(rows=rows, notes=notes)
+        completion.remember([r[0] for r in rows])   # tab's names, fresh for free
     asking = threading.Thread(target=others, daemon=True)
     if not getattr(a, "here", False):
         asking.start()   # a trunk's grafts (a graft's trunk), asked while this machine's own sessions are printed
@@ -399,4 +400,19 @@ def main(argv=None):
     a = build_parser().parse_args(argv)
     if a.cmd in remote.COMMANDS and remote.split(getattr(a, "name", None))[0]:
         return remote.run(a)   # MACHINE:NAME: another machine's session
+    if a.cmd in remote.COMMANDS and a.cmd != "new" and not here(a.name):
+        found, notes = remote.find(a.name)   # a plain name that's only on another machine works as well
+        if len(found) == 1:
+            print(f"({a.name} is {found[0]})", file=sys.stderr)
+            a.name = found[0]
+            return remote.run(a)
+        if found:
+            core.die(f"{a.name!r} is on more than one machine: say which, " + " or ".join(found))
+        for n in notes:
+            print(n, file=sys.stderr)
     return a.fn(a)
+
+
+def here(name):
+    """A session of this computer's (registered, or running in tmux)."""
+    return name in sessions.registry() or tmuxctl.tmux_alive(name)

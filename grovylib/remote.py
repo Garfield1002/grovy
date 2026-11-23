@@ -145,6 +145,23 @@ def _read_all(r, deadline, limit):
     raise ValueError("its answer is too long")
 
 
+def elsewhere():
+    """(every other machine's session as MACHINE:NAME, notes on the ones that couldn't be asked): a trunk's grafts,
+    a graft's trunk. Bounded like grovy ls."""
+    rows, notes = peer_lines()
+    host = trunk_host()
+    if host:
+        r, n = trunk_lines(host)
+        rows, notes = rows + r, notes + n
+    return [r[0] for r in rows], notes
+
+
+def find(name):
+    """(MACHINE:NAME for each other machine that has a session NAME, notes)."""
+    names, notes = elsewhere()
+    return [n for n in names if split(n)[1] == name], notes
+
+
 def trunk_lines(host, run=subprocess.run):
     """Rows for `grovy ls` on a graft: the trunk's own sessions as trunk:NAME, from `grovy ls --here` there over your
     usual ssh (BatchMode: never a password prompt in the middle of a list; LS_TIMEOUT or so in all)."""

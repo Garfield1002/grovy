@@ -1,12 +1,16 @@
 """Tab completion for bash: `grovy completion bash` prints a small function that asks `grovy __complete LINE` what
 fits at the cursor, so it follows the CLI as it changes. Commands and options come from cli.build_parser() itself;
-session names from this computer (registry and daemon) and, after `pc:` or `trunk:`, from that machine (as
-`grovy ls` asks it, bounded);
+session names from this computer (registry and daemon), other machines' ones as last seen (a cache that
+`grovy ls` and a background refresh keep up to date: a tab never waits for the network) and, after `pc:` or
+`trunk:`, from that machine itself (bounded);
 a path argument gets nothing back, and bash then completes file names."""
 import argparse
+import json
 import os
 import shlex
+import subprocess
 import sys
+import time
 
 from . import core
 
@@ -26,6 +30,7 @@ HIDDEN = {"hook", "statusline"}   # called by Claude Code, not by you
 SESSION_ARGS = {("attach", "name"), ("kill", "name"), ("forget", "name"), ("resume", "name"), ("logs", "name"),
                 ("rename", "name")}
 PEER_TIMEOUT = 1.5
+CACHE_AGE = 30   # seconds: other machines' names are asked again in the background after this
 
 
 def path():
@@ -86,6 +91,44 @@ def local_sessions():
     return sorted(n for n in names if core.valid_name(n))
 
 
+def cache_path():
+    return os.path.join(core.state_dir(), "completion-names.json")
+
+
+def remember(names):
+    try:
+        core.atomic_write_json(cache_path(), {"at": time.time(), "names": [n for n in names if isinstance(n, str)]})
+    except OSError:
+        pass
+
+
+def other_names():
+    """Other machines' sessions (MACHINE:NAME) as last seen: a tab never waits for the network. When they are older
+    than CACHE_AGE, a detached `grovy __complete --refresh` asks again for the next tab."""
+    try:
+        with open(cache_path()) as f:
+            c = json.load(f)
+        names, at = [n for n in c.get("names", []) if isinstance(n, str)], float(c.get("at", 0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        names, at = [], 0
+    if time.time() - at > CACHE_AGE and machines():
+        remember(names)   # marks it fresh at once: the tabs that follow don't start more refreshes
+        try:
+            subprocess.Popen([sys.executable, os.path.join(core.HERE, "grovy"), "__complete", "--refresh"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError:
+            pass
+    return names
+
+
+def refresh():
+    from . import remote
+    names, _ = remote.elsewhere()
+    remember(names)
+    return 0
+
+
 def session_names(cur):
     where = machines()
     if ":" in cur:
@@ -102,7 +145,11 @@ def session_names(cur):
         finally:
             remote.LS_TIMEOUT = old
         return [r[0] for r in rows]
-    return local_sessions() + [m + ":" for m in sorted(where)]
+    here = local_sessions()
+    plain = [n.partition(":")[2] for n in other_names()]
+    # another machine's name alone works when it's on one machine only and not here (cli.here, remote.find)
+    plain = sorted({n for n in plain if plain.count(n) == 1 and n not in here and core.valid_name(n)})
+    return here + plain + [m + ":" for m in sorted(where)]
 
 
 def candidates(parser, words):
@@ -158,6 +205,8 @@ def candidates(parser, words):
 def complete(argv):
     """`grovy __complete LINE`: print what fits at the end of LINE, one per line."""
     from . import cli
+    if argv == ["--refresh"]:
+        return refresh()
     words = split(argv[0] if argv else "")
     if len(words) < 2:
         return 0
