@@ -1,14 +1,13 @@
-"""`grovy setup`, `grovy doctor`, `grovy url`: installing and checking grovy."""
-import ipaddress
+"""`grovy doctor`, `grovy url`, `grovy tls init`, and what setup (setupflow.py) and cleanup share: the service unit,
+the setup record, the login links, port checks."""
 import os
 import re
 import shutil
 import socket
 import subprocess
 import sys
-import time
 
-from . import claude, client, core, qr, sessions, tls, tmuxctl
+from . import claude, client, core, sessions, tls, tmuxctl
 
 
 def lan_bases(url):
@@ -148,7 +147,7 @@ Description=grovy - Claude Code session manager daemon
 ExecStart={exe} serve
 Environment=GROVY_BIND={bind}
 Environment=GROVY_PORT={port}
-# The PATH of the shell that ran setup: claude (and the Claude sessions' Bash tool) need it.
+{tls}# The PATH of the shell that ran setup: claude (and the Claude sessions' Bash tool) need it.
 Environment=PATH={path}
 Restart=on-failure
 RestartSec=2
@@ -161,40 +160,12 @@ WantedBy=default.target
 """
 
 
-def service_unit(bind, port, path=None):
+def service_unit(bind, port, path=None, tls_off=False):
     path = path if path is not None else os.environ.get("PATH", "/usr/bin:/bin")
     path = ":".join(dict.fromkeys(p for p in path.split(":") if p))   # de-duplicated, order kept
     q = lambda v: str(v).replace("%", "%%")   # noqa: E731  systemd expands %-specifiers
-    return SERVICE_UNIT.format(exe=q(os.path.join(core.HERE, "grovy")), bind=q(bind), port=int(port), path=q(path))
-
-
-def _ask(prompt, default):
-    try:
-        got = input(f"{prompt} [{default}]: ").strip()
-    except EOFError:
-        got = ""
-    return got or default
-
-
-def _pick_bind(assume_yes):
-    out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5).stdout.split()
-    addrs = [a for a in out if ":" not in a]
-    vpn = [a for a in addrs if ipaddress.ip_address(a) in ipaddress.ip_network("100.64.0.0/10")]   # mesh-VPN range
-    choices = [("127.0.0.1", "this computer only (no phone access)"),
-               ("0.0.0.0", "every network this computer is on")] + \
-              [(a, "VPN address" if a in vpn else "this address only") for a in addrs]
-    default = vpn[0] if vpn else "0.0.0.0"
-    if assume_yes or not sys.stdin.isatty():
-        return default
-    print("Where should the phone reach grovy? Only expose it on networks you trust (it is plain HTTP unless you "
-          "run `grovy tls init`).")
-    for i, (a, what) in enumerate(choices, 1):
-        print(f"  {i}) {a:<16} {what}")
-    got = _ask("Address or number", default)
-    if got.isdigit() and 1 <= int(got) <= len(choices):
-        return choices[int(got) - 1][0]
-    ipaddress.ip_address(got)   # ValueError on garbage
-    return got
+    return SERVICE_UNIT.format(exe=q(os.path.join(core.HERE, "grovy")), bind=q(bind), port=int(port), path=q(path),
+                               tls="Environment=GROVY_TLS=off\n" if tls_off else "")
 
 
 def _port_busy(bind, port):
@@ -218,30 +189,6 @@ def _free_port(bind, start):
         if not _port_busy(bind, p):
             return p
     return start
-
-
-def _pick_port(bind, assume_yes, own_port):
-    """Ask which TCP port to listen on, warning when it's already taken by something other than our own daemon
-    (another user's grovy bound to 0.0.0.0 is the common one) and suggesting a free one. `own_port` is the port
-    our running daemon already uses, so re-running setup doesn't flag it. Typing the taken port again uses it
-    anyway: that consent is in-session only, never stored. Non-interactive: the env/default port, no prompt."""
-    default, last = core.env_int("PORT", 7333), None
-    if assume_yes or not sys.stdin.isatty():
-        return default
-    while True:
-        got = _ask("TCP port for the phone to reach grovy", default)
-        try:
-            port = int(got)
-            if not 1 <= port <= 65535:
-                raise ValueError
-        except ValueError:
-            print(f"  {got!r} is not a port number (1-65535).")
-            continue
-        if port == own_port or port == last or not _port_busy(bind, port):
-            return port
-        last, default = port, _free_port(bind, port + 1)
-        print(f"  port {port} on {bind} is already in use (maybe another user's grovy, bound to 0.0.0.0).\n"
-              f"  press enter for {default}, or type {port} again to use it anyway.")
 
 
 INSTALL_HELP = """
@@ -291,128 +238,4 @@ def cmd_tls(a):
     else:
         print(f"Restart the daemon to switch it to HTTPS ({restart}).")
     print(INSTALL_HELP.format(file=tls.public_cert()))
-    return 0
-
-
-def cmd_setup(a):
-    """One-time install: link grovy onto PATH, write and start the systemd user service, print the phone link."""
-    dry = a.dry_run
-    step = lambda msg: print(("(dry run) " if dry else "") + msg)  # noqa: E731
-    for tool in ("tmux", claude.claude_cmd()):
-        if not shutil.which(tool):
-            core.die(f"{tool} not found on PATH: install it first" + (" (or set GROVY_CLAUDE)" if tool != "tmux" else ""))
-    # 1. grovy on PATH
-    bindir = os.path.expanduser("~/.local/bin")
-    link, target = os.path.join(bindir, "grovy"), os.path.join(core.HERE, "grovy")
-    if os.path.realpath(link) == os.path.realpath(target):
-        step(f"ok: {link} already points here")
-    elif os.path.lexists(link):
-        step(f"skipped: {link} exists and points elsewhere ({os.path.realpath(link)}); remove it to use this copy")
-    else:
-        step(f"linking {link} -> {target}")
-        if not dry:
-            os.makedirs(bindir, exist_ok=True)
-            os.symlink(target, link)
-            update_record(link=link)
-    if bindir not in os.environ.get("PATH", "").split(os.pathsep):
-        print(f"note: {bindir} is not on your PATH; add it in your shell profile: export PATH=\"$HOME/.local/bin:$PATH\"")
-    # 2. token, and the templates for your own styles and script (everything in them starts commented out)
-    if not dry:
-        core.load_token(create=True)
-    for name, what in (("custom.css", "your own styles"), ("custom.js", "your own additions to the page")):
-        dest = os.path.join(core.config_dir(), name)
-        if not os.path.exists(dest):
-            step(f"creating {dest} ({what}; see the comments in it)")
-            if not dry:
-                os.makedirs(core.config_dir(), exist_ok=True)
-                shutil.copyfile(os.path.join(core.HERE, "examples", name), dest)
-    # 3. the daemon as a service
-    bind = a.bind or _pick_bind(a.yes)
-    ipaddress.ip_address(bind)
-    running, own_port = False, None
-    try:
-        st = client.sock_request({"type": "status"}, timeout=1.0) or {}
-        running = bool(st)
-        m = re.match(r"http://.+:(\d+)", st.get("url", ""))
-        own_port = int(m.group(1)) if m else None
-    except (OSError, ValueError):
-        pass
-    port = a.port if a.port is not None else _pick_port(bind, a.yes, own_port)
-    if not dry:
-        update_record(role="trunk", bind=bind, port=port, **({"home": core.home_env()} if core.home_env() else {}))
-    unit = service_unit(bind, port)
-    systemd = not a.no_service and shutil.which("systemctl") and subprocess.run(
-        ["systemctl", "--user", "show-environment"], capture_output=True, timeout=10).returncode == 0
-    if a.no_service or not systemd:
-        if not a.no_service:
-            print("no systemd user session here: start the daemon yourself, e.g. in tmux:")
-        print(f"  tmux new -d -s grovyd 'GROVY_BIND={bind} GROVY_PORT={port} {target} serve'")
-    else:
-        path = os.path.expanduser("~/.config/systemd/user/grovy.service")
-        old = open(path).read() if os.path.exists(path) else None
-        if old == unit:
-            step(f"ok: {path} is up to date")
-        else:
-            step(f"writing {path}" + (" (previous version kept as grovy.service.bak)" if old else ""))
-            if dry:
-                print(unit)
-            else:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                if old:
-                    shutil.copyfile(path, path + ".bak")
-                with open(path, "w") as f:
-                    f.write(unit)
-                update_record(services=["grovy"])
-        active = subprocess.run(["systemctl", "--user", "is-active", "grovy"], capture_output=True,
-                                text=True, timeout=10).stdout.strip() == "active"
-        if running and not active:
-            step("enabling the service for the next boot; a grovy daemon is already running outside it, so it "
-                 "isn't started now.\n  Stop that one (sessions are unaffected), then: systemctl --user start grovy")
-            cmds = [["daemon-reload"], ["enable", "grovy"]]
-        else:
-            step("starting the service and enabling it at boot")
-            cmds = [["daemon-reload"], ["enable", "grovy"], ["restart", "grovy"]]
-        for c in cmds if not dry else []:
-            r = subprocess.run(["systemctl", "--user", *c], capture_output=True, text=True, timeout=30)
-            if r.returncode:
-                core.die(f"systemctl --user {' '.join(c)} failed: {r.stderr.strip()}")
-        linger = subprocess.run(["loginctl", "show-user", os.environ.get("USER", ""), "-p", "Linger"],
-                                capture_output=True, text=True, timeout=10).stdout.strip()
-        if linger != "Linger=yes":
-            step("enabling linger, so the daemon runs after a reboot without you logging in")
-            if not dry:
-                if subprocess.run(["loginctl", "enable-linger"], capture_output=True, timeout=30).returncode:
-                    print("note: `loginctl enable-linger` failed; without it the daemon starts when you log in")
-                else:
-                    update_record(linger=True)
-    if dry:
-        return 0
-    # 4. the phone link
-    for _ in range(50):
-        try:
-            if client.sock_request({"type": "status"}, timeout=1.0):
-                break
-        except (OSError, ValueError):
-            time.sleep(0.2)
-    else:
-        print("the daemon isn't answering yet; when it is, run `grovy url` for the phone link")
-        return 0
-    try:
-        links, bases, tok, ours = login_links()
-    except (OSError, ValueError):
-        print("the daemon isn't answering yet; when it is, run `grovy url` for the phone link")
-        return 0
-    # Prefer a non-local address (a phone can reach it) for the code to scan.
-    link = next((l for l, b in zip(links, bases) if not _is_local(b)), links[0] if links else None)
-    if link:
-        print("\nScan this on your phone to log in (opening the link once logs the phone in):\n")
-        try:
-            print(qr.render(link, quiet=2))
-            print("\ncan't scan? run `grovy url` for the link" + ("" if len(bases) == 1 else " (all addresses)"))
-        except ValueError:
-            print(link)  # too long for our small encoder: fall back to the plain link
-        _login_warnings(bases, tok, ours)
-    print("\nThen tap + to start a session. New projects: run `claude` once in the folder first, to accept its "
-          "trust prompt.\nMake it yours in " + core.config_dir() + " (custom.css, custom.js); check everything with "
-          "`grovy doctor`.\nTo undo all of this: grovy cleanup.")
     return 0

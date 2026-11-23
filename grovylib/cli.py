@@ -6,7 +6,7 @@ import re
 import sys
 import time
 
-from . import cleanup, client, core, hook, install, projects, scriptlib, sessions, tmuxctl
+from . import cleanup, client, core, hook, install, projects, scriptlib, sessions, setupflow, tmuxctl
 
 
 def cmd_ls(_):
@@ -303,13 +303,7 @@ def main(argv=None):
     s = sub.add_parser("hook", help="(called by Claude Code) process one hook event from stdin")
     s.add_argument("name")
     s.set_defaults(fn=lambda a: hook.cmd_hook(a.name))
-    s = sub.add_parser("setup", help="one-time install: PATH link, systemd service, phone link")
-    s.add_argument("--bind", help="address to listen on (asked if omitted)")
-    s.add_argument("--port", type=int, help="TCP port to listen on (asked if omitted)")
-    s.add_argument("--no-service", action="store_true", help="don't install the systemd service")
-    s.add_argument("-y", "--yes", action="store_true", help="don't ask; use the suggested address")
-    s.add_argument("--dry-run", action="store_true", help="show what would be done, change nothing")
-    s.set_defaults(fn=install.cmd_setup)
+    setupflow.add_parser(sub)
     s = sub.add_parser("page", help="publish an HTML page to the phone (sandboxed), or list/remove pages")
     ps = s.add_subparsers(dest="op", required=True)
     pp = ps.add_parser("publish", help="publish FILE; publishing the same name again updates it")

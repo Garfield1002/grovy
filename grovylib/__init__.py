@@ -21,7 +21,8 @@ Claude sessions (used by the CLI and the daemon):
 
 Command line:
   cli.py         the `grovy` subcommands
-  install.py     setup, doctor, url, tls init
+  setupflow.py   `grovy setup`: the guided install (questions, one review, then apply)
+  install.py     doctor, url, tls init, and what setup and cleanup share (service unit, setup record, links)
   cleanup.py     `grovy cleanup`: undoes setup (from its record, setup.json)
   tls.py         optional HTTPS: which certificate the daemon serves; the one `grovy tls init` makes
   tui.py         the terminal UI setup and cleanup use: colours, step lines, arrow-key menus (stdlib only)

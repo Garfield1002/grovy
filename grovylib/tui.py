@@ -12,8 +12,7 @@ import select as _select
 import shutil
 import sys
 
-_CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "blue": "34", "cyan": "36",
-          "brown": "38;5;130", "leaf": "38;5;71", "leaf2": "38;5;107"}
+_CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "blue": "34", "cyan": "36"}
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
@@ -37,8 +36,13 @@ def visible_len(s):
     return len(_ANSI.sub("", s))
 
 
+AUTO = False   # -y: take every default even on a terminal
+
+
 def interactive():
-    """A person can answer: both ends are a terminal."""
+    """A person can answer: both ends are a terminal (and -y wasn't given)."""
+    if AUTO:
+        return False
     try:
         return sys.stdin.isatty() and sys.stdout.isatty()
     except (AttributeError, ValueError):
@@ -47,6 +51,12 @@ def interactive():
 
 def width():
     return max(40, shutil.get_terminal_size((80, 24)).columns)
+
+
+def short(path):
+    """A path as people write it: ~/... under the home folder."""
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path == home or path.startswith(home.rstrip("/") + "/") else path
 
 
 def say(text=""):
@@ -74,25 +84,23 @@ def step(n, total, title):
     say(paint(f"[{n}/{total}] ", "dim") + paint(title, "bold"))
 
 
-TREE = [  # (text, style) runs per line; drawn for grovy, not copied from anywhere
-    [("            ▄▄▄▄▄▄", "leaf")],
-    [("         ▄██████████▄", "leaf"), ("        ▄▄▄", "leaf2")],
-    [("        ████████████████", "leaf"), ("    ▄█████▄", "leaf2")],
-    [("        ▀██████████████▀", "leaf"), ("    ▀█████▀", "leaf2")],
-    [("           ▀▀▀", "leaf"), ("▐██▌", "brown"), ("▀▀▀", "leaf"), ("         ▐█▌", "brown")],
-    [("              ▐██▌", "brown"), ("            ▐█▌", "brown")],
-    [("      ▁▁▁▁▁▁▁▁", "dim"), ("▟██▙", "brown"), ("▁▁▁▁▁▁▁▁▁▁▁▁", "dim"), ("▟█▙", "brown"), ("▁▁▁▁▁▁", "dim")],
+TREE = [  # drawn for grovy, not copied from anywhere; plain, in the terminal's own colour
+    "            ▄▄▄▄▄▄",
+    "         ▄██████████▄        ▄▄▄",
+    "        ████████████████    ▄█████▄",
+    "        ▀██████████████▀    ▀█████▀",
+    "           ▀▀▀▐██▌▀▀▀         ▐█▌",
+    "              ▐██▌            ▐█▌",
+    "      ▁▁▁▁▁▁▁▁▟██▙▁▁▁▁▁▁▁▁▁▁▁▁▟█▙▁▁▁▁▁▁",
 ]
 
 
 def tree(side=()):
     """The welcome tree, with optional lines of text beside it (from the second line down)."""
     side = list(side)
-    for i, runs in enumerate(TREE):
-        line = "".join(paint(t, s) for t, s in runs)
+    for i, line in enumerate(TREE):
         text = side[i - 1] if 1 <= i <= len(side) else ""
-        pad = 42 - sum(len(t) for t, _ in runs)
-        say(line + (" " * max(pad, 2) + text if text else ""))
+        say(line + (" " * max(42 - len(line), 2) + (paint(text, "bold") if i == 1 else text) if text else ""))
 
 
 # --- questions ------------------------------------------------------------------------------------------------
@@ -148,11 +156,12 @@ def _cut(s, n):
 
 def _menu_lines(question, options, cur):
     lines = [paint("? ", "cyan", "bold") + paint(question, "bold")]
+    col = max(len(o["label"]) for o in options) + 2   # hints line up in one column
     for i, o in enumerate(options):
         here = i == cur
         mark = paint("❯ ", "cyan", "bold") if here else "  "
         label = paint(o["label"], "cyan", "bold") if here else o["label"]
-        hint = "  " + paint(o["hint"], "dim") if o.get("hint") else ""
+        hint = " " * (col - len(o["label"])) + paint(o["hint"], "dim") if o.get("hint") else ""
         lines.append(mark + label + hint)
         for d in o.get("detail", ()):
             lines.append("    " + (d if here else paint(d, "dim")))
@@ -213,7 +222,9 @@ def text(question, default="", check=None, ask=None):
     terminal, returns the default. `ask` replaces input() in tests."""
     if ask is None and not interactive():
         return default
+    real = ask is None
     ask = ask or input
+    tries = 0
     while True:
         shown = f" {paint('(' + str(default) + ')', 'dim')}" if default != "" else ""
         try:
@@ -223,7 +234,11 @@ def text(question, default="", check=None, ask=None):
         got = got or str(default)
         why = check(got) if check else None
         if not why:
+            if real and tries == 0 and color_on():   # like a menu: the question becomes one line with the answer
+                sys.stdout.write("\x1b[1A\x1b[J" + paint("✓ ", "green") + question + " " + paint(got, "cyan") + "\n")
+                sys.stdout.flush()
             return got
+        tries += 1
         warn(why)
 
 

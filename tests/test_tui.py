@@ -62,8 +62,7 @@ class TestTui(unittest.TestCase):
             self.assertEqual(tui.paint("x", "bold", stream=tty), "x")
 
     def test_tree_has_one_width(self):
-        widths = {sum(len(t) for t, _ in runs) for runs in tui.TREE}
-        self.assertLessEqual(max(widths), 42)
+        self.assertLessEqual(max(len(x) for x in tui.TREE), 42)
 
     def test_arrow_keys_in_a_real_terminal(self):
         """The termios path: cbreak mode, an escape sequence for ↓, enter; and the terminal restored after."""

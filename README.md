@@ -12,14 +12,22 @@ You need Linux (or macOS), Python 3.11+, tmux, and Claude Code signed in.
 git clone <this repo> ~/grovy && ~/grovy/grovy setup
 ```
 
-Setup asks two questions (which network address your phone will use — it suggests your VPN address if
-you have one — and which port, defaulting to 7333 but steering you to a free one if that's taken, e.g. by
-another user's grovy on a shared machine), installs grovy as a background service that starts at boot, and
-shows a **QR code**. **Scan it with your phone** (or run `grovy url` for the link to open): it logs the
-phone in. Bookmark the page or "Add to Home Screen".
+Setup asks a few questions (use arrow keys and enter), then shows everything it will change and waits for
+your yes:
 
-On macOS, or with `--no-service`, setup prints a command to start grovy yourself instead.
-`grovy setup --dry-run` shows what it would do without changing anything; rerunning it is safe.
+* **Trunk or graft.** A *trunk* is a grovy of its own: pick it unless you already have grovy on another
+  machine. A *graft* (worker) joins this computer to that trunk instead (see "Another computer").
+* **Who can reach it.** "This computer only" is the default; to use grovy from your phone, pick your VPN or
+  local network. The port is checked, and a free one suggested if 7333 is taken.
+* **HTTPS**, if other devices can reach it: off by default (it means installing a certificate on each device;
+  notifications need it).
+
+It then installs grovy as a background service that starts at boot and ends with a **QR code**: scan it, or
+open the link, once on each device to log it in. Bookmark the page or "Add to Home Screen".
+
+Run it again to change your answers, show the login link, or remove grovy. On macOS, or with `--no-service`,
+setup prints a command to start grovy yourself instead. `--dry-run` shows what it would do; `-y` takes the
+recommended answers without asking.
 
 **One-time per project:** Claude asks whether you trust a folder the first time it runs there, and grovy can't
 see a session until that's answered. So run `claude` once in a new project on the computer (or `grovy attach`

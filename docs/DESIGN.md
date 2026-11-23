@@ -120,9 +120,22 @@ private. TLS reads that fail (a preconnect closed unused, a connection the deadl
 
 ## Setup and cleanup
 
-`grovy setup` (`install.cmd_setup`) links `~/.local/bin/grovy`, makes the token and the `custom.*` templates, writes
-the systemd user service and turns on linger. Each change it makes is recorded in `$STATE/setup.json` (role, address,
-port, the link it made, services it wrote, `linger: true` if it turned linger on; that flag survives reruns).
+`grovy setup` (`grovylib/setupflow.py`, drawn with `grovylib/tui.py`) asks every question first, then shows one
+review listing only what has to change, and applies it on a yes, step by step (✓/✗; the first failure stops it and
+points to `grovy cleanup`). The questions: role (trunk, the default, or graft: joining a trunk, see "Other
+machines"), the address (a menu of this machine's addresses: this computer only (the default, with a warning that
+other devices can't open it), VPN (100.64/10), local network, public, everywhere), the port (the recorded one or
+`GROVY_PORT`/7333; one that something else listens on is refused once and suggested a free one; typing it again uses
+it, for that run only), HTTPS (only asked when other devices can reach it; default no; no writes `GROVY_TLS=off` into
+the unit so an old certificate isn't served). The changes: the `~/.local/bin/grovy` link, the token and the
+`custom.*` templates, a certificate (`tls.init`, for the address, or every address for 0.0.0.0, and the host name,
+unless the current one already covers them), the systemd user service (previous version kept as `.bak`), starting
+it, linger. Each change is recorded in `$STATE/setup.json` (role, address, port, https, the link it made, services it
+wrote, `linger: true` if it turned linger on; that flag survives reruns). On a computer already set up, it first
+offers: change settings (the recorded answers preselected), show the login link, or remove (= `grovy cleanup`).
+It ends with the login link: a QR code and the link when other devices can reach grovy, else the link and an offer
+to open it in the browser. Without a terminal, or with `-y`, every question takes its default (`tui.AUTO`); flags
+(`--role`, `--bind`, `--port`, `--https/--no-https`, `--no-service`, `--dry-run`) answer questions up front.
 
 `grovy cleanup` (`grovylib/cleanup.py`) plans first, shows the list, and applies it on a yes (`-y` without asking,
 `--dry-run` only shows). It stops and removes the `grovy` and `grovy-tunnel` services and unit files (and `.bak`),

@@ -39,7 +39,7 @@ for _k in ("GROVY_HOME", "CCS_HOME", "GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
     os.environ.pop(_k, None)
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
-from grovylib import plugins, claude, cleanup, client, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tls, tmuxctl, uploads  # noqa: E402
+from grovylib import plugins, claude, cleanup, client, setupflow, tui, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tls, tmuxctl, uploads  # noqa: E402
 
 
 def ev(name, **kw):
@@ -955,13 +955,90 @@ class TestCleanup(unittest.TestCase):
 
     def test_setup_writes_the_record(self):
         with mock.patch.object(shutil, "which", lambda x: "/bin/true"), \
-                mock.patch.object(install, "cmd_url", lambda a: None), mock.patch.object(install.time, "sleep"), \
+                mock.patch.object(install, "cmd_url", lambda a: None), mock.patch.object(setupflow.time, "sleep"), \
                 redirect_stdout(io.StringIO()):
             rc = grovy.main(["setup", "--bind", "127.0.0.1", "--port", "7399", "--no-service"])
         self.assertEqual(rc, 0)
         rec = install.read_record()
         self.assertEqual((rec["role"], rec["bind"], rec["port"]), ("trunk", "127.0.0.1", 7399))
         self.assertEqual(rec["link"], os.path.join(self.home, ".local", "bin", "grovy"))
+
+
+class TestSetupFlow(unittest.TestCase):
+    """The guided `grovy setup`: what it plans, that a rerun with the same answers changes nothing, its defaults."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(dir=TMP)
+        self.runs = []
+
+        def fake_run(argv, **kw):
+            self.runs.append(argv)
+            out = "inactive\n" if argv[:3] == ["systemctl", "--user", "is-active"] else ""
+            if argv[:2] == ["loginctl", "show-user"]:
+                out = "Linger=yes\n" if ["loginctl", "enable-linger"] in self.runs else "Linger=no\n"
+            return subprocess.CompletedProcess(argv, 0, out, "")
+        for p in (mock.patch.dict(os.environ, {"HOME": self.home, "GROVY_STATE_DIR": os.path.join(self.home, "st-grovy"),
+                                               "XDG_CONFIG_HOME": os.path.join(self.home, "cfg")}),
+                  mock.patch.object(setupflow, "UNIT", os.path.join(self.home, "grovy.service")),
+                  mock.patch.object(setupflow.subprocess, "run", fake_run),
+                  mock.patch.object(setupflow, "addresses", lambda: [("vpn", "100.64.1.2"), ("lan", "192.168.1.9")]),
+                  mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError)),
+                  mock.patch("sys.stdout", io.StringIO())):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def apply(self, steps):
+        for _, action in steps:
+            action()
+
+    def test_first_setup_plans_everything_a_rerun_nothing(self):
+        steps = setupflow.plan_trunk("127.0.0.1", 7390, False, True, install.read_record())
+        labels = " | ".join(l for l, _ in steps if l)
+        for want in ("link ~/.local/bin/grovy", "your grovy home", "grovy service, listening on 127.0.0.1:7390",
+                     "start grovy", "linger"):
+            self.assertIn(want, labels)
+        self.apply(steps)
+        self.assertIn("Environment=GROVY_PORT=7390", open(setupflow.UNIT).read())
+        rec = install.read_record()
+        self.assertEqual((rec["role"], rec["port"], rec["https"], rec["linger"]), ("trunk", 7390, False, True))
+        with mock.patch.object(setupflow.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(
+                argv, 0, "active\n" if "is-active" in argv else "Linger=yes\n", "")):
+            again = setupflow.plan_trunk("127.0.0.1", 7390, False, True, install.read_record())
+        self.assertEqual(again, [])                                  # same answers: nothing to change
+
+    def test_a_changed_address_says_what_it_was(self):
+        self.apply(setupflow.plan_trunk("127.0.0.1", 7390, False, True, {}))
+        steps = setupflow.plan_trunk("100.64.1.2", 7390, False, True, install.read_record())
+        self.assertTrue(any(l and "100.64.1.2:7390" in l and "(was 127.0.0.1:7390)" in l for l, _ in steps))
+
+    def test_https_off_is_written_into_the_unit(self):
+        self.assertIn("Environment=GROVY_TLS=off", install.service_unit("1.2.3.4", 1, tls_off=True))
+        self.assertNotIn("GROVY_TLS", install.service_unit("1.2.3.4", 1))
+
+    def test_defaults_are_this_computer_only_and_no_https(self):
+        with mock.patch.object(tui, "interactive", lambda: False):
+            self.assertEqual(setupflow.ask_role({}), "trunk")
+            self.assertEqual(setupflow.ask_bind({}), "127.0.0.1")
+            self.assertEqual(setupflow.ask_bind({"bind": "100.64.1.2"}), "100.64.1.2")   # a rerun keeps the answer
+            self.assertFalse(setupflow.ask_https("100.64.1.2", {}))
+        self.assertFalse(setupflow.ask_https("127.0.0.1", {"https": True}))          # never asked for local only
+
+    def test_yes_on_a_terminal_takes_the_defaults_and_doesnt_leak(self):
+        with mock.patch.object(sys.stdin, "isatty", lambda: True), mock.patch.object(sys.stdout, "isatty", lambda: True,
+                                                                                         create=True), \
+                mock.patch.object(shutil, "which", lambda x: "/bin/true"), mock.patch.object(setupflow.time, "sleep"), \
+                mock.patch("builtins.input", side_effect=AssertionError("asked a question")):
+            rc = grovy.main(["setup", "-y", "--no-service", "--port", "7391"])
+            self.assertEqual(rc, 0)
+            self.assertFalse(tui.AUTO)
+        self.assertEqual(install.read_record()["bind"], "127.0.0.1")
+
+    def test_rerun_menu_can_remove(self):
+        install.update_record(role="trunk", bind="127.0.0.1", port=7390)
+        with mock.patch.object(tui, "interactive", lambda: True), \
+                mock.patch.object(tui, "select", lambda q, opts, default=0: "remove"), \
+                mock.patch.object(cleanup, "cmd_cleanup", lambda a: 7) as c:
+            self.assertEqual(grovy.main(["setup"]), 7)
 
 
 class TestSetupAndCustomCss(unittest.TestCase):
@@ -986,25 +1063,30 @@ class TestSetupAndCustomCss(unittest.TestCase):
         free = install._free_port("127.0.0.1", busy + 1)
         self.assertFalse(install._port_busy("127.0.0.1", free))
 
-        tty = mock.patch.object(sys.stdin, "isatty", lambda: True)
+        tty = mock.patch.object(tui, "interactive", lambda: True)
+        quiet = redirect_stdout(io.StringIO())
+        ask = lambda bind, own=None: setupflow.ask_port(bind, {"port": free}, own)  # noqa: E731
         # a plain, free answer is honoured (surrounding spaces stripped)
-        with tty, mock.patch("builtins.input", side_effect=[f" {free} "]):
-            self.assertEqual(install._pick_port("127.0.0.1", False, None), free)
+        with tty, quiet, mock.patch("builtins.input", side_effect=[f" {free} "]):
+            self.assertEqual(ask("127.0.0.1"), free)
         # a taken port is refused; pressing enter takes the suggested free port
-        with tty, mock.patch("builtins.input", side_effect=[str(busy), ""]):
-            self.assertEqual(install._pick_port("127.0.0.1", False, None), free)
+        with tty, quiet, mock.patch("builtins.input", side_effect=[str(busy), ""]):
+            self.assertEqual(ask("127.0.0.1"), free)
         # typing the taken port again uses it anyway (consent is in-session only, like --port)
-        with tty, mock.patch("builtins.input", side_effect=[str(busy), str(busy)]):
-            self.assertEqual(install._pick_port("127.0.0.1", False, None), busy)
+        with tty, quiet, mock.patch("builtins.input", side_effect=[str(busy), str(busy)]):
+            self.assertEqual(ask("127.0.0.1"), busy)
         # garbage is re-asked
-        with tty, mock.patch("builtins.input", side_effect=["nope", str(free)]):
-            self.assertEqual(install._pick_port("127.0.0.1", False, None), free)
+        with tty, quiet, mock.patch("builtins.input", side_effect=["nope", str(free)]):
+            self.assertEqual(ask("127.0.0.1"), free)
         # our own already-running daemon's port is not treated as a conflict
-        with tty, mock.patch("builtins.input", side_effect=[str(busy)]):
-            self.assertEqual(install._pick_port("127.0.0.1", False, busy), busy)
+        with tty, quiet, mock.patch("builtins.input", side_effect=[str(busy)]):
+            self.assertEqual(ask("127.0.0.1", busy), busy)
+        # a port that was ours but is now taken is steered off before asking
+        with tty, quiet, mock.patch("builtins.input", side_effect=[""]):
+            self.assertNotEqual(setupflow.ask_port("127.0.0.1", {"port": busy}, None), busy)
         # non-interactive: no prompt, env/default port
-        with mock.patch.object(sys.stdin, "isatty", lambda: False), mock.patch.dict(os.environ, {"GROVY_PORT": "7340"}):
-            self.assertEqual(install._pick_port("127.0.0.1", False, None), 7340)
+        with mock.patch.object(tui, "interactive", lambda: False), mock.patch.dict(os.environ, {"GROVY_PORT": "7340"}):
+            self.assertEqual(setupflow.ask_port("127.0.0.1", {}, None), 7340)
 
     def test_dry_run_changes_nothing(self):
         home = tempfile.mkdtemp(dir=TMP)
@@ -1014,7 +1096,7 @@ class TestSetupAndCustomCss(unittest.TestCase):
                 mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError)), redirect_stdout(out):
             rc = grovy.main(["setup", "--dry-run", "--bind", "0.0.0.0", "--no-service"])
         self.assertEqual(rc, 0)
-        self.assertIn("linking", out.getvalue())
+        self.assertIn("link ~/.local/bin/grovy", out.getvalue())
         self.assertEqual(os.listdir(home), [])
 
     def test_setup_finishes_with_the_phone_qr(self):
@@ -1028,10 +1110,10 @@ class TestSetupAndCustomCss(unittest.TestCase):
                                   lambda *a, **k: {"url": "http://10.0.0.5:7333"}), redirect_stdout(out):
             rc = grovy.main(["setup", "--bind", "10.0.0.5", "--no-service"])
         self.assertEqual(rc, 0)
-        self.assertIn("Scan this on your phone", out.getvalue())
+        self.assertIn("Scan it, or open the link, once on each device", out.getvalue())
         self.assertIn("▀", out.getvalue())                       # the half-block the QR is drawn with
-        self.assertNotIn("10.0.0.5:7333", out.getvalue())             # the long URL is shown as a code, not text
-        self.assertIn(os.path.join(home, "cfg", "grovy"), out.getvalue())
+        self.assertIn("http://10.0.0.5:7333/?token=", out.getvalue())  # and the link, for a device without a camera
+        self.assertIn("~/cfg/grovy", out.getvalue())
         self.assertLessEqual({"custom.css", "custom.js"}, set(os.listdir(os.path.join(home, "cfg", "grovy"))))
 
     def test_config_dir_changes_the_fingerprint_only_when_set(self):
