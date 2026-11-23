@@ -40,6 +40,10 @@ for _k in ("GROVY_HOME", "CCS_HOME", "GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
 from grovylib import peers, plugins, claude, cleanup, client, graft, setupflow, tui, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tls, tmuxctl, uploads  # noqa: E402
+# Paths fixed when grovy's modules load, from the real home: never let a test reach the real ~/.ssh or systemd units.
+graft.KEY = os.path.join(TMP, "home-ssh", "grovy_tunnel")
+graft.UNIT = os.path.join(TMP, "home-units", "grovy-tunnel.service")
+setupflow.UNIT = os.path.join(TMP, "home-units", "grovy.service")
 
 
 def ev(name, **kw):
@@ -944,16 +948,54 @@ class TestCleanup(unittest.TestCase):
         self.assertEqual(cleanup.unit_owner(self.unit("%h/dev/grovy/grovy")), os.path.join(self.home, "dev", "grovy"))
 
     def test_a_failed_step_keeps_the_record_for_the_rerun(self):
-        """Review: the trunk step failed, then the state folder (holding the record) was removed anyway, so the rerun
-        said "Done" and the trunk kept the entry; the key was deleted too."""
+        """Review: a step failed, then the state folder (holding the record) was removed anyway, so the rerun said
+        "Done" and never retried it; the tunnel key was deleted too."""
         os.makedirs(os.path.dirname(graft.KEY), exist_ok=True)
         open(graft.KEY, "w").close()
-        install.update_record(linger=True, graft={"trunk": "u@t", "name": "pc", "key": graft.KEY})
-        with mock.patch.object(graft, "remove_on_trunk", side_effect=RuntimeError("unreachable")):
+        install.update_record(linger=True, graft={"key": graft.KEY})
+        with mock.patch.object(cleanup.subprocess, "run",
+                               lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "denied")):
             rc, out = self.run_cleanup("-y")
         self.assertEqual(rc, 1)
         self.assertTrue(os.path.exists(install.record_path()) and os.path.exists(graft.KEY))
         self.assertIn("skipped", out)
+
+    def test_a_trunk_that_is_gone_doesnt_block_cleanup(self):
+        """Second review: an unreachable (decommissioned) trunk made every cleanup fail and keep everything."""
+        os.makedirs(os.path.dirname(graft.KEY), exist_ok=True)
+        open(graft.KEY, "w").close()
+        install.update_record(graft={"trunk": "u@gone", "name": "pc", "key": graft.KEY},
+                              old_grafts=[{"trunk": "u@older", "name": "pc"}])
+        with mock.patch.object(graft, "remove_on_trunk", side_effect=RuntimeError("unreachable")) as rm:
+            rc, out = self.run_cleanup("-y")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(rm.call_count, 2)
+        self.assertIn("unreachable", out)
+        self.assertFalse(os.path.exists(graft.KEY) or os.path.exists(self.state))
+
+    def test_stop_pid_doesnt_take_a_busy_daemon_for_gone(self):
+        """Second review: a status timeout counted as "already gone", so the state was removed under it."""
+        with mock.patch.object(client, "sock_request", side_effect=socket.timeout("timed out")), \
+                mock.patch.object(os, "kill") as kill:
+            with self.assertRaises(RuntimeError):
+                cleanup._stop_pid(4242)
+            kill.assert_not_called()
+        with mock.patch.object(client, "sock_request", side_effect=ConnectionRefusedError), \
+                mock.patch.object(os, "kill") as kill:
+            cleanup._stop_pid(4242)                       # really gone: fine, nothing to kill
+            kill.assert_not_called()
+
+    def test_unit_owner_reads_the_forms_systemd_allows(self):
+        here = os.path.realpath(core.HERE)
+        for line in (f"ExecStart=-{here}/grovy serve", f"ExecStart = {here}/grovy serve",
+                     f"ExecStart=/usr/bin/python3 {here}/grovy.py serve", f'ExecStart="{here}/grovy" serve'):
+            self.assertEqual(cleanup.unit_owner(self.unit_text(line)), here, line)
+
+    def unit_text(self, line):
+        path = os.path.join(self.home, "u.service")
+        with open(path, "w") as f:
+            f.write(f"[Service]\nExecStart=\n{line}\n")
+        return path
 
     def test_linger_off_failing_is_a_failure(self):
         install.update_record(linger=True)
@@ -1130,6 +1172,10 @@ class TestSetupFlow(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 setupflow.plan_trunk("0.0.0.0", 7390, True, False, {})
 
+    def test_an_address_thats_down_doesnt_move_the_port(self):
+        """Second review: binding an address that isn't up fails, which read as "busy", so -y moved the port."""
+        self.assertFalse(install._port_busy("10.255.255.254", 7333))
+
     def test_the_port_check_probes_the_address_itself(self):
         """Review: for 0.0.0.0 it probed 127.0.0.1 and missed a listener on one specific address."""
         seen = []
@@ -1280,6 +1326,31 @@ class TestGraft(unittest.TestCase):
         self.assertNotIn("REMOVED", r.stdout)
         self.assertEqual(open(ak, "rb").read(), content)
         self.assertTrue(os.path.exists(fake))
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_remove_leaves_the_computer_that_took_the_name(self):
+        """Second review: removal matched the name too, so a computer that had been replaced deleted its
+        replacement's key line on the trunk."""
+        pub = self.keypair()
+        theirs = "restrict ssh-ed25519 AAAAreplacementreplacement grovy-tunnel:pc"
+        trunk, ak = self.trunk_with(f"{theirs}\n".encode())
+        r = self.run_remote(graft.REMOVE_SCRIPT.replace("@NAME@", "pc"), pub + "\n", trunk)
+        self.assertIn("REMOVED", r.stdout)
+        self.assertEqual(open(ak).read(), theirs + "\n")
+        r = self.run_remote(graft.REMOVE_SCRIPT.replace("@NAME@", "pc"), "\n", trunk)   # no key known: by name
+        self.assertEqual(open(ak).read(), "")
+
+    def test_leave_without_systemctl_and_from_the_unit(self):
+        """Second review: leave() crashed where there is no systemctl; a graft without a record lost its trunk."""
+        with open(graft.UNIT, "w") as f:
+            f.write(graft.tunnel_unit("me@hub", "pc", 7334, path="/bin"))
+        self.assertEqual(graft.from_unit(), {"trunk": "me@hub", "name": "pc"})
+        with mock.patch.dict(os.environ, {"GROVY_STATE_DIR": os.path.join(self.home, "st-grovy")}), \
+                mock.patch.object(shutil, "which", lambda x: None), mock.patch.object(graft, "remove_on_trunk") as rm, \
+                redirect_stdout(io.StringIO()):
+            graft.leave({"trunk": "me@hub", "name": "pc"}, "now a trunk")
+        rm.assert_called_once()
+        self.assertFalse(os.path.exists(graft.UNIT))
 
     def test_add_script_refuses_an_empty_key(self):
         """An empty pattern would make `grep -v` drop every line of authorized_keys."""

@@ -195,12 +195,12 @@ def ask_name(rec, taken, given=None):
 # still there (line counts), and any failure leaves the file untouched. A symlinked file is written through.
 EDIT_KEYS = r"""
 edit_keys() {
-  a="$HOME/.ssh/authorized_keys"; body="$1"; line="$2"
+  a="$HOME/.ssh/authorized_keys"; body="$1"; line="$2"; tag="$3"   # tag: also drop lines ending in it
   [ -n "$body" ] || { echo "no key received" >&2; return 5; }
   [ -f "$a" ] || { [ -n "$line" ] || return 0; : > "$a"; }
   t=$(mktemp "$HOME/.ssh/.authorized_keys.grovy.XXXXXX") || { echo "can't make a temporary file in ~/.ssh" >&2; return 6; }
-  n=$(LC_ALL=C awk -v body="$body" -v tag="grovy-tunnel:@NAME@" '
-    { drop = ($NF == tag); for (i = 1; i <= NF; i++) if ($i == body) drop = 1 }
+  n=$(LC_ALL=C awk -v body="$body" -v tag="$tag" '
+    { drop = (tag != "" && $NF == tag); for (i = 1; i <= NF; i++) if ($i == body) drop = 1 }
     drop { n++; next } { print } END { print n + 0 > "/dev/stderr" }' "$a" 2>&1 >"$t") || { rm -f "$t"; echo "awk failed" >&2; return 7; }
   if [ -n "$line" ]; then printf '%s\n' "$line" >> "$t" || { rm -f "$t"; return 8; }; fi
   total=$(LC_ALL=C awk 'END { print NR }' "$a"); kept=$(LC_ALL=C awk 'END { print NR }' "$t")
@@ -221,7 +221,7 @@ case "$s" in *[!A-Za-z0-9/._-]*) echo "the socket path $s has characters grovy w
 umask 077
 mkdir -p "$HOME/.ssh"
 body=$(printf '%s\n' "$key" | cut -d' ' -f2)
-edit_keys "$body" "$(printf 'restrict,port-forwarding,permitopen="127.0.0.1:9",permitlisten="127.0.0.1:9",command="rm -f %s; echo %s" %s grovy-tunnel:@NAME@' "$s" "$s" "$key")"
+edit_keys "$body" "$(printf 'restrict,port-forwarding,permitopen="127.0.0.1:9",permitlisten="127.0.0.1:9",command="rm -f %s; echo %s" %s grovy-tunnel:@NAME@' "$s" "$s" "$key")" "grovy-tunnel:@NAME@"
 @RMOLD@
 printf '%s\n' "$tok" | "$g" peer add @NAME@ --socket "$s" >/dev/null
 printf 'SOCKET=%s\n' "$s"
@@ -230,7 +230,9 @@ printf 'SOCKET=%s\n' "$s"
 REMOVE_SCRIPT = FIND_GROVY + EDIT_KEYS + r"""
 read -r key
 body=$(printf '%s\n' "$key" | cut -d' ' -f2)
-edit_keys "${body:-grovy-no-key}" "" || exit $?
+# Only this computer's key: another computer may hold the name now (it replaced this one). Without the key (deleted
+# here), the name's line is taken instead.
+if [ -n "$body" ]; then edit_keys "$body" "" "" || exit $?; else edit_keys grovy-no-key "" "grovy-tunnel:@NAME@" || exit $?; fi
 "$g" peer rm @NAME@ >/dev/null 2>&1 || true
 echo REMOVED
 """
@@ -300,20 +302,45 @@ def leave(g, why):
     """Take this computer off the trunk it was grafted to (`g`, the record's graft entry): stop and remove the tunnel
     service, remove its line and peer entry there, delete the key. If the trunk can't be reached, say so and keep
     the record's entry, so that grovy cleanup can try again; the key stays then, as the trunk still accepts it."""
-    subprocess.run(["systemctl", "--user", "disable", "--now", "grovy-tunnel"], capture_output=True, timeout=60)
+    if shutil.which("systemctl"):
+        try:
+            subprocess.run(["systemctl", "--user", "disable", "--now", "grovy-tunnel"], capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        tui.warn("stop the tunnel you started by hand, if it runs: tmux kill-session -t grovy-tunnel")
     for p in (UNIT, os.path.expanduser("~/.config/systemd/user/default.target.wants/grovy-tunnel.service")):
         if os.path.lexists(p):
             os.unlink(p)
+    olds = [o for o in install.read_record().get("old_grafts", []) if isinstance(o, dict)
+            and (o.get("trunk"), o.get("name")) != (g.get("trunk"), g.get("name"))]
+    if not g.get("trunk"):
+        tui.warn("which trunk this computer was grafted onto isn't known: on that trunk, run grovy peer rm NAME and "
+                 "delete the line ending in grovy-tunnel:NAME from ~/.ssh/authorized_keys")
+        return
     try:
         remove_on_trunk(g)
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         tui.warn(f"{e} ({why}; grovy cleanup tries again)")
-        install.update_record(old_grafts=[*install.read_record().get("old_grafts", []), g])
+        install.update_record(old_grafts=[*olds, g])
         return
+    install.update_record(old_grafts=olds)
     if why == "now a trunk":
         for p in (KEY, KEY + ".pub"):
             if os.path.exists(p):
                 os.unlink(p)
+
+
+def from_unit():
+    """{trunk, name} read back from the tunnel's unit file (a graft set up before the record knew it), or {}."""
+    try:
+        with open(UNIT) as f:
+            m = re.search(r"^ExecStart=\S+ peer tunnel (\S+) --name (\S+)", f.read(), re.M)
+    except OSError:
+        return {}
+    if not m or not peers.HOST_RE.fullmatch(m.group(1).replace("%%", "%")) or not peers.valid_peer(m.group(2)):
+        return {}
+    return {"trunk": m.group(1).replace("%%", "%"), "name": m.group(2)}
 
 
 def tunnel_command(trunk, name, port):

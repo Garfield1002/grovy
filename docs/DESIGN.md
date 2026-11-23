@@ -139,7 +139,8 @@ outside the service), it says so instead. A failing `enable-linger` is a warning
 a failure. Answers are preselected from the record, or for an install older than it from the unit itself
 (`GROVY_BIND`, `GROVY_PORT`, `GROVY_TLS`; HTTPS on when `server.pem` exists and isn't turned off); a recorded address
 that isn't up right now stays offered and the default. With `-y`, every question takes its default (`tui.AUTO`)
-and it applies; without a terminal and without `-y` it shows the plan and changes nothing. HTTPS with no address or
+and it applies; without a terminal and without `-y` it shows the plan, changes nothing and exits 2. An address that
+isn't up right now can't be probed for its port: that port counts as free. HTTPS with no address or
 host name to put in the certificate is refused. The unit carries `GROVY_HOME`/`GROVY_STATE_DIR` when they are set,
 and `PATH` quoted. Ctrl-C stops it with a line saying what stays; flags
 (`--role`, `--bind`, `--port`, `--https/--no-https`, `--no-service`, `--dry-run`) answer questions up front.
@@ -148,8 +149,9 @@ and `PATH` quoted. Ctrl-C stops it with a line saying what stays; flags
 `--dry-run` only shows; looking makes no folder: one created by the look itself is removed). It refuses to start when
 a `grovy`/`grovy-tunnel` unit runs another grovy folder (its `ExecStart`, `%h` expanded): that grovy shares the
 state. Steps that stop something (a service, a daemon) stop cleanup if they fail; steps that remove what a rerun
-needs (the state with its record, the tunnel key) are skipped once anything failed, so `grovy cleanup` again retries
-exactly what's left. A hand-started daemon's pid is checked again just before it is stopped. It stops and removes the `grovy` and `grovy-tunnel` services and unit files (and `.bak`),
+needs (the state with its record, the tunnel key) run last and are skipped once anything failed, so `grovy cleanup`
+again retries exactly what's left. A hand-started daemon's pid is checked again just before it is stopped (a daemon
+that doesn't answer is a failure, not "gone"). It stops and removes the `grovy` and `grovy-tunnel` services and unit files (and `.bak`),
 stops a daemon running outside the service (by the `pid` the daemon reports in `status`; a daemon too old to report
 one makes cleanup stop before changing anything), removes the link only if it points to this grovy folder, turns
 linger off only if the record says setup turned it on, and removes the state folder, the ccs symlink and the
@@ -789,9 +791,10 @@ dedicated key `~/.ssh/grovy_tunnel` (ed25519, no passphrase: the service has no 
 same key in `~/.ssh/authorized_keys` and appends
 `restrict,port-forwarding,permitopen="127.0.0.1:9",permitlisten="127.0.0.1:9",command="rm -f SOCK; echo SOCK" KEY
 grovy-tunnel:NAME` (`permitlisten` stops the key opening TCP listeners on the trunk; a Unix-socket `-R` isn't limited
-by it, see "Trust"), makes the socket's folder 0700, runs `grovy peer add NAME --socket SOCK`, prints the path. The
-file is edited by `edit_keys` (shared with the removal): it drops the lines holding this key, or ending in
-`grovy-tunnel:NAME` (another computer that had the name), comparing awk fields exactly on bytes (`LC_ALL=C`: grep
+by it, see "Trust"; it needs OpenSSH 7.8 or newer on the trunk, whose older sshd rejects the whole line), makes the socket's folder 0700, runs `grovy peer add NAME --socket SOCK`, prints the path. The
+file is edited by `edit_keys` (shared with the removal): adding drops the lines holding this key, or ending in
+`grovy-tunnel:NAME` (another computer that had the name); removing drops only this key's line (the name may belong to
+the computer that replaced this one by now), or the name's line when the key is gone here; comparing awk fields exactly on bytes (`LC_ALL=C`: grep
 in a UTF-8 locale silently dropped lines that weren't valid UTF-8), writes a temporary file in `~/.ssh`, and puts it
 in place (`mv`, or written through a symlink) only if the line counts add up; any failure leaves the file as it was.
 An empty key, and a socket path outside `[A-Za-z0-9/._-]`, are refused. Then the
@@ -801,10 +804,12 @@ normal `grovy peer tunnel` works with the restricted key whatever the trunk's `S
 logins share one ssh connection (`ControlMaster`, a private temporary `ControlPath`, closed at exit), so a password
 is asked once. It ends by polling `grovy peer ls` on the trunk until the graft shows online (30s), else it says where
 to look. `grovy cleanup` on the graft runs `graft.REMOVE_SCRIPT` on the trunk (drops the key's line, `grovy peer rm
-NAME`; if the trunk can't be reached it says what to run there, and keeps the record and the key for a rerun) and
-deletes the key it made. Pointing a graft at another trunk takes it off the old one first; setup as a trunk on a
+NAME`; if the trunk can't be reached, a trunk that may be gone for good, it warns and says what to run there, and
+goes on: the key is deleted here, so the line left there is dead) and deletes the key it made. Pointing a graft at another trunk takes it off the old one first; setup as a trunk on a
 former graft stops and removes the tunnel and takes it off its trunk (`graft.leave`). A trunk that can't be reached
-then is kept in the record (`old_grafts`) for cleanup. Limits: the trunk's login shell must be sh-like (a csh can't
+then is kept in the record (`old_grafts`, one entry per trunk and name, dropped once reached) for cleanup; a graft
+set up before the record knew its trunk is read back from its unit. busybox awk splits a line at a NUL byte (gawk,
+mawk keep it). Limits: the trunk's login shell must be sh-like (a csh can't
 parse the multi-line `sh -c '…'`); with `ProxyJump`, `--identity` doesn't reach the jump host and the service has no
 agent, so the tunnel fails even though setup worked.
 Checked against OpenSSH 10.0 (a private sshd, default `StreamLocalBindUnlink no`): a command asked for over the key

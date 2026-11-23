@@ -186,8 +186,9 @@ def _port_busy(bind, port):
     try:
         s.bind((bind, port))
         return False
-    except OSError:
-        return True
+    except OSError as e:
+        import errno
+        return e.errno != errno.EADDRNOTAVAIL   # the address isn't up right now (a VPN that is down): can't tell
     finally:
         s.close()
 

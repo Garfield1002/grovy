@@ -62,6 +62,13 @@ def must(fn):
     return fn
 
 
+def soft(fn):
+    """A step whose failure is only a warning: removing this computer from a trunk that is gone for good must not
+    keep it from being cleaned up here (the key is deleted below, so the trunk's line for it is dead anyway)."""
+    fn.soft = True
+    return fn
+
+
 def final(fn):
     """A step skipped if anything before it failed: it removes what a rerun needs (the record, the tunnel key)."""
     fn.final = True
@@ -73,9 +80,13 @@ def unit_owner(path):
     try:
         with open(path) as f:
             for line in f:
-                if line.startswith("ExecStart="):
-                    exe = line[len("ExecStart="):].split()[0].replace("%h", os.path.expanduser("~")).replace("%%", "%")
-                    return os.path.dirname(os.path.realpath(exe))
+                key, _, value = line.partition("=")
+                if key.strip() == "ExecStart" and value.strip():
+                    words = [w.lstrip("-@+!:").strip('"').replace("%h", os.path.expanduser("~")).replace("%%", "%")
+                             for w in value.split()]
+                    if os.path.basename(words[0]).startswith("python") and len(words) > 1:
+                        words = words[1:]   # python3 .../grovy.py serve
+                    return os.path.dirname(os.path.realpath(words[0]))
     except (OSError, IndexError):
         pass
     return None
@@ -122,7 +133,7 @@ def plan(record, systemd, state_existed=True):
     for o in [g, *olds]:
         if o.get("trunk") and o.get("name"):
             steps.append((f"on {o['trunk']}: remove this computer ({o['name']}) and its tunnel key line",
-                          lambda o=o: graft.remove_on_trunk(o)))
+                          soft(lambda o=o: graft.remove_on_trunk(o))))
     if not g.get("key") and any(o.get("key") for o in olds):
         g = {"key": next(o["key"] for o in olds if o.get("key"))}
     key = g.get("key")
@@ -138,7 +149,7 @@ def plan(record, systemd, state_existed=True):
         steps.append(("turn linger off (setup turned it on)", _linger_off))
     # 4. what grovy keeps: state (token, sessions list, certificates, the setup record) and the files sent from the
     # phone. Last, and only if nothing failed: a rerun needs the record.
-    sd = install.state_path()
+    sd = os.path.normpath(install.state_path())   # removed exactly as checked
     if state_existed and safe_to_remove(sd):
         steps.append((f"remove {tui.short(sd)} (sessions list, login token, certificates)",
                       final(lambda: shutil.rmtree(sd))))
@@ -147,7 +158,7 @@ def plan(record, systemd, state_existed=True):
             steps.append((f"remove {old} (link left by the rename from ccs)", final(lambda: os.unlink(old))))
     elif state_existed and os.path.isdir(sd):
         tui.warn(f"{sd} is kept: it doesn't look like a folder of grovy's own (or it is a link): remove it yourself")
-    att = os.path.dirname(core.attachments_dir())
+    att = os.path.normpath(os.path.dirname(core.attachments_dir()))
     if safe_to_remove(att):
         steps.append((f"remove {att} (files sent from the phone)", final(lambda: shutil.rmtree(att))))
     return steps, None
@@ -168,9 +179,11 @@ def _stop_pid(pid):
     """Stop the hand-started daemon, checking first that it is still the one that said it was `pid` (not a process
     that got the number since)."""
     try:
-        st = client.sock_request({"type": "status"}, timeout=1.0) or {}
-    except (OSError, ValueError):
+        st = client.sock_request({"type": "status"}, timeout=5.0) or {}
+    except (ConnectionRefusedError, FileNotFoundError):
         return   # already gone
+    except (OSError, ValueError) as e:   # busy or confused: not proof it's gone
+        raise RuntimeError(f"the daemon didn't answer ({e}): stop it yourself, then run grovy cleanup again")
     if st.get("pid") != pid:
         raise RuntimeError(f"the daemon isn't pid {pid} any more: run grovy cleanup again")
     try:
@@ -220,7 +233,7 @@ def cmd_cleanup(a):
 
 def _run(a, interactive, record, steps):
     live = sorted(tmuxctl.tmux_managed())
-    home = core.home_env() or record.get("home") or core.config_dir()
+    home = os.path.normpath(core.home_env() or record.get("home") or core.config_dir())
     tui.say(tui.paint("Remove grovy from this computer", "bold"))
     tui.note(f"The grovy folder ({tui.short(core.HERE)}) is kept: grovy setup sets it up again.")
     if not record:
@@ -246,6 +259,8 @@ def _run(a, interactive, record, steps):
             tui.warn(f"{home} doesn't look like a folder of grovy's own: remove it yourself")
     if not record.get("linger") and _linger_on():
         tui.note("Linger stays on (setup didn't turn it on); loginctl disable-linger turns it off.")
+    steps = [x for x in steps if not getattr(x[1], "final", False)] + \
+        [x for x in steps if getattr(x[1], "final", False)]   # what a rerun needs goes last, after everything else
     tui.say()
     if not steps:
         tui.ok("Nothing to remove: grovy isn't set up here.")
@@ -268,6 +283,9 @@ def _run(a, interactive, record, steps):
             action()
             tui.ok(label)
         except Exception as e:   # keep going, except after a step whose failure makes the rest unsafe
+            if getattr(action, "soft", False):
+                tui.warn(f"{label}: {e}")
+                continue
             failed += 1
             tui.fail(f"{label}: {e}")
             if getattr(action, "must", False):

@@ -263,7 +263,7 @@ def plan_trunk(bind, port, https, systemd, rec, role="trunk"):
                     return
                 install.update_record(linger=True)
             steps.append(("keep running after you log out (linger)", do_linger))
-    g = rec.get("graft") if isinstance(rec.get("graft"), dict) else {}
+    g = rec.get("graft") if isinstance(rec.get("graft"), dict) and rec["graft"].get("trunk") else graft.from_unit()
     if role == "trunk" and (g.get("trunk") or os.path.exists(graft.UNIT)):
         def do_leave():
             graft.leave(g, "now a trunk")
@@ -331,7 +331,7 @@ def finish_trunk(bind, port, systemd):
         return
     tui.say()
     live = daemon_status().get("url", "")
-    if f"{bind}:{port}" not in live:   # a daemon outside the service still runs the old settings
+    if live.rstrip("/") not in (f"http://{bind}:{port}", f"https://{bind}:{port}"):   # e.g. a daemon outside the service
         tui.warn(f"the grovy running now listens on {live or 'something else'}, not {bind}:{port}: stop it, then "
                  "systemctl --user start grovy (sessions keep running)")
         next_steps()
@@ -426,7 +426,7 @@ def _setup(a):
     tui.step(4, total, "Review")
     steps = plan_trunk(bind, port, https, systemd, rec)
     if not review_and_apply("Ready to set up a trunk:", steps, a.dry_run):
-        return 0
+        return 0 if a.dry_run or tui.interactive() else 2
     if os.path.expanduser("~/.local/bin") not in os.environ.get("PATH", "").split(os.pathsep):
         tui.warn("~/.local/bin is not on your PATH; add it in your shell profile: export PATH=\"$HOME/.local/bin:$PATH\"")
     finish_trunk(bind, port, systemd)
@@ -449,7 +449,7 @@ def _setup_graft(a, rec, total):
     tui.step(4, total, "Review")
     steps = plan_trunk("127.0.0.1", port, False, systemd, rec, role="graft") + graft.plan(trunk, name, port, systemd, rec)
     if not review_and_apply(f"Ready to graft this computer onto {trunk} as {name}:", steps, a.dry_run):
-        return 0
+        return 0 if a.dry_run or tui.interactive() else 2
     tui.say()
     if not systemd:
         tui.warn("no systemd user session here: start grovy and the tunnel yourself, e.g. in tmux:")
