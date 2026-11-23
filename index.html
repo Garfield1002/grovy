@@ -14,12 +14,13 @@
 :root { --bg:#f7f6f3; --fg:#1d1d1b; --mut:#77756e; --faint:#a9a69e; --card:#fff; --line:#e4e2dc;
   --acc:#c96442; --user:#dfe8fb; --code:#efede7; --ok:#2f8a4c; --warn:#c27c0e; --bad:#c2402f; --busy:#3a6fd8;
   /* for themes (⋯ → Theme): the titles' font, a texture under the page, the backdrop tree's colour and strength */
+  --sans:-apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
   --title-font:inherit; --grain:none; --tree:var(--faint); --tree-opacity:.22; }
 @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ebe9e4; --mut:#9c998f; --faint:#64625c;
   --card:#21211f; --line:#33322f; --acc:#e08a67; --user:#25365c; --code:#252523; --ok:#5cc47e; --warn:#f0a63a;
   --bad:#f0705f; --busy:#7aa2ff; --tree:var(--mut); } }   /* --faint barely shows on a dark page */
 html, body { margin:0; background:var(--grain) var(--bg); color:var(--fg);
-  font:16px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  font:16px/1.5 var(--sans); }
 body { min-height:100vh; min-height:100dvh; display:flex; flex-direction:column; }
 button { font:inherit; color:inherit; cursor:pointer; }
 /* tap targets aren't text: only what you'd copy or quote is selectable (long-pressing a card mustn't start a selection) */
@@ -60,7 +61,7 @@ main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px
   padding:14px 4px; border-bottom:1px solid var(--line); }
 .sess .dot { margin-top:7px; }
 .sess .body { flex:1; min-width:0; }
-.sess .top { display:flex; gap:8px; align-items:baseline; }
+.sess .top { display:flex; gap:8px; align-items:center; }   /* pills stay centred on the name, whatever its font */
 .sess .name { font-weight:650; font-size:17px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
 .sess .when { font-size:13px; color:var(--mut); flex:none; }
 .sess .sub { font-size:13px; color:var(--mut); }
@@ -69,7 +70,7 @@ main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px
 .sess .rm { align-self:center; flex:none; font-size:13px; font-weight:600; color:var(--bad); border:1px solid var(--line);
   border-radius:99px; padding:6px 12px; background:var(--card); }
 .mach { font-size:11px; font-weight:650; color:var(--mut); border:1px solid var(--line); border-radius:6px; padding:0 5px;
-  margin-right:6px; vertical-align:2px; }
+  margin-right:6px; vertical-align:middle; font-family:var(--sans); letter-spacing:0; }
 .machines { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 12px; }
 .machines .btn.sel { outline:2px solid var(--acc); }
 .sess .badge { font-size:12px; font-weight:700; color:#fff; background:var(--warn); border-radius:99px; padding:1px 8px; }

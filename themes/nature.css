@@ -18,6 +18,7 @@ header h1, .sess .name, #sheet h2, .md :is(h1, h2, h3, h4), .wt { font-weight:60
 header h1 { font-size:19px; }
 body.home header h1, #side .sh a { font-size:21px; font-weight:500; letter-spacing:.02em; }
 .sess .name { font-size:19px; } #slist .sess .name { font-size:17px; }
+.sess .dot { margin-top:9px; } #slist .sess .dot { margin-top:8px; }   /* centred on the larger name */
 .md h1 { font-size:1.35em } .md h2 { font-size:1.22em } .md h3, .md h4 { font-size:1.08em }
 .wt { font-size:1.06em; }
 .sect { font-size:12.5px; letter-spacing:.14em; font-weight:500; }
