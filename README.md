@@ -122,7 +122,9 @@ as trusted all the same: details in `docs/DESIGN.md` ("Other machines").
 On the trunk, grovy's commands work on the PC's sessions too: `grovy ls` lists them, and `grovy attach pc:NAME`
 (also `logs`, `kill`, `resume`, `rename`, `new`) reaches one; on the PC, `grovy ls` lists the trunk's sessions too,
 as `trunk:NAME`, and `grovy attach trunk:NAME` reaches one. A name alone works too when only one machine has it
-(`grovy attach Tups`); when several do, grovy asks which. Setup asks whether the trunk may open a terminal on the PC (`attach`); without it, the rest still works.
+(`grovy attach Tups`); when several do, grovy asks which. `grovy shell pc` (or `grovy shell trunk` on the PC) opens a shell on the other machine, in tmux: C-b d leaves
+it running, and the next `grovy shell` picks it up. Setup asks whether the trunk may open a terminal on the PC
+(`attach` and `shell`); without it, the rest still works.
 
 `grovy peer ls` on the trunk says whether the PC is online. `grovy cleanup` on the PC removes it from the trunk too.
 While the PC is off, its sessions show as "unknown" and the home screen says so. What works on the trunk only (new

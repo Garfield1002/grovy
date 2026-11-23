@@ -727,6 +727,8 @@ class Http(http.server.BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/sessions/([^/]+)/terminal", urlsplit(self.path).path)
         if m:   # `grovy attach pc:NAME` from the trunk (grovylib/terminal.py)
             return self._terminal(m.group(1))
+        if urlsplit(self.path).path == "/api/shell":   # `grovy shell pc` from the trunk
+            return self._terminal(None)
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
             return self._err(415, "Content-Type must be application/json")
         try:
@@ -918,14 +920,16 @@ class Http(http.server.BaseHTTPRequestHandler):
         return 404, {"error": "not found"}
 
     def _terminal(self, name):
-        """A terminal on a session, for `grovy attach` from another machine: only with GROVY_TERMINAL=on, only from
-        a client that sends the Upgrade header (a browser page can't), then relayed until either side ends it."""
+        """A terminal on a session (name None: a login shell), for `grovy attach`/`grovy shell` from another machine:
+        only with GROVY_TERMINAL=on, only from a client that sends the Upgrade header (a browser page can't), then
+        relayed until either side ends it."""
         if not terminal.enabled():
             return self._err(403, "the terminal is off on this computer (its grovy setup, or GROVY_TERMINAL=on)")
         if self.headers.get("X-Grovy") != "1" or self.headers.get("Upgrade") != terminal.UPGRADE:
             return self._err(400, "not a terminal request")
-        if not core.valid_name(name) or not tmuxctl.tmux_alive(name):
+        if name is not None and (not core.valid_name(name) or not tmuxctl.tmux_alive(name)):
             return self._err(404, f"no live session {name!r} here")
+        what = "a shell" if name is None else name
         def num(h, d):
             v = self.headers.get(h, "")
             return int(v) if v.isascii() and v.isdigit() and 1 <= int(v) <= 1000 else d
@@ -936,12 +940,12 @@ class Http(http.server.BaseHTTPRequestHandler):
         self.send_header("Connection", "Upgrade")
         self.end_headers()
         self.wfile.flush()
-        print(f"grovyd: terminal opened on {name}", file=sys.stderr, flush=True)
+        print(f"grovyd: terminal opened on {what}", file=sys.stderr, flush=True)
         try:
             terminal.serve(self.connection, name, rows, cols, term)
         except Exception as e:   # the stream is ours now: never a traceback into the handler
-            print(f"grovyd: terminal on {name} ended: {e}", file=sys.stderr, flush=True)
-        print(f"grovyd: terminal closed on {name}", file=sys.stderr, flush=True)
+            print(f"grovyd: terminal on {what} ended: {e}", file=sys.stderr, flush=True)
+        print(f"grovyd: terminal closed on {what}", file=sys.stderr, flush=True)
 
     def _sse(self):
         self.send_response(200)

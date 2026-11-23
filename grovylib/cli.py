@@ -412,6 +412,10 @@ def build_parser():
     s = sub.add_parser("logs", help="print recent tmux scrollback")
     s.add_argument("name"), s.add_argument("-n", "--lines", type=int, default=200)
     s.set_defaults(fn=cmd_logs)
+    s = sub.add_parser("shell", help="a login shell on another machine (pc on a trunk, trunk on a graft), in tmux: "
+                       "C-b d leaves it running, the next grovy shell joins it")
+    s.add_argument("machine", nargs="?")
+    s.set_defaults(fn=remote.cmd_shell)
     s = sub.add_parser("serve", help="run the daemon")
     s.add_argument("--bind", default=core.env("BIND", "127.0.0.1"))
     s.add_argument("--port", type=int, default=core.env_int("PORT", 7333))

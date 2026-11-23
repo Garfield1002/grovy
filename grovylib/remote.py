@@ -54,6 +54,33 @@ def on_trunk(host, argv, tty=False):
     os.execvp("ssh", ["ssh", *(["-t"] if tty else []), *peers.COMMAND_OPTS, "--", host, cmd])
 
 
+def cmd_shell(a):
+    """`grovy shell MACHINE`: a login shell on another machine, in its tmux session terminal.SHELL_SESSION (joined
+    if it's there: a dropped link loses nothing). A graft's through its grovy (its terminal yes); the trunk's over
+    your usual ssh."""
+    where = machines_here()
+    if not a.machine:
+        core.die("which machine? " + (", ".join(where) if where else
+                                      "(this computer has no grafts, and isn't grafted onto a trunk)"))
+    kind, target = resolve(a.machine.rstrip(":"))
+    if kind == "trunk":
+        if not peers.HOST_RE.fullmatch(target) or target.startswith("-"):
+            core.die(f"bad trunk address {target!r} in the setup record")
+        return os.execvp("ssh", ["ssh", "-t", *peers.COMMAND_OPTS, "--", target,
+                                 f"exec tmux new-session -A -s {terminal.SHELL_SESSION}"])
+    try:
+        return terminal.attach(target, None)
+    except (RuntimeError, OSError) as e:
+        core.die(str(e))
+    except KeyboardInterrupt:
+        return 130
+
+
+def machines_here():
+    conf, _ = peers.read_config()
+    return sorted(conf) + (["trunk"] if trunk_host() else [])
+
+
 def _call(peer, method, path, body=None):
     try:
         code, obj = peer.call(method, path, body)

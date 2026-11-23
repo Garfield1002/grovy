@@ -10,6 +10,7 @@ import re
 import select
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -471,7 +472,7 @@ class TestRemoteCli(PeerLink):
         self.addCleanup(subprocess.run, ["tmux", "-L", self.tsock, "kill-server"], capture_output=True)
         self.peerc = peers.Peer("pc", {"socket": self.sock, "token": PEER_TOKEN, "tls": False}, None)
 
-    def attach_in_pty(self, keys, until, env_on=True):
+    def attach_in_pty(self, keys, until, env_on=True, name="t1"):
         """Run terminal.attach in a child on a pseudo-terminal; send `keys` once `until` shows; return the output.
         The graft's server runs here, in the parent: GROVY_TERMINAL is set for it, for the whole call."""
         import pty
@@ -482,7 +483,7 @@ class TestRemoteCli(PeerLink):
         if pid == 0:
             code = 1
             try:
-                code = terminal.attach(self.peerc, "t1")
+                code = terminal.attach(self.peerc, name)
             except Exception as e:
                 os.write(2, f"ERR {e}\n".encode())
             os._exit(code)
@@ -502,7 +503,10 @@ class TestRemoteCli(PeerLink):
                     os.write(fd, k)
                     time.sleep(0.3)
                 sent = True
-        _, status = os.waitpid(pid, 0)
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if not done:   # still attached at the deadline: a failure, never a hang
+            os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
         os.close(fd)
         return out, os.waitstatus_to_exitcode(status)
 
@@ -512,6 +516,38 @@ class TestRemoteCli(PeerLink):
         self.assertEqual(code, 0, out[-400:])
         shown = tmuxctl.tmux("capture-pane", "-p", "-t", "=grovy-t1:").stdout
         self.assertIn("hello-from-trunk", shown)          # it reached the session itself
+
+    def test_shell_opens_a_login_shell_in_its_own_tmux_session_and_rejoins_it(self):
+        # sent at once (no wait for a prompt: whatever yours looks like); the pty keeps it until the shell reads it
+        out, code = self.attach_in_pty([b"echo shell-$((6*7))\r", b"\x02d"], b"", name=None)
+        self.assertEqual(code, 0, out[-400:])
+        self.assertTrue(wait_for(lambda: "shell-42" in tmuxctl.tmux(   # the shell ran it, and it's still there
+            "capture-pane", "-p", "-t", "=" + terminal.SHELL_SESSION + ":").stdout))
+        out, code = self.attach_in_pty([b"\x02d"], b"shell-42", name=None)   # the next one joins it
+        self.assertEqual(code, 0, out[-400:])
+        self.assertIn(b"shell-42", out)
+        self.assertNotIn(terminal.SHELL_SESSION, tmuxctl.tmux_managed() if hasattr(tmuxctl, "tmux_managed") else [])
+
+    def test_shell_is_refused_unless_the_graft_allows_it(self):
+        out, code = self.attach_in_pty([], b"", env_on=False, name=None)
+        self.assertNotEqual(code, 0)
+        self.assertIn(b"the terminal is off on this computer", out)
+        with mock.patch.dict(os.environ, {"GROVY_TERMINAL": "on"}):
+            code, obj = self.peerc.call("POST", "/api/shell", {})   # no Upgrade: a browser can't
+        self.assertEqual(code, 400)
+
+    def test_shell_on_the_trunk_is_ssh_into_tmux(self):
+        with mock.patch.object(remote, "trunk_host", lambda: "me@hub"), mock.patch.object(os, "execvp") as ex, \
+                mock.patch.object(peers, "read_config", lambda: ({}, [])):
+            remote.cmd_shell(types.SimpleNamespace(machine="trunk"))
+        argv = ex.call_args[0][1]
+        self.assertEqual(argv[:2], ["ssh", "-t"])
+        self.assertIn("RemoteCommand=none", argv)
+        self.assertEqual(argv[-2:], ["me@hub", f"exec tmux new-session -A -s {terminal.SHELL_SESSION}"])
+        with mock.patch.object(remote, "trunk_host", lambda: None), mock.patch.object(peers, "read_config",
+                                                                                       lambda: ({}, [])):
+            with self.assertRaises(SystemExit):
+                remote.cmd_shell(types.SimpleNamespace(machine=None))
 
     def test_attach_is_refused_unless_the_graft_allows_it(self):
         out, code = self.attach_in_pty([], b"", env_on=False)
