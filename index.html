@@ -155,6 +155,14 @@ body.home #backdrop { display:block; }
 .tool { font:12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background:var(--code); border-radius:7px;
   padding:3px 8px; max-width:45vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tool.fade { animation:fadein .45s ease-out; }
+.says { flex:1; min-width:0; font-size:13px; color:var(--mut); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* a turn's steps (what Claude wrote between tool calls, and the calls): dimmed, above its answer */
+.stp { margin:2px 0; padding-left:10px; border-left:2px solid var(--line); color:var(--mut); font-size:14px; overflow-wrap:anywhere; }
+.stp .md p { margin:4px 0; } .stp + .a, .stp + .wg { margin-top:10px; }
+.stp.t { font:12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.stp.t b { font-weight:650; color:var(--fg); }
+#steps { display:flex; align-items:center; justify-content:center; color:var(--mut); }
+#steps[aria-pressed="true"] { color:var(--fg); background:var(--code); border-radius:10px; }
 @keyframes fadein { from { opacity:0; transform:translateY(3px) } to { opacity:1; transform:none } }
 .elapsed { font-size:13px; color:var(--mut); font-variant-numeric:tabular-nums; }
 
@@ -363,8 +371,10 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   body:not(.home) header > * { pointer-events:auto; }
   body:not(.home) #back, body:not(.home) #title { display:none; }
   body:not(.home) #pill { margin:6px 0 0 auto; }
-  body:not(.home) #live, body:not(.home) #menu { margin-top:6px; background:var(--card); border:1px solid var(--line); border-radius:99px; }
-  body:not(.home) #live { padding:3px 10px; } body:not(.home) #menu { min-height:32px; min-width:36px; font-size:18px; }
+  body:not(.home) #live, body:not(.home) #menu, body:not(.home) #steps { margin-top:6px; background:var(--card);
+    border:1px solid var(--line); border-radius:99px; }
+  body:not(.home) #live { padding:3px 10px; } body:not(.home) #menu, body:not(.home) #steps { min-height:32px; min-width:36px; font-size:18px; }
+  body:not(.home) #steps[aria-pressed="true"] { background:var(--code); }
   body:not(.home) main { padding-top:12px; }
   body:not(.home) #err { left:292px; }
 }
@@ -396,6 +406,9 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   <button id="add" class="hbtn" aria-label="New session">＋</button>
   <span id="pill" class="pill hidden"><span id="pdot" class="dot"></span><span id="ptext"></span></span>
   <span id="live" title="live updates disconnected">offline</span>
+  <button id="steps" class="hbtn hidden" aria-pressed="false" aria-label="Show Claude's steps, not only its answers"
+    title="Show Claude's steps, not only its answers"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+    stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg></button>
   <button id="menu" class="hbtn hidden" aria-label="Menu">⋯</button>
 </header>
 <nav id="side" aria-label="Sessions"><div class="sh"><a href="#/" aria-label="All sessions and pages"><img src="/assets/icon-64.png" alt="" width="22" height="22">grovy</a>
@@ -406,6 +419,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   <span class="dots"><i></i><i></i><i></i></span>
   <span id="tool" class="tool hidden"></span>
   <span id="elapsed" class="elapsed"></span>
+  <span id="says" class="says hidden"></span>
 </div>
 <div id="composer" class="hidden"><button id="tobottom" class="hidden" aria-label="Scroll to the latest message"><svg viewBox="0 0 24 24"
   fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7l6 6 6-6M6 13l6 6 6-6"/></svg></button><div class="inner">
@@ -848,10 +862,13 @@ function liveNode(d) {   // a widget a script in the session shows and updates i
   if (foot) node.append(h("div", {class: "lf " + (d.status || "")}, foot));
   return node;
 }
-function workedNode(d) {   // "Worked for 2m 10s · 14 tools ›" in the reply's action row; tap for the turn's tool calls
-  if (typeof d.worked !== "number" || (!d.tool_count && d.worked < 10)) return null;
+function workedNode(d, turn) {   // "Worked for 2m 10s · 14 tools ›" in the reply's action row; tap for the turn's steps
+  const timed = typeof d.worked === "number";   // (turn: the Stop's id when the turn has steps; see showSteps)
+  if (!turn && (!timed || (!d.tool_count && d.worked < 10))) return null;
   const n = d.tool_count || 0, tools = Array.isArray(d.tools) ? d.tools : [];
-  const text = "Worked for " + dur(d.worked) + (n ? ` · ${n} tool${n > 1 ? "s" : ""}` : "");
+  const text = (timed ? "Worked for " + dur(d.worked) : "Steps") + (n ? ` · ${n} tool${n > 1 ? "s" : ""}` : "");
+  if (turn) return {label: h("button", {class: "wkb more-t", "data-turn": turn, "aria-expanded": "false",
+    onclick: () => { turnOpen.set(turn, !stepsShown(turn)); showSteps(); }}, text), list: null};
   if (!tools.length) return {label: h("span", {class: "wkb"}, text), list: null};
   const list = h("ol", {class: "wkl hidden"}, ...tools.map(x => h("li", {}, h("b", {}, String(x.tool || "")), x.arg ? " " + x.arg : "")),
     ...(n > tools.length ? [h("li", {class: "wn"}, `…and ${n - tools.length} more`)] : []));
@@ -860,7 +877,13 @@ function workedNode(d) {   // "Worked for 2m 10s · 14 tools ›" in the reply's
   return {label, list};
 }
 function sysLine(...t) { return h("div", {class: "sys"}, h("span", {}, ...t)); }
-function eventNode(e, isLatestReply) {
+function stepNode(d) {
+  if (d.kind === "tool") return h("div", {class: "stp t"}, h("b", {}, String(d.tool || "tool")), d.arg ? " " + String(d.arg) : "");
+  if (d.kind !== "text" || !d.text) return null;
+  // Widgets are drawn only in answers: here a ```widget block shows as its JSON.
+  return h("div", {class: "stp"}, md(String(d.text).replace(/^(\s*(?:```+|~~~+)\s*)widget\b/gim, "$1json")));
+}
+function eventNode(e, isLatestReply, turn) {
   const d = e.data || {};
   switch (e.type) {
     case "UserPromptSubmit": {
@@ -870,7 +893,7 @@ function eventNode(e, isLatestReply) {
     }
     case "Stop": {
       const text = d.last_assistant_message || "";
-      const wk = workedNode(d);
+      const wk = workedNode(d, turn);
       if (!text.trim()) return wk && h("div", {class: "a"}, h("div", {class: "acts"}, wk.label), wk.list);
       const el = h("div", {class: "a"}, md(text));
       if (!isLatestReply && text.split("\n").length > 40) {
@@ -898,6 +921,7 @@ function eventNode(e, isLatestReply) {
     case "Updated": return sysLine("updated from the phone, cutting off: " + (d.cut_off || []).join("; "));
     case "Page": return pageCard(d.page, d.title || d.name, "page · version " + d.version);
     case "Live": return liveNode(d);
+    case "Step": return stepNode(d);
     case "PermissionResult": {
       if (d.kind === "question") return sysLine(d.status === "delivered"
         ? (d.decision === "answer" ? "✓ answered from phone: " + Object.values(d.answers || {}).join(" · ") : "skipped from phone")
@@ -1116,11 +1140,23 @@ async function renderDetail(name) {
   d.events = older.filter(e => !recentIds.has(e.id)).concat(d.events);
   const lastStop = [...d.events].reverse().find(e => e.type === "Stop");
   const items = [];   // [ts, node]
+  let pending = [];
+  turns = [];
   for (const e of d.events) {   // no time line above your messages: each bubble shows its time
     const latest = lastStop && e.id === lastStop.id;
-    const n = cached("e" + e.id + (latest ? "L" : "") + (e.type === "Page" ? (!pages[e.data.page] ? "x" : pages[e.data.page].share ? "s" : "") : "") + (e.type === "Live" ? "r" + e.data.rev : ""), () => extend(eventNode(e, latest), e));
+    let turn = null;
+    if ((e.type === "Stop" || e.type === "StopFailure" || e.type === "SessionStart") && pending.length) {
+      // a turn's steps belong to the reply that ends it (text typed mid-turn doesn't end it)
+      turn = e.type === "SessionStart" ? null : "s" + e.id;
+      turns.push({key: turn || "x" + e.id, steps: pending, final: e.data && e.data.last_assistant_message, stop: turn && e.id});
+      pending = [];
+    }
+    const n = cached("e" + e.id + (latest ? "L" : "") + (turn && e.type === "Stop" ? "S" : "") + (e.type === "Page" ? (!pages[e.data.page] ? "x" : pages[e.data.page].share ? "s" : "") : "") + (e.type === "Live" ? "r" + e.data.rev : ""), () => extend(eventNode(e, latest, e.type === "Stop" ? turn : null), e));
     if (n) items.push([e.ts, n]);
+    if (n && e.type === "Step") pending.push({n, d: e.data});
   }
+  if (pending.length) turns.push({key: "live", steps: pending});
+  showSteps();
   const outgoing = d.prompts.filter(p => p.status !== "submitted" && p.status !== "steered" &&
     (p.status !== "cancelled" && p.status !== "failed" || serverNow() - p.updated < 3600));
   const live = p => p.status === "queued" || p.status === "injected";
@@ -1142,6 +1178,10 @@ async function renderDetail(name) {
   const tl = $("tool");
   tl.classList.toggle("hidden", !tool);
   if (tool !== lastTool) { tl.textContent = tool; tl.classList.remove("fade"); void tl.offsetWidth; tl.classList.add("fade"); lastTool = tool; }
+  const liveTurn = turns.find(x => x.key === "live"), said = busy && liveTurn && [...liveTurn.steps].reverse().find(x => x.d.kind === "text");
+  const line = said ? (String(said.d.text).split("\n").find(l => l.trim()) || "").replace(/[*_`#>]+/g, "").trim() : "";
+  $("says").textContent = line;
+  $("says").classList.toggle("hidden", !line || showAll);
   tick();
 
   const hint = $("hint");
@@ -1179,6 +1219,33 @@ async function renderDetail(name) {
   if (ext.on.update.length) emit("update", structuredClone(s));
 }
 let older = [], noMore = false, firstId = 0;
+// Steps (Step events: Claude's text between tool calls, and the calls). The header button sets the default for every
+// session (kept on this device); "Worked for …" opens or closes one turn. A turn's last text step repeats its answer.
+let showAll = (() => { try { return localStorage.getItem("grovy-steps") === "1"; } catch (e) { return false; } })();
+let turns = [];                // [{key, steps: [{n, d}], final, stop}], from the last render
+const turnOpen = new Map();    // turn key -> shown, where it differs from the default
+const stepsShown = key => turnOpen.has(key) ? turnOpen.get(key) : showAll;
+function showSteps() {
+  $("steps").setAttribute("aria-pressed", String(showAll));
+  for (const t of turns) {
+    const on = stepsShown(t.key), fin = squashText(t.final || "");
+    let dup = new Set();
+    for (let i = t.steps.length - 1; i >= 0 && fin && t.steps[i].d.kind === "text"; i--) {
+      if (!fin.includes(squashText(t.steps[i].d.text))) break;
+      dup.add(t.steps[i]);
+    }
+    for (const x of t.steps) x.n.classList.toggle("hidden", !on || dup.has(x));
+    const btn = t.stop && cache.get("e" + t.stop + "S") || cache.get("e" + t.stop + "LS");
+    const b = btn && btn.querySelector("button.wkb[data-turn]");
+    if (b) b.setAttribute("aria-expanded", String(on));
+  }
+  if (cur) $("says").classList.toggle("hidden", showAll || !$("says").textContent);
+}
+$("steps").onclick = () => {
+  showAll = !showAll; turnOpen.clear();
+  try { localStorage.setItem("grovy-steps", showAll ? "1" : "0"); } catch (e) {}
+  showSteps();
+};
 async function loadEarlier() {
   const btn = cache.get("earlier"); if (btn) btn.textContent = "Loading…";
   try {
@@ -1914,6 +1981,7 @@ function route() {
   view = m ? m[1] : null; lastEventId = 0; cur = null; first = true; lastTool = ""; cache.clear();
   older = []; noMore = false; closeSheet(); $("quick").replaceChildren(); canStop = false;
   $("add").classList.toggle("hidden", !!view); $("menu").classList.remove("hidden");
+  $("steps").classList.toggle("hidden", !view); turns = []; turnOpen.clear(); $("says").textContent = "";
   $("title").classList.toggle("tap", !!view); $("resume").classList.add("hidden");
   $("back").classList.toggle("hidden", !view);
   $("pill").classList.toggle("hidden", !view);

@@ -33,7 +33,7 @@ for _k in ("GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
     os.environ.pop(_k, None)
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
-from grovylib import plugins, claude, client, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tmuxctl, uploads  # noqa: E402
+from grovylib import plugins, claude, client, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, steps, store, tmuxctl, uploads  # noqa: E402
 
 
 def ev(name, **kw):
@@ -2638,6 +2638,126 @@ class TestTurnTools(StoreCase):
         d = self.store.events["a"][-1]["data"]
         self.assertEqual((len(d["tools"]), d["tool_count"]), (store.TURN_TOOLS, store.TURN_TOOLS + 5))
         self.assertEqual(len(d["tools"][0]["arg"]), 118)
+
+
+
+class TestSteps(StoreCase):
+    """A turn's steps, read from Claude's transcript (grovylib/steps.py)."""
+    def setUp(self):
+        super().setUp()
+        self.tx = os.path.join(self.dir, "conv.jsonl")
+        self.write({"type": "assistant", "message": {"content": [{"type": "text", "text": "from an earlier turn"}]}})
+
+    def write(self, *recs, path=None, raw=b""):
+        with open(path or self.tx, "ab") as f:
+            for r in recs:
+                f.write(json.dumps(r).encode() + b"\n")
+            f.write(raw)
+
+    def text(self, s, **kw):
+        return {"type": "assistant", "message": {"content": [{"type": "text", "text": s}]}, **kw}
+
+    def tool(self, name, inp):
+        return {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]}}
+
+    def hook(self, name, **kw):
+        self.store.ingest("a", ev(name, transcript_path=kw.pop("path", self.tx), **kw))
+
+    def steps(self):
+        return [e["data"] for e in self.store.events["a"] if e["type"] == "Step"]
+
+    def test_text_and_tools_in_order_from_where_the_turn_began(self):
+        self.hook("SessionStart")
+        self.hook("UserPromptSubmit", prompt="go")
+        self.write({"type": "user", "message": {"content": "go"}},
+                   {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "hmm"}]}},
+                   self.text("Let me look."), self.tool("Bash", {"command": "ls  -l"}),
+                   {"type": "user", "message": {"content": [{"type": "tool_result", "content": "secret output"}]}},
+                   self.text("inside a subagent", isSidechain=True),
+                   {"type": "api-request-blob", "message": {"content": [{"type": "text", "text": "dup"}]}})
+        self.assertEqual(self.store.tail_steps(), None)
+        self.write(self.text("Done."), raw=b'{"type": "assistant", "message": {"content": [{"type": "te')  # half written
+        self.hook("Stop", last_assistant_message="Done.")
+        self.assertEqual(self.steps(), [{"kind": "text", "text": "Let me look."}, {"kind": "tool", "tool": "Bash", "arg": "ls -l"},
+                                        {"kind": "text", "text": "Done."}])
+        types = [e["type"] for e in self.store.events["a"]]
+        self.assertEqual(types[-1], "Stop")          # the steps come before the answer
+        self.assertNotIn("tx", self.store.summary("a"))
+        self.write(self.text("after the turn"))
+        self.store.tail_steps()
+        self.assertEqual(len(self.steps()), 3)       # nothing is read between turns
+
+    def test_tool_call_reads_at_once_and_readers_never_duplicate(self):
+        self.hook("UserPromptSubmit", prompt="go")
+        self.write(self.text("one"))
+        self.hook("PostToolUse", tool_name="Bash", tool_input={"command": "x"})
+        self.assertEqual(self.steps(), [{"kind": "text", "text": "one"}])
+        self.write(self.text("two"))
+        ts = [threading.Thread(target=self.store.read_steps, args=("a",)) for _ in range(8)]
+        [x.start() for x in ts]
+        [x.join() for x in ts]
+        self.assertEqual([s["text"] for s in self.steps()], ["one", "two"])
+
+    def test_text_typed_mid_turn_keeps_the_turn_going(self):
+        self.hook("UserPromptSubmit", prompt="go")
+        self.write(self.text("one"))
+        self.hook("UserPromptSubmit", prompt="also this")   # queued by Claude Code while it works
+        self.write(self.text("two"))
+        self.store.tail_steps()
+        self.assertEqual([s["text"] for s in self.steps()], ["one", "two"])
+
+    def test_caps(self):
+        self.hook("UserPromptSubmit", prompt="go")
+        self.write(self.text("x" * 5000), *[self.tool("Read", {"file_path": f"/f{i}"}) for i in range(steps.TURN_STEPS + 2)])
+        self.hook("Stop", last_assistant_message="ok")
+        got = self.steps()
+        self.assertEqual(len(got), steps.TURN_STEPS)
+        self.assertTrue(got[0]["text"].startswith("x" * steps.STEP_TEXT) and "truncated" in got[0]["text"])
+        self.assertEqual(self.store.events["a"][-1]["data"]["steps_more"], 3)
+
+    def test_too_long_line_is_skipped_whole(self):
+        self.hook("UserPromptSubmit", prompt="go")
+        with mock.patch.object(steps, "READ_MAX", 200):
+            self.write(self.text("y" * 500), self.text("after"))
+            for _ in range(10):
+                self.store.read_steps("a")
+        self.assertEqual(self.steps(), [{"kind": "text", "text": "after"}])
+
+    def test_other_file_mid_turn_starts_at_its_end(self):
+        self.hook("UserPromptSubmit", prompt="go")
+        other = os.path.join(self.dir, "other.jsonl")
+        self.write(self.text("old conversation copied by a resume"), path=other)
+        self.hook("Notification", path=other, message="x", notification_type="other")
+        self.write(self.text("new"), path=other)
+        self.write(self.text("the old file is no longer followed"))
+        self.store.tail_steps()
+        self.assertEqual(self.steps(), [{"kind": "text", "text": "new"}])
+
+    def test_missing_or_bad_transcript_shows_nothing(self):
+        self.hook("UserPromptSubmit", prompt="go", path="relative.jsonl")
+        self.store.tail_steps()
+        self.hook("UserPromptSubmit", prompt="go", path=os.path.join(self.dir, "not-yet.jsonl"))
+        self.write(path=os.path.join(self.dir, "not-yet.jsonl"),
+                   raw=b"not json\n[1]\n" + json.dumps(self.text("first")).encode() + b"\n")
+        self.store.tail_steps()
+        self.assertEqual(self.steps(), [{"kind": "text", "text": "first"}])   # a new file is read from its start
+
+    def test_restart_mid_turn_resumes_where_it_was(self):
+        self.hook("UserPromptSubmit", prompt="go")
+        self.write(self.text("one"))
+        self.store.tail_steps()
+        self.write(self.text("two"))
+        st2 = store.Store(self.dir, tmux_live=lambda: dict(self.live), paste=lambda *a, **k: None)
+        st2.tail_steps()
+        self.assertEqual([e["data"]["text"] for e in st2.events["a"] if e["type"] == "Step"], ["one", "two"])
+
+    def test_detail_limit_does_not_count_steps(self):
+        self.hook("UserPromptSubmit", prompt="go")
+        self.write(*[self.text(str(i)) for i in range(50)])
+        self.hook("Stop", last_assistant_message="ok")
+        evs = self.store.detail("a", limit=2)["events"]
+        self.assertEqual([e["type"] for e in evs][0], "UserPromptSubmit")
+        self.assertEqual(len(evs), 52)
 
 
 class TestRestart(StoreCase):

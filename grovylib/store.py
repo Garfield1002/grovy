@@ -15,9 +15,10 @@ from .live import LiveCards
 from .uploads import Attachments
 from .issues import Issues
 from .newproject import NewProjects
+from .steps import Steps
 
 
-HISTORY = 300            # events kept in memory per session
+HISTORY = 600            # events kept in memory per session (a turn's steps count too)
 
 TURN_TOOLS = 100   # tool calls listed per turn ("Worked for …"); beyond that only counted
 
@@ -40,12 +41,23 @@ def session_order(s):
     return (states.STATE_RANK.get(s["state"], 9) if not s["pending_permissions"] else -1, -(s["last_event"] or 0))
 
 
+def _last(events, limit):
+    """The last `limit` events, not counting steps: a long turn's steps don't push the conversation out of view."""
+    out, n = [], 0
+    for r in reversed(events):
+        if n >= limit:
+            break
+        out.append(r)
+        n += r.get("type") != "Step"
+    return out[::-1]
+
+
 def _owner(r):
     """Session name of a stored record; records written before the rename used the key "ccs"."""
     return r.get("session", r.get("ccs"))
 
 
-class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Attachments, Issues, NewProjects):
+class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Attachments, Issues, NewProjects, Steps):
     def __init__(self, sdir, tmux_live=tmuxctl.tmux_managed, paste=tmuxctl.paste_prompt, notifier=None,
                  key=tmuxctl.send_key, lifecycle=None, oom=None):
         self.dir = sdir
@@ -226,6 +238,8 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
         ev = payload.get("hook_event_name")
         sid = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
         digest = hashlib.sha256(json.dumps([name, payload], sort_keys=True).encode()).hexdigest()
+        if ev in ("PostToolUse", "Stop", "StopFailure") and not payload.get("agent_id"):
+            self.read_steps(name)   # what Claude wrote up to here comes before this event
         with self.lock:
             t = core.now()
             # Hook payloads carry no unique id, so identical content can be a genuine repeat
@@ -254,8 +268,11 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
         """One hook event of the session itself (not of a subagent), under the lock."""
         if payload.get("cwd"):
             s["cwd"] = str(payload["cwd"])
+        self._steps_follow(s, payload)
         if ev != "PostToolUse":
             data = {k: core.clip(payload[k]) for k in KEEP.get(ev, ()) if k in payload}
+            if ev in ("Stop", "StopFailure"):
+                self._steps_end(s, data)   # (read up to here just before, in ingest)
             if ev == "Stop":
                 data["background_tasks"] = tasks._count(payload.get("background_tasks"))
                 names = [x["description"] or x["type"] for x in self._task_snapshot(s, payload.get("background_tasks"), t)]
@@ -282,6 +299,7 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
                     self._save_prompts()
             if src in ("startup", "resume"):
                 self._task_snapshot(s, [], t)   # a new Claude process: whatever the old one ran is gone
+                self._steps_end(s)
             if src == "compact" and not ours and s["state"] == "working":
                 s["last_event"] = core.now()  # automatic compaction mid-turn: Claude is still working
             else:
@@ -289,6 +307,7 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
         elif ev == "UserPromptSubmit":
             text = core.norm(payload.get("prompt", ""))
             m = tasks.MACHINE_PROMPT.match(text)  # injected by Claude Code itself, not typed by the user
+            self._steps_begin(s, payload)   # (before the state changes: it tells a new turn from one going on)
             self._set(name, "working", ("subagent report" if m.group(1) == "agent-message" else "task notification")
                       if m else "prompt: " + text[:120])
             done = tasks.MACHINE_TASK.match(text)
@@ -335,6 +354,7 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
                 self._expire_perms(name, "Claude session ended")
                 self._set(name, "exited", f"conversation ended ({payload.get('reason', '')})")
                 self._task_snapshot(s, [], t)
+                self._steps_end(s)
                 self._fail_queued(name, "Claude exited before it was sent")
 
     def status(self, name, d):
@@ -388,11 +408,12 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
             return []
         latest = {r.get("id"): r for r in out}   # a live widget appears once per logged update: keep the last
         out = [r for r in out if latest.get(r.get("id")) is r]
-        return out[::-1][:limit] if q else out[-limit:]
+        return out[::-1][:limit] if q else _last(out, limit)
 
     # ------------------------------------------------------------ views
     def summary(self, name):
         s = dict(self.sessions[name])
+        s.pop("tx", None)   # where the transcript is read: the daemon's business
         mine = [p for p in self.prompts if p["session"] == name]
         s["pending_permissions"] = len(self._pending(name))
         s["queued_prompts"] = sum(p["status"] in ("queued", "injected") for p in mine)
@@ -416,7 +437,7 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
             if name not in self.sessions:
                 return None
             return {"session": self.summary(name), "now": core.now(),   # the page corrects for its own clock's offset
-                    "events": list(self.events.get(name, ()))[-limit:],
+                    "events": _last(list(self.events.get(name, ())), limit),
                     "permissions": [perms._public(p) for p in self.perms.values()
                                     if p["session"] == name and p["status"] in ("pending", "deciding")],
                     "prompts": [p for p in self.prompts if p["session"] == name][-30:],

@@ -37,6 +37,7 @@ SSE_PER_CLIENT = 4  # live-update streams kept per client IP (older ones are clo
 
 
 RECONCILE_EVERY = 10
+STEPS_EVERY = 1        # seconds between reads of working sessions' transcripts
 
 
 class SockHandler(socketserver.StreamRequestHandler):
@@ -971,6 +972,13 @@ def serve(bind, port):
                 print(f"grovyd: peers reload error: {e}", file=sys.stderr)
 
     threading.Thread(target=loop, daemon=True).start()
+
+    def tail():   # a turn's steps, from Claude's transcript (grovylib/steps.py); hooks also read it at each tool call
+        while True:
+            time.sleep(STEPS_EVERY)
+            st.tail_steps()
+
+    threading.Thread(target=tail, name="grovy-steps", daemon=True).start()
     if not loopback and not httpd.enforce:
         print("grovyd: WARNING: listening beyond loopback with GROVY_AUTH=off; anyone on the network can use grovy",
               file=sys.stderr)

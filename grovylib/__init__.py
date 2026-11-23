@@ -34,6 +34,7 @@ Daemon state (Store, in store.py, is assembled from one class per feature; all s
   manage.py      start/resume/rename/restart/stop from the phone; reconciling with tmux
   pages.py       HTML pages Claude publishes, their sandbox, sharing
   live.py        live widgets scripts show and update
+  steps.py       a turn's steps (Claude's text between tool calls, and the calls), read live from its transcript
   uploads.py     files sent from the phone
   issues.py      issues: a session in a git worktree of its own, merged back by fast-forward
   newproject.py  new projects: a blank repo or a clone in ~/dev, and Claude's trust question answered on your say

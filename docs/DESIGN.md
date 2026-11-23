@@ -299,6 +299,27 @@ Longer prompts take the literal bracketed-paste path, with control characters st
   `Stop` events also log `background_names`. Limitation: a background shell started by a *paused* subagent can't be
   attributed to it (the list has no owner field).
 * "Worked for …" (in the reply's action row, before Copy and Quote; tap for the list): `UserPromptSubmit` starts `s["turn"]`; each main-agent `PostToolUse` appends `tool_summary` (tool name + its most telling argument, ≤120 chars; first `TURN_TOOLS`=100 kept, all counted); `Stop` records `worked`, `tools`, `tool_count` and ends the turn. In memory only: a daemon restart mid-turn loses that turn's list. Subagents' tools aren't listed there (they show in the background list).
+  A turn with steps (below) folds those instead of the tool list.
+* **Steps** (`grovylib/steps.py`): what Claude writes between tool calls, and the calls, read live from Claude Code's
+  own transcript, since no hook carries them. Claude Code appends one JSONL record per finished content block, so
+  steps arrive block by block, never token by token. `UserPromptSubmit` sets `s["tx"] = {path, off, n, more, skip}`:
+  the payload's `transcript_path`, read from its current end (from 0 if it doesn't exist yet). If a `tx` for the same
+  file already exists, its offset is kept: text typed mid-turn fires `UserPromptSubmit` without ending the turn, and an
+  Esc interrupt sends no `Stop`. Readers are the daemon's tailer thread (`STEPS_EVERY`=1s, every session with a `tx`)
+  and `ingest`, just before a main-agent `PostToolUse`, `Stop` or `StopFailure`, so the steps written so far come
+  before that event. Only complete lines are read; each record of type `assistant` that isn't `isSidechain` gives
+  `text` blocks (≤`STEP_TEXT`=4000 chars) and `tool_use` blocks (`tool_summary`) as `Step` events. Thinking, tool
+  results and other record types are skipped. After `TURN_STEPS`=100 per turn they are only counted (`Stop.steps_more`).
+  A line longer than `READ_MAX` is skipped whole. Two readers never record the same lines: each reads outside the lock,
+  then applies only if `tx` and its offset are unchanged. Any main-agent hook naming another `transcript_path` (a
+  `/clear`, a resume) moves `tx` to the end of the new file. `Stop`/`StopFailure`, `SessionStart` startup/resume
+  and `SessionEnd` end it. `tx` lives in `state.json`, so a daemon restart mid-turn resumes where it was. It is
+  removed from what the browser is sent. Verified (Claude Code 2.1.325): the answer's own text block reaches the file
+  ~100ms *after* the `Stop` hook, so it's dropped with the ended `tx`. That's harmless, since `Stop` carries it. `detail`/`history` limits don't count steps, and `HISTORY` is 600 to make room.
+  UI: steps belong to the next `Stop` (or `StopFailure`), else to the live turn. The header's ☰ button sets the
+  default (`localStorage` `grovy-steps`, per device, off by default). "Worked for …" overrides it for one turn until
+  the next view change or toggle. Trailing text steps that the final answer contains are hidden, as repeats.
+  Widgets aren't drawn in steps. In final-only mode, the typing indicator shows the first line of the latest text step.
   Claude Code has it; for `/compact` the UI says "compacting…"); blue ✓✓ on the chat bubble (`UserPromptSubmit`
   or `Steered`: Claude read it). `typed` is only set after a send that wasn't aborted. Bubbles show the time the user sent the message: `UserPromptSubmit` and `Steered` events from a grovy prompt carry `sent` (its `created`), since the event's own `ts` is when Claude read it; prompts typed in the terminal fall back to `ts`.
 * Typing re-checks between chunks and before Enter. If Claude starts something on its own meanwhile (a background
@@ -856,9 +877,11 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
   * A peer's shared page link goes through the hub and works only while the peer is reachable.
   * No TLS on the hop from the hub's socket to the peer's grovyd: ssh carries it; `tls: true` is for a peer whose grovyd
     only serves HTTPS, unverified.
-* Only the final assistant message per turn is shown (`Stop.last_assistant_message`), with no streaming. While
-  Claude works, the page shows a typing indicator with the current tool and an elapsed timer, which turns grey after
-  60s without events. `MessageDisplay` exists in current Claude Code and could add live text later.
+* Steps come from Claude Code's transcript file, whose format is undocumented. If it changes, steps silently
+  stop appearing (unknown content is skipped, never guessed) and only the final answers show. They arrive per
+  finished block (about 1s later), not as streamed text. A first block written before the daemon handled
+  `UserPromptSubmit` (a race of milliseconds against the model's first reply) would be missed. Turns from before
+  this feature have no steps, and a subagent's own text isn't shown (its `Agent` call is one step).
 * Multi-select answers are sent as comma-separated labels. Claude receives them as text, which works, but the
   terminal's own encoding for multi-select hasn't been compared.
 * Typing a long prompt takes about 1s per 3,000 characters. Anything typed in the terminal at the same moment
