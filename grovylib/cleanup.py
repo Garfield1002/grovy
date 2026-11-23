@@ -4,6 +4,7 @@ It removes what setup recorded in its setup record (`install.record_path()`), an
 record existed, what it finds in the places setup writes to. It is planned first, shown, and applied only on a yes:
   * the systemd user services (grovy, grovy-tunnel) and their unit files; a daemon started by hand is stopped too
   * the `~/.local/bin/grovy` link, only if it points to this grovy folder
+  * the bash tab completion setup installed (a file starting with completion.MARK)
   * linger, only if setup turned it on (the record says so); otherwise it's left as it is
   * the state folder (sessions list, login token, certificates, hooks files) and the files sent from the phone
   * the grovy home (custom.css/js, plugins, peers.json) only if asked: it's kept by default
@@ -17,7 +18,7 @@ import signal
 import subprocess
 import time
 
-from . import client, core, graft, install, tmuxctl, tui
+from . import completion, client, core, graft, install, tmuxctl, tui
 
 UNITS = ("grovy-tunnel", "grovy")   # the tunnel first: it talks to the daemon
 
@@ -144,6 +145,14 @@ def plan(record, systemd, state_existed=True):
     link = os.path.expanduser("~/.local/bin/grovy")
     if os.path.islink(link) and os.path.realpath(link) == os.path.realpath(os.path.join(core.HERE, "grovy")):
         steps.append((f"remove {tui.short(link)}", lambda: os.unlink(link)))
+    comp = completion.path()
+    try:
+        with open(comp, errors="replace") as f:
+            ours = f.read().startswith(completion.MARK)
+    except OSError:
+        ours = False
+    if ours:
+        steps.append((f"remove the tab completion {tui.short(comp)}", lambda: os.unlink(comp)))
     # 3. linger: only undone when setup turned it on
     if record.get("linger"):
         steps.append(("turn linger off (setup turned it on)", _linger_off))

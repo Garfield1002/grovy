@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 
-from . import cleanup, client, core, hook, install, projects, remote, scriptlib, sessions, setupflow, tmuxctl, update
+from . import cleanup, client, completion, core, hook, install, projects, remote, scriptlib, sessions, setupflow, tmuxctl, update
 
 
 def cmd_ls(a):
@@ -29,8 +29,17 @@ def cmd_ls(a):
         status = None
     names = sorted(set(reg) | set(live))
     got = {}
-    asking = threading.Thread(target=lambda: got.update(zip(("rows", "notes"), remote.peer_lines())), daemon=True)
-    asking.start()   # a trunk's grafts, asked while this machine's own sessions are printed
+
+    def others():
+        rows, notes = remote.peer_lines()
+        host = remote.trunk_host()
+        if host:
+            r, n = remote.trunk_lines(host)
+            rows, notes = rows + r, notes + n
+        got.update(rows=rows, notes=notes)
+    asking = threading.Thread(target=others, daemon=True)
+    if not getattr(a, "here", False):
+        asking.start()   # a trunk's grafts (a graft's trunk), asked while this machine's own sessions are printed
     if names:
         print(f"{'NAME':<16} {'STATE':<12} PATH")
     for n in names:
@@ -42,7 +51,8 @@ def cmd_ls(a):
             st = status.get(n, {}).get("state", "unknown")
         print(f"{n:<16} {st:<12} {reg.get(n, {}).get('cwd', '?')}")
     sys.stdout.flush()
-    asking.join(remote.LS_TIMEOUT + 2)   # peer_lines has its own deadline; never wait past it
+    if asking.is_alive():
+        asking.join(remote.LS_TIMEOUT + 2)   # peer_lines has its own deadline; never wait past it
     rows, notes = got.get("rows", []), got.get("notes", [])
     if rows and not names:
         print(f"{'NAME':<16} {'STATE':<12} PATH")
@@ -81,7 +91,8 @@ def cmd_resume(a):
 
 def cmd_attach(a):
     if not tmuxctl.tmux_alive(a.name):
-        core.die(f"no live managed session {a.name!r}")
+        core.die(f"no live managed session {a.name!r}" +
+                 (f" here (the trunk's: grovy attach trunk:{a.name})" if remote.trunk_host() else ""))
     verb = "switch-client" if os.environ.get("TMUX") else "attach-session"
     os.execvp("tmux", ["tmux", verb, "-t", "=" + tmuxctl.tmux_name(a.name)])
 
@@ -294,15 +305,17 @@ def cmd_tail(a):
     return 0
 
 
-def main(argv=None):
+def build_parser():
     p = argparse.ArgumentParser(prog="grovy", description="Minimal Claude Code session manager")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("new", help="start Claude Code in a new tmux session")
     s.add_argument("name"), s.add_argument("path")
     s.add_argument("claude_args", nargs=argparse.REMAINDER, help="extra claude arguments, after --")
     s.set_defaults(fn=cmd_new)
-    s = sub.add_parser("ls", help="list sessions (a trunk's grafts' too; `ls MACHINE` for one other machine only)")
+    s = sub.add_parser("ls", help="list sessions (a trunk's grafts' or a graft's trunk's too; `ls MACHINE` for one "
+                       "other machine only)")
     s.add_argument("machine", nargs="?", help="pc (a graft, on its trunk) or trunk (on a graft)")
+    s.add_argument("--here", action="store_true", help="this computer's sessions only")
     s.set_defaults(fn=cmd_ls)
     for cmd, fn, h in (("attach", cmd_attach, "attach to the tmux session"),
                        ("kill", cmd_kill, "terminate a session"),
@@ -375,7 +388,15 @@ def main(argv=None):
     sub.add_parser("url", help="print the web UI link(s), including the login token").set_defaults(fn=install.cmd_url)
     from . import peers   # imported here: hooks never load it
     peers.add_parser(sub)
-    a = p.parse_args(argv)
+    completion.add_parser(sub)
+    return p
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["__complete"]:   # bash's tab (grovy completion bash)
+        return completion.complete(argv[1:])
+    a = build_parser().parse_args(argv)
     if a.cmd in remote.COMMANDS and remote.split(getattr(a, "name", None))[0]:
         return remote.run(a)   # MACHINE:NAME: another machine's session
     return a.fn(a)

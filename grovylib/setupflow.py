@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-from . import claude, client, cleanup, core, graft, install, qr, tls, tui
+from . import claude, cleanup, client, completion, core, graft, install, qr, tls, tui
 
 UNIT = os.path.expanduser("~/.config/systemd/user/grovy.service")
 
@@ -213,6 +213,21 @@ def plan_trunk(bind, port, https, systemd, rec, role="trunk", terminal=False):
             os.symlink(target, link)
             install.update_record(link=link)
         steps.append((f"link {tui.short(link)}", do_link))
+    comp = completion.path()
+    have = None
+    if os.path.exists(comp):
+        with open(comp, errors="replace") as f:
+            have = f.read()
+    if shutil.which("bash") and have != completion.SCRIPT and (have is None or have.startswith(completion.MARK)):
+        def do_completion():
+            os.makedirs(os.path.dirname(comp), exist_ok=True)
+            with open(comp, "w") as f:
+                f.write(completion.SCRIPT)
+            install.update_record(completion=comp)
+        steps.append((f"tab completion for bash, {tui.short(comp)} (new terminals" +
+                      ("" if completion.bash_completion_installed() else
+                       "; needs the bash-completion package, or add eval \"$(grovy completion bash)\" to ~/.bashrc") +
+                      ")", do_completion))
     missing = [n for n in ("custom.css", "custom.js") if not os.path.exists(os.path.join(core.config_dir(), n))]
     if missing or not os.path.exists(core.token_path()):
         def do_files():

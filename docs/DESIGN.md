@@ -127,7 +127,8 @@ machines"), the address (a menu of this machine's addresses: this computer only 
 other devices can't open it), VPN (100.64/10), local network, public, everywhere), the port (the recorded one or
 `GROVY_PORT`/7333; one that something else listens on is refused once and suggested a free one; typing it again uses
 it, for that run only), HTTPS (only asked when other devices can reach it; default no; no writes `GROVY_TLS=off` into
-the unit so an old certificate isn't served). The changes: the `~/.local/bin/grovy` link, the token and the
+the unit so an old certificate isn't served). The changes: the `~/.local/bin/grovy` link, bash tab completion (`completion.SCRIPT` in bash-completion's
+per-user folder, loaded on the first tab; only written over if it is grovy's own, by its first line), the token and the
 `custom.*` templates, a certificate (`tls.init`, for the address, or every address for 0.0.0.0, and the host name,
 unless the current one already covers them), the systemd user service (previous version kept as `.bak`), starting
 it, linger. Each change is recorded in `$STATE/setup.json` (role, address, port, https, the link it made, services it
@@ -153,7 +154,7 @@ needs (the state with its record, the tunnel key) run last and are skipped once 
 again retries exactly what's left. A hand-started daemon's pid is checked again just before it is stopped (a daemon
 that doesn't answer is a failure, not "gone"). It stops and removes the `grovy` and `grovy-tunnel` services and unit files (and `.bak`),
 stops a daemon running outside the service (by the `pid` the daemon reports in `status`; a daemon too old to report
-one makes cleanup stop before changing anything), removes the link only if it points to this grovy folder, turns
+one makes cleanup stop before changing anything), removes the link only if it points to this grovy folder (the completion file only if it is grovy's), turns
 linger off only if the record says setup turned it on, and removes the state folder, the ccs symlink and the
 attachments folder. The grovy home is kept unless asked (`--remove-home`), and running sessions are ended only on a yes
 (`--end-sessions`); they keep running in plain tmux otherwise (until the user manager exits at the last logout, once the
@@ -804,7 +805,11 @@ problem, is a line on stderr). What a graft says is untrusted, like Claude's out
 folders, errors and `logs` text are stripped of control characters and lone surrogates before they reach the
 terminal (and `ls` fields of newlines and tabs, so a graft can't print a made-up row). `rename` can't
 move a session between machines; `new` needs an absolute folder (it is resolved on the other machine). On a graft, MACHINE is `trunk`: the command runs there as `ssh [-t] TRUNK sh -c 'exec grovy …'` with your
-usual ssh (the tunnel's key can't run commands). `logs` reads `GET /api/sessions/NAME/screen?lines=N` (X-Grovy).
+usual ssh (the tunnel's key can't run commands). A graft's plain `grovy ls` adds the trunk's own sessions as
+`trunk:NAME`: `grovy ls --here` there over ssh with `BatchMode=yes` (a login that needs a password is a note on stderr,
+never a prompt in the middle of the list) and a 5s bound; rows whose name isn't a plain session name (the trunk's grafts,
+this one included) are left out, and the fields are cleaned like a graft's. `attach NAME` that finds nothing here
+points to `trunk:NAME`. `logs` reads `GET /api/sessions/NAME/screen?lines=N` (X-Grovy).
 **attach** (`grovylib/terminal.py`): `POST /api/sessions/NAME/terminal` with the token, `X-Grovy: 1` and `Upgrade:
 grovy-terminal` (a browser can't send Upgrade) gets `101`, then the graft's grovyd runs `tmux attach-session -t
 =grovy-NAME` in a pseudo-terminal (TERM and size from `X-Term`/`X-Rows`/`X-Cols`) and relays it: its output as

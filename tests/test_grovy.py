@@ -35,11 +35,13 @@ os.environ["XDG_STATE_HOME"] = os.path.join(TMP, "xdg")
 os.environ.pop("CCS_STATE_DIR", None)
 # Nor the user's own custom.css / custom.js / instructions.md.
 os.environ["XDG_CONFIG_HOME"] = os.path.join(TMP, "xdg-config")
-for _k in ("GROVY_HOME", "CCS_HOME", "GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
+# Nor ~/.local/share (setup's bash completion).
+os.environ["XDG_DATA_HOME"] = os.path.join(TMP, "xdg-data")
+for _k in ("GROVY_HOME", "CCS_HOME", "GROVY_CONFIG_DIR", "CCS_CONFIG_DIR", "BASH_COMPLETION_USER_DIR"):
     os.environ.pop(_k, None)
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
-from grovylib import peers, plugins, claude, cleanup, client, graft, setupflow, tui, update, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tls, tmuxctl, uploads  # noqa: E402
+from grovylib import peers, plugins, claude, cleanup, client, cli, completion, remote, graft, setupflow, tui, update, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tls, tmuxctl, uploads  # noqa: E402
 # Paths fixed when grovy's modules load, from the real home: never let a test reach the real ~/.ssh or systemd units.
 graft.KEY = os.path.join(TMP, "home-ssh", "grovy_tunnel")
 graft.UNIT = os.path.join(TMP, "home-units", "grovy-tunnel.service")
@@ -1065,6 +1067,126 @@ class TestCleanup(unittest.TestCase):
         self.assertEqual(rec["link"], os.path.join(self.home, ".local", "bin", "grovy"))
 
 
+class TestCompletion(unittest.TestCase):
+    """bash's tab: `grovy __complete LINE` answers from the CLI's own parser."""
+
+    def complete(self, line, wordbreaks=":"):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch.dict(os.environ, {"GROVY_WORDBREAKS": wordbreaks}):
+            self.assertEqual(cli.main(["__complete", line]), 0)
+        return out.getvalue().splitlines()
+
+    def setUp(self):
+        for p in (mock.patch.object(completion, "local_sessions", lambda: ["Grovy", "Tups"]),
+                  mock.patch.object(completion, "machines", lambda: {"pc": "peer", "trunk": "trunk"}),
+                  mock.patch.object(remote, "peer_lines", lambda only=None: ([("pc:build", "idle", "/x")], [])),
+                  mock.patch.object(remote, "trunk_host", lambda: "me@hub"),
+                  mock.patch.object(remote, "trunk_lines", lambda host: ([("trunk:Tups", "idle", "/y")], []))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_commands_options_and_choices(self):
+        cmds = self.complete("grovy ")
+        self.assertIn("attach", cmds)
+        self.assertIn("completion", cmds)
+        self.assertNotIn("hook", cmds)   # Claude Code's, not yours
+        self.assertEqual(self.complete("grovy at"), ["attach"])
+        self.assertEqual(self.complete("grovy page "), ["publish", "rm", "ls"])
+        self.assertEqual(self.complete("grovy note --tone "), ["ok", "warn", "bad"])
+        self.assertEqual(self.complete("grovy logs --l"), ["--lines"])
+        self.assertEqual(self.complete("grovy logs -n 50 T"), ["Tups"])   # an option's value isn't a positional
+        self.assertEqual(self.complete("grovy nope "), [])
+        self.assertEqual(self.complete("grovy new t1 "), [])      # a folder: bash completes file names
+        self.assertEqual(self.complete("grovy x share "), [])     # a plugin's own arguments
+        self.assertEqual(self.complete("grovy rename Tups "), [])  # the new name is yours to pick
+
+    def test_session_names_here_and_on_other_machines(self):
+        self.assertEqual(self.complete("grovy attach "), ["Grovy", "Tups", "pc:", "trunk:"])
+        self.assertEqual(self.complete("grovy attach p"), ["pc:"])
+        self.assertEqual(self.complete("grovy kill pc:"), ["build"])          # bash replaces what follows the ':'
+        self.assertEqual(self.complete("grovy kill pc:", wordbreaks=" "), ["pc:build"])
+        self.assertEqual(self.complete("grovy logs trunk:T"), ["Tups"])
+        self.assertEqual(self.complete("grovy ls "), ["pc", "trunk"])
+        self.assertEqual(self.complete("grovy attach 'Tu"), ["Tups"])        # an unfinished quote
+
+    def test_a_failure_prints_nothing(self):
+        with mock.patch.object(completion, "candidates", mock.Mock(side_effect=RuntimeError("x"))):
+            self.assertEqual(self.complete("grovy "), [])
+
+    @unittest.skipUnless(shutil.which("bash"), "needs bash")
+    def test_the_bash_function(self):
+        """The script as bash runs it, asking the real `grovy __complete`."""
+        d = tempfile.mkdtemp(dir=TMP)
+        os.symlink(os.path.join(ROOT, "grovy"), os.path.join(d, "grovy"))
+        script = ('eval "$(grovy completion bash)"; complete -p grovy; '
+                  'for line in "grovy at" "grovy page " "grovy attach x" "grovy ls --"; do COMP_LINE="$line"; '
+                  'COMP_POINT=${#line}; read -ra COMP_WORDS <<<"$line"; _grovy 2>&1; '
+                  'echo "$line|${COMPREPLY[*]}"; done')
+        out = subprocess.run(["bash", "--norc", "-c", script], capture_output=True, text=True, timeout=30,
+                             env={**os.environ, "PATH": d + os.pathsep + os.environ["PATH"]}).stdout.splitlines()
+        self.assertEqual(out[0], "complete -o default -F _grovy grovy")
+        self.assertIn("grovy at|attach", out)
+        self.assertIn("grovy page |publish rm ls", out)
+        self.assertIn("grovy attach x|", out)   # no session x: nothing (and bash falls back to file names)
+        self.assertIn("grovy ls --|--help --here", out)
+
+    def test_cleanup_removes_only_its_own_file(self):
+        path = completion.path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        for content, removed in ((completion.SCRIPT, True), ("# someone's own grovy completion\n", False)):
+            with open(path, "w") as f:
+                f.write(content)
+            with mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError)):
+                steps, why = cleanup.plan({}, False, state_existed=False)
+            labels = [l for l, _ in steps]
+            self.assertEqual(any("tab completion" in (l or "") for l in labels), removed, labels)
+        os.unlink(path)
+
+
+class TestTrunkFromAGraft(unittest.TestCase):
+    """On a graft, `grovy ls` shows the trunk's own sessions too (reported: `grovy ls` there showed none)."""
+
+    def test_rows_are_the_trunks_own(self):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "NAME             STATE        PATH\n"
+                                               "Tups             idle         /home/me/tups\n"
+                                               "pc:build         idle         /x\n"
+                                               "evil\x1b]52;c;x\x07  idle   /z\n", "")
+        rows, notes = remote.trunk_lines("me@hub", run=run)
+        self.assertEqual(rows, [("trunk:Tups", "idle", "/home/me/tups")])   # not the grafts' (this one included)
+        self.assertEqual(notes, [])
+        self.assertIn("BatchMode=yes", seen[0])
+        self.assertIn("ls --here", seen[0][-1])
+        self.assertEqual(seen[0][-2:-1], ["me@hub"])
+
+    def test_a_failed_login_is_a_note(self):
+        rows, notes = remote.trunk_lines("me@hub", run=lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 255, "", "me@hub: Permission denied (publickey,password).\n"))
+        self.assertEqual(rows, [])
+        self.assertIn("Permission denied", notes[0])
+        self.assertIn("grovy ls trunk", notes[0])
+        self.assertEqual(remote.trunk_lines("-oProxyCommand=x")[0], [])
+
+    def test_ls_lists_them_and_attach_points_there(self):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(remote, "trunk_host", lambda: "me@hub"), \
+                mock.patch.object(remote, "trunk_lines", lambda host: ([("trunk:Tups", "idle", "/t")], [])), \
+                mock.patch.object(remote, "peer_lines", lambda only=None: ([], [])), \
+                mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError)), \
+                mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            cli.main(["ls"])
+            self.assertIn("trunk:Tups", out.getvalue())
+            out.truncate(0)
+            cli.main(["ls", "--here"])
+            self.assertNotIn("trunk:", out.getvalue())
+            with self.assertRaises(SystemExit):
+                cli.main(["attach", "Tups"])
+        self.assertIn("grovy attach trunk:Tups", err.getvalue())
+
+
 class TestSetupFlow(unittest.TestCase):
     """The guided `grovy setup`: what it plans, that a rerun with the same answers changes nothing, its defaults."""
 
@@ -1079,7 +1201,8 @@ class TestSetupFlow(unittest.TestCase):
                 out = "Linger=yes\n" if ["loginctl", "enable-linger"] in self.runs else "Linger=no\n"
             return subprocess.CompletedProcess(argv, 0, out, "")
         for p in (mock.patch.dict(os.environ, {"HOME": self.home, "GROVY_STATE_DIR": os.path.join(self.home, "st-grovy"),
-                                               "XDG_CONFIG_HOME": os.path.join(self.home, "cfg")}),
+                                               "XDG_CONFIG_HOME": os.path.join(self.home, "cfg"),
+                                               "XDG_DATA_HOME": os.path.join(self.home, "data")}),
                   mock.patch.object(setupflow, "UNIT", os.path.join(self.home, "grovy.service")),
                   mock.patch.object(setupflow.subprocess, "run", fake_run),
                   mock.patch.object(setupflow, "addresses", lambda: [("vpn", "100.64.1.2"), ("lan", "192.168.1.9")]),
@@ -1096,9 +1219,12 @@ class TestSetupFlow(unittest.TestCase):
         steps = setupflow.plan_trunk("127.0.0.1", 7390, False, True, install.read_record())
         labels = " | ".join(l for l, _ in steps if l)
         for want in ("link ~/.local/bin/grovy", "your grovy home", "grovy service, listening on 127.0.0.1:7390",
-                     "start grovy", "linger"):
+                     "start grovy", "linger", "tab completion for bash"):
             self.assertIn(want, labels)
         self.apply(steps)
+        with open(completion.path()) as f:
+            self.assertEqual(f.read(), completion.SCRIPT)
+        self.assertTrue(completion.path().startswith(self.home))
         self.assertIn("Environment=GROVY_PORT=7390", open(setupflow.UNIT).read())
         rec = install.read_record()
         self.assertEqual((rec["role"], rec["port"], rec["https"], rec["linger"]), ("trunk", 7390, False, True))

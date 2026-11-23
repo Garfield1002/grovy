@@ -97,6 +97,9 @@ grovy url                      # the phone link again (also on the phone: ⋯ �
 grovy doctor                   # check that everything is in order
 ```
 
+`grovy setup` also sets up tab completion in bash (commands, options, session names); for a shell without the
+bash-completion package, add `eval "$(grovy completion bash)"` to `~/.bashrc`.
+
 ## Another computer
 
 One grovy (the *trunk*, or hub, say your server) can also show the sessions of another computer (a *graft*, or
@@ -114,8 +117,8 @@ with a small "pc" label, and ＋ asks which machine to start on.
 as trusted all the same: details in `docs/DESIGN.md` ("Other machines").
 
 On the trunk, grovy's commands work on the PC's sessions too: `grovy ls` lists them, and `grovy attach pc:NAME`
-(also `logs`, `kill`, `resume`, `rename`, `new`) reaches one; on the PC, `grovy attach trunk:NAME` reaches the
-trunk's. Setup asks whether the trunk may open a terminal on the PC (`attach`); without it, the rest still works.
+(also `logs`, `kill`, `resume`, `rename`, `new`) reaches one; on the PC, `grovy ls` lists the trunk's sessions too,
+as `trunk:NAME`, and `grovy attach trunk:NAME` reaches one. Setup asks whether the trunk may open a terminal on the PC (`attach`); without it, the rest still works.
 
 `grovy peer ls` on the trunk says whether the PC is online. `grovy cleanup` on the PC removes it from the trunk too.
 While the PC is off, its sessions show as "unknown" and the home screen says so. What works on the trunk only (new

@@ -25,6 +25,7 @@ Command line:
   graft.py       setup's graft role: joining a trunk over ssh with a restricted key (and its cleanup)
   update.py      `grovy update`: fast-forward this folder, check it loads, restart the daemon
   remote.py      the CLI on another machine's sessions (MACHINE:NAME): a graft's API, or ssh to the trunk
+  completion.py  bash tab completion: `grovy completion bash`, answered by `grovy __complete LINE`
   terminal.py    `grovy attach pc:NAME`: a terminal relayed by the graft's grovy over the tunnel
   install.py     doctor, url, tls init, and what setup and cleanup share (service unit, setup record, links)
   cleanup.py     `grovy cleanup`: undoes setup (from its record, setup.json)

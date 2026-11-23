@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 from . import core, install, peers, terminal
@@ -142,6 +143,32 @@ def _read_all(r, deadline, limit):
             return data
         data += chunk
     raise ValueError("its answer is too long")
+
+
+def trunk_lines(host, run=subprocess.run):
+    """Rows for `grovy ls` on a graft: the trunk's own sessions as trunk:NAME, from `grovy ls --here` there over your
+    usual ssh (BatchMode: never a password prompt in the middle of a list; LS_TIMEOUT or so in all)."""
+    if not peers.HOST_RE.fullmatch(host) or host.startswith("-"):
+        return [], [f"trunk: bad address {host!r} in the setup record"]
+    script = FIND_GROVY.replace('exec "$g" ', '"$g" ls --here')
+    try:
+        r = run(["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={LS_TIMEOUT}", *peers.COMMAND_OPTS, "--", host,
+                 "sh -c " + shlex.quote(script)], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                errors="replace", timeout=LS_TIMEOUT + 1)
+    except (OSError, subprocess.SubprocessError) as e:
+        return [], [f"trunk: {terminal.clean(e, line=True) or type(e).__name__} (grovy ls trunk)"]
+    if r.returncode:
+        err = terminal.clean(((r.stderr or "").strip().splitlines() or [""])[-1], line=True)
+        return [], [f"trunk: couldn't list its sessions over ssh: {err[:200] or f'exit {r.returncode}'}"
+                     " (grovy ls trunk logs in the usual way)"]
+    rows = []
+    for line in (r.stdout or "").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 2 or parts[0] == "NAME" or not core.valid_name(parts[0]):
+            continue   # the header, "no sessions", or a graft's row (pc:NAME): only the trunk's own
+        rows.append((f"trunk:{parts[0]}", terminal.clean(parts[1], line=True)[:12],
+                     terminal.clean(parts[2] if len(parts) > 2 else "?", line=True)))
+    return rows, []
 
 
 def peer_lines(only=None):
