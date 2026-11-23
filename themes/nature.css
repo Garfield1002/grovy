@@ -1,7 +1,7 @@
 /* Nature print: ink on paper. A built-in theme for grovy (⋯ → Theme), and an example of one: a theme is a CSS file
    added after grovy's own styles, so it sets the colour tokens (--bg, --fg, ... see the top of index.html) and may
    restyle anything else. Your own go in ~/.config/grovy/themes/NAME.css; one named "nature" replaces this. */
-:root { --fg:#24231f; --card:#fcfbf8;
+:root { --fg:#24231f; --card:var(--bg);   /* parts drawn by their hairline border, as in print */
   --acc:#3e5482; --user:#e6e9dc; --ok:#5b7a48; --warn:#b07a1e; --bad:#9e3a30; --busy:#3e5482;
   --title-font:"Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
   --tree:var(--fg); --tree-opacity:.27;
