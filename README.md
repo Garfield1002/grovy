@@ -1,19 +1,18 @@
+<img src="assets/logo.png" alt="" width="84" align="left" />
+
+<h1>grovy</h1>
+
+**Your agents. One tab away.**<br/>
+<a href="#install">install</a> · <a href="docs/guide.md">guide</a> · <a href="docs/setup.md">setup</a> ·
+<a href="docs/customize.md">make it yours</a> · <a href="docs/troubleshooting.md">troubleshooting</a>
+
+<br clear="left"/>
+
 <p align="center">
-  <img src="assets/icon-192.png" alt="grovy" width="96" />
+  <img src="docs/img/desktop.png" alt="grovy on a computer: sessions in a sidebar, a conversation with a chart, a published page and a live progress card" height="400" />
+  &nbsp;
+  <img src="docs/img/phone.png" alt="grovy on a phone: Claude asks to run a command, with Deny and Allow once" height="400" />
 </p>
-
-<h1 align="center">grovy</h1>
-
-<p align="center">
-  <b>Claude Code on your computer, in your pocket.</b>
-</p>
-
-<p align="center">
-  <a href="#install">install</a> · <a href="docs/guide.md">guide</a> · <a href="docs/setup.md">setup</a> ·
-  <a href="docs/customize.md">make it yours</a> · <a href="docs/troubleshooting.md">troubleshooting</a>
-</p>
-
----
 
 Your Claude sessions run on your computer, in tmux, exactly as if you had typed `claude`. grovy gives them a web
 page you open on your phone (or any browser) over your home network or VPN. Nothing to install on the phone.
