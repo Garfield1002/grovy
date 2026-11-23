@@ -41,7 +41,11 @@ header { position:sticky; top:0; z-index:5; display:flex; align-items:center; ga
 header h1 { font-size:17px; margin:0; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .pill { display:inline-flex; align-items:center; gap:6px; font-size:13px; font-weight:600; padding:3px 10px;
   border-radius:99px; background:var(--card); border:1px solid var(--line); white-space:nowrap; }
-header { flex-wrap:wrap; }
+/* A session's name and its status pill share one line: each starts at its own width and gives way when it can't
+   fit, but the name always keeps a few letters (the pill's text is cut instead) */
+header h1 { flex:1 1 auto; min-width:min(4.5em, 34vw); }
+#pill { flex:0 1 auto; min-width:0; }
+#ptext { overflow:hidden; text-overflow:ellipsis; min-width:0; }
 .kv2 { display:flex; justify-content:space-between; gap:12px; padding:11px 2px; border-bottom:1px solid var(--line); }
 .kv2 span:first-child { color:var(--mut); }
 #live { font-size:12px; font-weight:600; color:var(--warn); white-space:nowrap; flex:none; }
