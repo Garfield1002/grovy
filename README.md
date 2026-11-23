@@ -33,8 +33,9 @@ recommended answers without asking.
 see a session until that's answered. So run `claude` once in a new project on the computer (or `grovy attach`
 the session and answer it). The phone only offers folders that are already trusted.
 
-**Updating:** `cd ~/grovy && git pull && systemctl --user restart grovy`. Your sessions keep running. To give a
-running session the newest grovy, use **⋯ → Update session** on the phone.
+**Updating:** `grovy update`. It shows what's new, updates the grovy folder (only if it can do so cleanly), checks
+that the new version works, and restarts grovy; your sessions keep running. To give a running session the newest
+grovy, use **⋯ → Update session** on the phone.
 
 ## What it is
 

@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 
-from . import cleanup, client, core, hook, install, projects, remote, scriptlib, sessions, setupflow, tmuxctl
+from . import cleanup, client, core, hook, install, projects, remote, scriptlib, sessions, setupflow, tmuxctl, update
 
 
 def cmd_ls(a):
@@ -370,6 +370,7 @@ def main(argv=None):
                     "default: this machine's full host name)")
     ti.set_defaults(fn=install.cmd_tls)
     cleanup.add_parser(sub)
+    update.add_parser(sub)
     sub.add_parser("doctor", help="check dependencies and connectivity").set_defaults(fn=install.cmd_doctor)
     sub.add_parser("url", help="print the web UI link(s), including the login token").set_defaults(fn=install.cmd_url)
     from . import peers   # imported here: hooks never load it

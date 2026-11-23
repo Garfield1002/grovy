@@ -39,7 +39,7 @@ for _k in ("GROVY_HOME", "CCS_HOME", "GROVY_CONFIG_DIR", "CCS_CONFIG_DIR"):
     os.environ.pop(_k, None)
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
-from grovylib import peers, plugins, claude, cleanup, client, graft, setupflow, tui, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tls, tmuxctl, uploads  # noqa: E402
+from grovylib import peers, plugins, claude, cleanup, client, graft, setupflow, tui, update, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, store, tls, tmuxctl, uploads  # noqa: E402
 # Paths fixed when grovy's modules load, from the real home: never let a test reach the real ~/.ssh or systemd units.
 graft.KEY = os.path.join(TMP, "home-ssh", "grovy_tunnel")
 graft.UNIT = os.path.join(TMP, "home-units", "grovy-tunnel.service")
@@ -1440,6 +1440,98 @@ class TestGraft(unittest.TestCase):
                     act()
         rm.assert_called_once_with(rec["graft"])
         self.assertFalse(os.path.exists(graft.KEY) or os.path.exists(graft.KEY + ".pub"))
+
+
+class TestUpdate(unittest.TestCase):
+    """`grovy update` on a throwaway clone of a throwaway upstream: fast-forward only, checked, restart mocked."""
+
+    def g(self, cwd, *args):
+        return subprocess.run(["git", "-C", cwd, *args], check=True, capture_output=True, text=True,
+                              env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+                                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}).stdout.strip()
+
+    def commit(self, repo, name, text="x"):
+        with open(os.path.join(repo, name), "w") as f:
+            f.write(text)
+        self.g(repo, "add", name)
+        self.g(repo, "commit", "-q", "-m", f"add {name}")
+
+    def setUp(self):
+        root = tempfile.mkdtemp(dir=TMP)
+        self.up, self.work, self.here = (os.path.join(root, x) for x in ("up.git", "work", "here"))
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", self.up], check=True)
+        subprocess.run(["git", "clone", "-q", self.up, self.work], check=True, capture_output=True)
+        self.commit(self.work, "a")
+        self.g(self.work, "push", "-q", "origin", "HEAD:main")
+        subprocess.run(["git", "clone", "-q", self.up, self.here], check=True, capture_output=True)
+        self.restarted = []
+        for p in (mock.patch.object(core, "HERE", self.here),
+                  mock.patch.object(update, "imports_ok", lambda: (True, "")),
+                  mock.patch.object(update, "plan_restart",
+                                    lambda: ([("restart the grovy service", lambda: self.restarted.append(1))], None)),
+                  mock.patch.object(update, "_wait_daemon", lambda seconds=15: True),
+                  mock.patch("sys.stdout", io.StringIO())):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_update(self, *args):
+        try:
+            return grovy.main(["update", *args])
+        except SystemExit as e:
+            return e.code
+
+    def head(self):
+        return self.g(self.here, "rev-parse", "HEAD")
+
+    def test_up_to_date_does_nothing(self):
+        self.assertEqual(self.run_update("-y"), 0)
+        self.assertEqual(self.restarted, [])
+
+    def test_fast_forwards_then_restarts(self):
+        self.commit(self.work, "b")
+        self.g(self.work, "push", "-q", "origin", "HEAD:main")
+        self.assertEqual(self.run_update("--check"), 0)          # --check: shows, changes nothing
+        self.assertFalse(os.path.exists(os.path.join(self.here, "b")))
+        self.assertEqual(self.run_update("-y"), 0)
+        self.assertTrue(os.path.exists(os.path.join(self.here, "b")))
+        self.assertEqual(self.restarted, [1])
+
+    def test_new_code_that_doesnt_load_is_undone(self):
+        before = self.head()
+        self.commit(self.work, "b")
+        self.g(self.work, "push", "-q", "origin", "HEAD:main")
+        with mock.patch.object(update, "imports_ok", lambda: (False, "SyntaxError: boom")):
+            self.assertEqual(self.run_update("-y"), 1)
+        self.assertEqual(self.head(), before)
+        self.assertFalse(os.path.exists(os.path.join(self.here, "b")))
+        self.assertEqual(self.restarted, [])                    # nothing restarted onto broken code
+
+    def test_refuses_local_changes_and_own_commits(self):
+        self.commit(self.work, "b")
+        self.g(self.work, "push", "-q", "origin", "HEAD:main")
+        with open(os.path.join(self.here, "a"), "w") as f:
+            f.write("edited")
+        before = self.head()
+        self.assertEqual(self.run_update("-y"), 1)              # uncommitted change to a tracked file
+        self.g(self.here, "commit", "-q", "-am", "mine")
+        mine = self.head()
+        self.assertEqual(self.run_update("-y"), 1)              # diverged: no merge, no rebase
+        self.assertEqual(self.head(), mine)
+        self.assertNotEqual(mine, before)
+
+    def test_without_a_terminal_or_yes_nothing_changes(self):
+        self.commit(self.work, "b")
+        self.g(self.work, "push", "-q", "origin", "HEAD:main")
+        with mock.patch.object(tui, "interactive", lambda: False):
+            self.assertEqual(self.run_update(), 2)
+        self.assertFalse(os.path.exists(os.path.join(self.here, "b")))
+
+    def test_the_daemon_pane_is_found_by_its_pid(self):
+        out = "%1\t111\tbash\n%7\t4242\tbash -lc \"exec python3 /x/grovy serve\"\n"
+        with mock.patch.object(update.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, out, "")):
+            self.assertEqual(update.daemon_pane(4242), ("%7", 'bash -lc "exec python3 /x/grovy serve"'))
+            self.assertIsNone(update.daemon_pane(999))
+            self.assertIsNone(update.daemon_pane(None))
 
 
 class TestSetupAndCustomCss(unittest.TestCase):

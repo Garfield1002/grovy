@@ -162,6 +162,16 @@ what it finds in those places. A folder is only ever deleted when it is named fo
 folder, `/` or one of the home's parents, and doesn't hold the grovy code: a mistyped `GROVY_STATE_DIR=~` can't
 wipe a home. It refuses to run inside a grovy session, which it would cut off. The grovy folder is never touched.
 
+**`grovy update`** (`grovylib/update.py`) updates the grovy folder from its upstream branch: it refuses without one,
+with uncommitted changes to tracked files, and when the branch has commits of its own (it only fast-forwards: no
+merge, no rebase), fetches, lists the incoming commits (cleaned of control characters) and asks (`-y`; without a
+terminal and without `-y` it changes nothing and exits 2; `--check` only shows). After `git merge --ff-only` it
+checks that `grovy`, `grovylib.hook` and `grovyd` import in a fresh interpreter; if not, `git reset --keep` back to
+the commit it came from, and nothing is restarted. Then it restarts what runs the code: the `grovy` service, else a
+daemon started by hand in a tmux pane (the pane whose process is the daemon's pid, respawned with its own start
+command), and the `grovy-tunnel` service; then waits for the daemon to answer. Claude sessions are never touched;
+those started before keep their `--settings` until ⋯ → Update session. `--no-restart` updates the code only.
+
 ## Configuration (environment variables)
 
 | var | default | |
