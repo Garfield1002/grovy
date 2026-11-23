@@ -57,9 +57,9 @@ def _call(peer, method, path, body=None):
     try:
         code, obj = peer.call(method, path, body)
     except peers.PeerError as e:
-        core.die(terminal.clean(e))
+        core.die(terminal.clean(e, line=True))
     if code != 200:
-        core.die(f"{peer.name}: {terminal.clean(obj.get('error') or f'HTTP {code}')}")
+        core.die(f"{peer.name}: {terminal.clean(obj.get('error') or f'HTTP {code}', line=True)}")
     return obj
 
 
@@ -100,7 +100,7 @@ def _run(a):
             core.die(str(e))
     if a.cmd == "logs":   # the pane's text, cleaned of escape sequences (untrusted: it comes from another machine)
         text = str(_call(peer, "GET", f"{q}/screen?lines={int(a.lines)}").get("text", ""))
-        sys.stdout.write(re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "?", text))
+        sys.stdout.write(terminal.clean(text))
         return 0
     if a.cmd in ("kill", "forget"):
         _call(peer, "POST", f"{q}/{a.cmd}", {})
@@ -109,7 +109,7 @@ def _run(a):
     if a.cmd == "resume":
         if a.fresh:
             core.die("--fresh works on the machine itself only (the API resumes the conversation)")
-        print(terminal.clean(_call(peer, "POST", f"{q}/resume", {}).get("ok") or f"resumed {machine}:{name}"))
+        print(terminal.clean(_call(peer, "POST", f"{q}/resume", {}).get("ok") or f"resumed {machine}:{name}", line=True))
         return 0
     if a.cmd == "rename":
         new = a.new
@@ -130,34 +130,58 @@ def _run(a):
 LS_TIMEOUT = 4   # seconds a graft gets to answer `grovy ls` (one that's asleep must not stall it)
 
 
+def _read_all(r, deadline, limit):
+    """A response body, but within an overall deadline: a graft trickling bytes can't hold `grovy ls`."""
+    import time
+    data = b""
+    while len(data) <= limit:
+        if time.monotonic() > deadline:
+            raise TimeoutError("it took too long to answer")
+        chunk = r.read1(65536) if hasattr(r, "read1") else r.read(65536)
+        if not chunk:
+            return data
+        data += chunk
+    raise ValueError("its answer is too long")
+
+
 def peer_lines(only=None):
     """Rows for `grovy ls` on a trunk: each graft's sessions, or why it can't be listed. The grafts are asked at
-    once, each with a short timeout; everything they say is cleaned before it is printed (it is untrusted)."""
-    import concurrent.futures
+    once and given LS_TIMEOUT in all, the whole answer included; a graft still talking then is left behind (its
+    thread is a daemon thread: Ctrl-C and the end of the command don't wait for it). What they say is cleaned
+    before it is printed: it is untrusted."""
+    import threading
+    import time
     conf, problems = peers.read_config()
-    notes = [f"peers.json: {terminal.clean(p)}" for p in problems]
+    notes = [f"peers.json: {terminal.clean(p, line=True)}" for p in problems]
     names = [n for n in sorted(conf) if only in (None, n)]
+    deadline = time.monotonic() + LS_TIMEOUT
+    got = {}
 
     def one(name):
-        p = peers.Peer(name, conf[name], None)
         try:
+            p = peers.Peer(name, conf[name], None)
             c, r = p.open("GET", "/api/sessions", timeout=LS_TIMEOUT)
             try:
-                raw = r.read(peers.ANSWER_MAX + 1)
+                obj = json.loads(_read_all(r, deadline, peers.ANSWER_MAX))
             finally:
                 c.close()
-            obj = json.loads(raw)
-        except (peers.PeerError, OSError, ValueError, http.client.HTTPException) as e:
-            return [], [f"{name}: {terminal.clean(e)}"]
-        if r.status != 200 or not isinstance(obj, dict) or not isinstance(obj.get("sessions"), list):
-            err = obj.get("error") if isinstance(obj, dict) else None
-            return [], [f"{name}: {terminal.clean(err or f'HTTP {r.status}')}"]
-        return [(f"{name}:{s['name']}", terminal.clean(s.get("state", "unknown"))[:12], terminal.clean(s.get("cwd", "?")))
-                for s in obj["sessions"] if isinstance(s, dict) and core.valid_name(s.get("name"))], []
+            if r.status != 200 or not isinstance(obj, dict) or not isinstance(obj.get("sessions"), list):
+                err = obj.get("error") if isinstance(obj, dict) else None
+                got[name] = ([], [f"{name}: {terminal.clean(err or f'HTTP {r.status}', line=True)}"])
+                return
+            got[name] = ([(f"{name}:{s['name']}", terminal.clean(s.get("state", "unknown"), line=True)[:12],
+                           terminal.clean(s.get("cwd", "?"), line=True))
+                          for s in obj["sessions"] if isinstance(s, dict) and core.valid_name(s.get("name"))], [])
+        except Exception as e:   # whatever one graft does, the others' rows stay
+            got[name] = ([], [f"{name}: {terminal.clean(e, line=True) or type(e).__name__}"])
+    threads = [threading.Thread(target=one, args=(n,), daemon=True) for n in names]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(max(0, deadline - time.monotonic()) + 0.5)
     rows = []
-    if names:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(names))) as ex:
-            for r, n in ex.map(one, names):
-                rows += r
-                notes += n
+    for n in names:
+        r, nn = got.get(n, ([], [f"{n}: it took too long to answer"]))
+        rows += r
+        notes += nn
     return rows, notes

@@ -449,7 +449,8 @@ class TestRemoteCli(PeerLink):
 
     def setUp(self):
         super().setUp()
-        self.tsock = f"grovy-term-{os.getpid()}"
+        TestRemoteCli.n = getattr(TestRemoteCli, "n", 0) + 1
+        self.tsock = f"grovy-term-{os.getpid()}-{TestRemoteCli.n}"   # one server per test: kill-server is async
         real_tmux = tmuxctl.tmux
         for p in (mock.patch.object(terminal, "TMUX", ["tmux", "-L", self.tsock]),
                   mock.patch.object(tmuxctl, "tmux_alive", lambda n: n == "t1"),
@@ -555,29 +556,87 @@ class TestRemoteCli(PeerLink):
         self.assertLess(time.monotonic() - t, 2)
         self.assertEqual(notes, [])
 
+    def serve_raw(self, handler):
+        """A graft socket that answers with `handler(conn)` (a hostile or broken grovy)."""
+        path = os.path.join(self.dir, f"raw{len(os.listdir(self.dir))}.sock")
+        srv = socket.socket(socket.AF_UNIX)
+        old = os.umask(0o177)
+        srv.bind(path)
+        os.umask(old)
+        srv.listen(8)
+        self.addCleanup(srv.close)
+
+        def loop():
+            while True:
+                try:
+                    c, _ = srv.accept()
+                except OSError:
+                    return
+                threading.Thread(target=handler, args=(c,), daemon=True).start()
+        threading.Thread(target=loop, daemon=True).start()
+        return path
+
+    def test_a_graft_trickling_its_answer_or_sending_junk_doesnt_hold_or_break_ls(self):
+        """Second review: one byte a second kept ls going forever (the timeout was per read); a deeply nested
+        answer raised RecursionError, which dropped every graft's rows."""
+        def trickle(c):
+            c.recv(4096)
+            c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100000\r\n\r\n")
+            try:
+                for _ in range(100):
+                    c.sendall(b" ")
+                    time.sleep(1)
+            except OSError:
+                pass
+
+        def nested(c):
+            c.recv(4096)
+            body = b"[" * 100000
+            c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+            c.close()
+        peers.write_config({"pc": {"socket": self.sock, "token": PEER_TOKEN, "tls": False},
+                            "slow": {"socket": self.serve_raw(trickle), "token": PEER_TOKEN, "tls": False},
+                            "deep": {"socket": self.serve_raw(nested), "token": PEER_TOKEN, "tls": False}}, self.conf)
+        t = time.monotonic()
+        rows, notes = remote.peer_lines()
+        self.assertLess(time.monotonic() - t, remote.LS_TIMEOUT + 2)
+        self.assertIn("pc:a", [r[0] for r in rows])
+        self.assertEqual(sorted(n.split(":")[0] for n in notes), ["deep", "slow"])
+
     def test_what_a_graft_says_is_cleaned_before_it_is_printed(self):
         """Review: a hostile graft's cwd reached the trunk's terminal raw (OSC 52 could write the clipboard)."""
         evil = "/x\x1b]52;c;cHduZWQ=\x07\x1b[2Kfake"
         with mock.patch.object(peers.Peer, "open") as op:
             r = mock.Mock(status=200)
-            r.read.return_value = json.dumps({"sessions": [{"name": "a", "state": "\x1b[31midle", "cwd": evil}]}).encode()
+            r.read1.side_effect = [json.dumps({"sessions": [{"name": "a", "state": "\x1b[31midle", "cwd": evil}]}).encode(),
+                                   b""]
             op.return_value = (mock.Mock(), r)
             rows, _ = remote.peer_lines("pc")
         self.assertNotIn("\x1b", "".join(rows[0]))
         self.assertNotIn("\x07", "".join(rows[0]))
+        with mock.patch.object(peers.Peer, "open") as op:   # a made-up row, and a lone surrogate print can't encode
+            r = mock.Mock(status=200)
+            r.read1.side_effect = [json.dumps({"sessions": [{"name": "a", "cwd": "/x\nlaptop:prod   idle   /home",
+                                                             "state": "\ud800"}]}).encode(), b""]
+            op.return_value = (mock.Mock(), r)
+            rows, _ = remote.peer_lines("pc")
+        self.assertNotIn("\n", rows[0][2])
+        "".join(rows[0]).encode("utf-8")      # would raise on a lone surrogate
 
     def test_an_unknown_term_falls_back(self):
         """Review: a TERM the graft had no terminfo for (kitty, ghostty...) made tmux refuse, and attach said 0."""
         self.assertEqual(terminal.pick_term("xterm-ghostty-nope"), "xterm-256color")
+        self.assertEqual(terminal.pick_term(".."), "xterm-256color")     # a folder, not an entry
         self.assertEqual(terminal.pick_term("bad/term"), "xterm-256color")
         if terminal.has_terminfo("xterm"):
             self.assertEqual(terminal.pick_term("xterm"), "xterm")
 
     def test_tilde_dot_ends_it_from_here_and_resets_the_terminal(self):
-        out, code = self.attach_in_pty([b"\r~.", b""], b"")
+        out, code = self.attach_in_pty([b"typed-before\r~.", b""], b"")   # one read: what came first still goes
         self.assertEqual(code, 0, out[-300:])
         self.assertIn(b"closed with ~.", out)
         self.assertIn(terminal.RESET, out)
+        self.assertTrue(wait_for(lambda: "typed-before" in tmuxctl.tmux("capture-pane", "-p", "-t", "=grovy-t1:").stdout))
 
     def test_odd_size_headers_dont_break_the_relay(self):
         """Review: a latin-1 digit passed isdigit() but not int(), after the 101 was sent."""

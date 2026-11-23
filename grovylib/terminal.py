@@ -50,9 +50,11 @@ def has_terminfo(term):
     dirs = [os.environ.get("TERMINFO"), os.path.expanduser("~/.terminfo"),
             *(os.environ.get("TERMINFO_DIRS") or "").split(":"),
             "/etc/terminfo", "/lib/terminfo", "/usr/share/terminfo", "/usr/lib/terminfo", "/usr/local/share/terminfo"]
+    if not term[:1].isalnum():   # "." or "..": a folder, not an entry
+        return False
     for d in filter(None, dirs):
         for sub in (term[0], f"{ord(term[0]):x}"):   # Linux uses the first letter, macOS its hex code
-            if os.path.exists(os.path.join(d, sub, term)):
+            if os.path.isfile(os.path.join(d, sub, term)):
                 return True
     return False
 
@@ -85,6 +87,7 @@ def serve(sock, name, rows=24, cols=80, term=FALLBACK_TERM):
             os._exit(127)
     try:
         _set_size(fd, rows, cols)
+        os.set_blocking(fd, False)   # a tmux client that stops reading must not block this thread forever
         sock.settimeout(None)
         buf = b""
         while True:
@@ -92,8 +95,12 @@ def serve(sock, name, rows=24, cols=80, term=FALLBACK_TERM):
             if fd in ready:
                 try:
                     data = os.read(fd, 65536)
+                except BlockingIOError:
+                    data = None
                 except OSError:   # EIO: the child closed the terminal (detached, or the session ended)
                     return
+                if data is None:
+                    continue
                 if not data:
                     return
                 sock.sendall(data)
@@ -109,7 +116,11 @@ def serve(sock, name, rows=24, cols=80, term=FALLBACK_TERM):
                     payload, buf = buf[3:3 + n], buf[3 + n:]
                     if kind == DATA:
                         while payload:
-                            payload = payload[os.write(fd, payload):]
+                            try:
+                                payload = payload[os.write(fd, payload):]
+                            except BlockingIOError:   # tmux isn't reading: wait a little, then give up
+                                if not select.select([], [fd], [], 10)[1]:
+                                    return
                     elif kind == SIZE and n == 4:
                         r, c = struct.unpack(">HH", payload)
                         if 1 <= r <= 1000 and 1 <= c <= 1000:
@@ -138,9 +149,12 @@ def _reap(pid, wait=3.0):
             time.sleep(0.05)
 
 
-def clean(text):
-    """Text from another machine made safe to print: no escape sequences or other control characters."""
-    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "?", str(text))
+def clean(text, line=False):
+    """Text from another machine made safe to print: no escape sequences, other control characters or lone
+    surrogates (print would fail on them); `line`: one line, so no newline or tab either (a field of `grovy ls`
+    must not start a made-up row)."""
+    return re.sub(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]" if line else r"[\x00-\x08\x0b-\x1f\x7f-\x9f\ud800-\udfff]",
+                  "?", str(text))
 
 
 def _request(peer, name, rows, cols, term):
@@ -244,6 +258,8 @@ def attach(peer, name, stdin=None, stdout=None):
                     if tilde:
                         tilde = False
                         if b == ord("."):
+                            if send:   # what was typed before it still goes (as ssh does)
+                                sock.sendall(frame(DATA, bytes(send)))
                             why = "closed with ~."
                             return 0
                         send += b"~"

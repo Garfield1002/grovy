@@ -42,7 +42,7 @@ def cmd_ls(a):
             st = status.get(n, {}).get("state", "unknown")
         print(f"{n:<16} {st:<12} {reg.get(n, {}).get('cwd', '?')}")
     sys.stdout.flush()
-    asking.join()
+    asking.join(remote.LS_TIMEOUT + 2)   # peer_lines has its own deadline; never wait past it
     rows, notes = got.get("rows", []), got.get("notes", [])
     if rows and not names:
         print(f"{'NAME':<16} {'STATE':<12} PATH")
