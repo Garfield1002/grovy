@@ -15,8 +15,8 @@ git clone <this repo> ~/grovy && ~/grovy/grovy setup
 Setup asks two questions (which network address your phone will use — it suggests your VPN address if
 you have one — and which port, defaulting to 7333 but steering you to a free one if that's taken, e.g. by
 another user's grovy on a shared machine), installs grovy as a background service that starts at boot, and
-prints a link. **Open that link once on your phone**: it logs the phone in. Bookmark the page or "Add to
-Home Screen".
+shows a **QR code**. **Scan it with your phone** (or run `grovy url` for the link to open): it logs the
+phone in. Bookmark the page or "Add to Home Screen".
 
 On macOS, or with `--no-service`, setup prints a command to start grovy yourself instead.
 `grovy setup --dry-run` shows what it would do without changing anything; rerunning it is safe.

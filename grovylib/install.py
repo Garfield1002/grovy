@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from . import claude, client, core, sessions, tls, tmuxctl
+from . import claude, client, core, qr, sessions, tls, tmuxctl
 
 
 def lan_bases(url):
@@ -22,31 +22,46 @@ def lan_bases(url):
     return [f"{scheme}://{h}:{port}" for h in hosts]
 
 
-def cmd_url(_):
-    """Print the phone login link(s): open one once per device; it sets a cookie."""
-    try:
-        st = client.sock_request({"type": "status"}) or {}
-    except (OSError, ValueError):
-        core.die("grovyd not running (grovy serve)")
-    url = st.get("url", "")
+def login_links():
+    """(full login URLs, the bases they came from, token, whether grovy's own certificate is served); raises
+    OSError/ValueError if grovyd is silent."""
+    st = client.sock_request({"type": "status"}) or {}
     tok = core.load_token()
     ours = st.get("tls") == tls.own_cert()
-    bases = lan_bases(url)
-    local_only = all(re.match(r"https?://(127\.|localhost|\[::1\])", b) for b in bases)   # where it listens
+    bases = lan_bases(st.get("url", ""))
     if ours:   # the certificate is only valid for its own names: links by any other address would fail
         port = bases[0].rsplit(":", 1)[1]
         named = [f"https://{f'[{n}]' if ':' in n else n}:{port}" for n in tls.cert_names(tls.own_cert())]
         bases = named or bases
-    for base in bases:
-        print(base + "/" + (f"?token={tok}" if tok else ""))
+    return [base + "/" + (f"?token={tok}" if tok else "") for base in bases], bases, tok, ours
+
+
+def _is_local(base):
+    return bool(re.match(r"https?://(127\.|localhost|\[::1\])", base))
+
+
+def _login_warnings(bases, tok, ours=False):
+    """The notes cmd_url and setup both print: the certificate to install first, a warning if the daemon is
+    local-only or has no token."""
     if ours and tls.cert_der():
         print(f"New device? Install {tls.public_cert()} on it first (copy the file over yourself; `grovy tls init` "
               f"says how). Its SHA-256 fingerprint is\n  {tls.fingerprint(tls.cert_der())}", file=sys.stderr)
-    if local_only:
+    if all(_is_local(b) for b in bases):
         print("note: the daemon only listens on this computer, so these links won't open on a phone.\n"
               "Restart it with --bind 0.0.0.0 (or your VPN address), or set GROVY_BIND.", file=sys.stderr)
     if not tok:
         print("(no token: anyone who can reach these addresses can use grovy)", file=sys.stderr)
+
+
+def cmd_url(_):
+    """Print the phone login link(s): open one once per device; it sets a cookie."""
+    try:
+        links, bases, tok, ours = login_links()
+    except (OSError, ValueError):
+        core.die("grovyd not running (grovy serve)")
+    for link in links:
+        print(link)
+    _login_warnings(bases, tok, ours)
     return 0
 
 
@@ -382,8 +397,21 @@ def cmd_setup(a):
     else:
         print("the daemon isn't answering yet; when it is, run `grovy url` for the phone link")
         return 0
-    print("\nOpen this once on your phone (it logs the phone in):")
-    cmd_url(None)
+    try:
+        links, bases, tok, ours = login_links()
+    except (OSError, ValueError):
+        print("the daemon isn't answering yet; when it is, run `grovy url` for the phone link")
+        return 0
+    # Prefer a non-local address (a phone can reach it) for the code to scan.
+    link = next((l for l, b in zip(links, bases) if not _is_local(b)), links[0] if links else None)
+    if link:
+        print("\nScan this on your phone to log in (opening the link once logs the phone in):\n")
+        try:
+            print(qr.render(link, quiet=2))
+            print("\ncan't scan? run `grovy url` for the link" + ("" if len(bases) == 1 else " (all addresses)"))
+        except ValueError:
+            print(link)  # too long for our small encoder: fall back to the plain link
+        _login_warnings(bases, tok, ours)
     print("\nThen tap + to start a session. New projects: run `claude` once in the folder first, to accept its "
           "trust prompt.\nMake it yours in " + core.config_dir() + " (custom.css, custom.js); check everything with "
           "`grovy doctor`.\nTo undo all of this: grovy cleanup.")

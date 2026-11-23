@@ -568,6 +568,7 @@ class Http(http.server.BaseHTTPRequestHandler):
             if "token=" in q:   # the whole login link, pasted into the login page's field
                 q = parse_qs(urlsplit(q).query).get("token", [""])[0].strip()
             if q and hmac.compare_digest(q.encode(), self.server.token.encode()):
+                # Lax (see _cookies): a scanned QR or a messaged link opens this from outside the origin
                 return self._send(303, b"", "text/plain", [
                     ("Location", "/"),
                     *self._cookies(q)])

@@ -1017,17 +1017,20 @@ class TestSetupAndCustomCss(unittest.TestCase):
         self.assertIn("linking", out.getvalue())
         self.assertEqual(os.listdir(home), [])
 
-    def test_setup_finishes_with_the_phone_link(self):
-        """It ended in a NameError (the custom.css path variable was gone) right after printing the link."""
+    def test_setup_finishes_with_the_phone_qr(self):
+        """It ends by rendering a QR code of the login link (not the long URL), then keeps going without a
+        NameError (the custom.css path variable was once gone right after printing the link)."""
         home = tempfile.mkdtemp(dir=TMP)
         env = {"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, "cfg"), "PATH": "/usr/bin:/bin"}
         out = io.StringIO()
         with mock.patch.dict(os.environ, env), mock.patch.object(shutil, "which", lambda x: "/bin/true"), \
-                mock.patch.object(client, "sock_request", lambda *a, **k: {"ok": 1}), \
-                mock.patch.object(install, "cmd_url", lambda a: print("LINK")), redirect_stdout(out):
-            rc = grovy.main(["setup", "--bind", "127.0.0.1", "--no-service"])
+                mock.patch.object(client, "sock_request",
+                                  lambda *a, **k: {"url": "http://10.0.0.5:7333"}), redirect_stdout(out):
+            rc = grovy.main(["setup", "--bind", "10.0.0.5", "--no-service"])
         self.assertEqual(rc, 0)
-        self.assertIn("LINK", out.getvalue())
+        self.assertIn("Scan this on your phone", out.getvalue())
+        self.assertIn("▀", out.getvalue())                       # the half-block the QR is drawn with
+        self.assertNotIn("10.0.0.5:7333", out.getvalue())             # the long URL is shown as a code, not text
         self.assertIn(os.path.join(home, "cfg", "grovy"), out.getvalue())
         self.assertLessEqual({"custom.css", "custom.js"}, set(os.listdir(os.path.join(home, "cfg", "grovy"))))
 
@@ -3534,6 +3537,25 @@ class TestHttp(unittest.TestCase):
         self.assertIn("sha256-", h["Content-Security-Policy"])
         self.assertEqual(h["X-Frame-Options"], "DENY")
         self.assertNotIn("Access-Control-Allow-Origin", h)
+
+    def test_login_cookie_is_lax_not_strict(self):
+        """Regression: scanning the setup QR (or opening the link from any other app) is an externally-initiated
+        navigation, and a SameSite=Strict cookie is withheld on it. The browser followed the /?token= redirect to
+        "/" without the cookie and showed "login needed". The login cookie must be Lax so it rides that navigation."""
+        import http.client
+        with mock.patch.object(self.httpd, "token", "s" * 32):
+            c = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=5)
+            try:
+                c.request("GET", "/?token=" + "s" * 32)   # raw: don't follow the redirect, inspect its Set-Cookie
+                r = c.getresponse()
+                r.read()
+            finally:
+                c.close()
+            self.assertEqual(r.status, 303)
+            cookie = r.getheader("Set-Cookie") or ""
+            self.assertIn("SameSite=Lax", cookie)
+            self.assertNotIn("Strict", cookie)
+            self.assertIn("HttpOnly", cookie)
 
     def test_server_time_for_clock_offset(self):
         """Regression: the phone's clock ran behind the server's, so the typing timer showed "-1:-1"."""

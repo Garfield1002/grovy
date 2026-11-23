@@ -44,6 +44,10 @@ GROVY_BIND=100.101.102.103 grovy serve        # or 0.0.0.0 for every interface
 grovy url                                   # prints http://ADDR:7333/?token=... : open it once on the phone
 ```
 
+`grovy setup` ends by printing that same link as a **QR code** to scan with the phone's camera, rather than the
+long token URL (`grovylib/qr.py`, a small stdlib-only byte-mode encoder, drawn with half-block characters and
+explicit black/white colours so it scans in any terminal theme); `grovy url` still prints the link as text to copy.
+
 **A token is always required, loopback included**, because other local users and DNS-rebinding web pages can
 reach 127.0.0.1 too. It's generated once into `$STATE/token` (mode 0600). `GROVY_TOKEN` overrides it. Opening the `grovy url` link sets an HttpOnly, SameSite=Lax
 cookie for a year. (Lax, not Strict: a standalone PWA launched from the phone's home screen is a top-level
