@@ -2187,6 +2187,13 @@ class TestSetupAndCustomCss(unittest.TestCase):
                 f.write("[1]")
             self.assertIsNone(grovyd.current_theme())
 
+    def test_page_sizes_boxes_with_their_padding(self):
+        """The themes rework dropped `* { box-sizing:border-box }` with the colour block above it: every width:100%
+        with padding then overflowed, and the phone scrolled sideways."""
+        with open(os.path.join(ROOT, "index.html"), encoding="utf-8") as f:
+            css = re.search(r"<style>(.*?)</style>", f.read(), re.S).group(1)
+        self.assertRegex(css, r"(?m)^\* \{ box-sizing:border-box;")
+
     def test_every_builtin_extension_says_what_it_is(self):
         for f in grovyd.builtin_extensions():
             with open(f, encoding="utf-8") as fh:

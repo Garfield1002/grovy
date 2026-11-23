@@ -19,6 +19,7 @@
 @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ebe9e4; --mut:#9c998f; --faint:#64625c;
   --card:#21211f; --line:#33322f; --acc:#e08a67; --user:#25365c; --code:#252523; --ok:#5cc47e; --warn:#f0a63a;
   --bad:#f0705f; --busy:#7aa2ff; --tree:var(--mut); } }   /* --faint barely shows on a dark page */
+* { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
 html, body { margin:0; background:var(--grain) var(--bg); color:var(--fg);
   font:16px/1.5 var(--sans); }
 body { min-height:100vh; min-height:100dvh; display:flex; flex-direction:column; }
