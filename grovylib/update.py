@@ -55,10 +55,15 @@ def daemon_pane(pid):
                            capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
+    import shlex
     for line in r.stdout.splitlines():
         parts = line.split("\t", 2)
         if len(parts) == 3 and parts[1] == str(pid) and parts[2]:
-            return parts[0], parts[2]
+            try:   # tmux shows the start command shell-quoted: back to its arguments, or respawn runs one bad name
+                argv = shlex.split(parts[2])
+            except ValueError:
+                return None
+            return (parts[0], argv) if argv else None
     return None
 
 
@@ -73,9 +78,9 @@ def plan_restart():
     elif st:
         pane = daemon_pane(st.get("pid"))
         if pane:
-            target, cmd = pane
+            target, argv = pane
             steps.append((f"restart the grovy daemon in its tmux pane {target} (Claude sessions keep running)",
-                          lambda: _run(["tmux", "respawn-pane", "-k", "-t", target, cmd])))
+                          lambda: _run(["tmux", "respawn-pane", "-k", "-t", target, *argv])))
         else:
             note = "grovy is running outside its service: restart it yourself to use the new version"
     if _active("grovy-tunnel"):

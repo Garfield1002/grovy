@@ -1529,9 +1529,32 @@ class TestUpdate(unittest.TestCase):
     def test_the_daemon_pane_is_found_by_its_pid(self):
         out = "%1\t111\tbash\n%7\t4242\tbash -lc \"exec python3 /x/grovy serve\"\n"
         with mock.patch.object(update.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, out, "")):
-            self.assertEqual(update.daemon_pane(4242), ("%7", 'bash -lc "exec python3 /x/grovy serve"'))
+            self.assertEqual(update.daemon_pane(4242), ("%7", ["bash", "-lc", "exec python3 /x/grovy serve"]))
             self.assertIsNone(update.daemon_pane(999))
             self.assertIsNone(update.daemon_pane(None))
+
+    def test_a_respawned_pane_runs_the_same_command(self):
+        """Regression: tmux shows a pane's start command shell-quoted; passed back to respawn-pane as one string, a
+        pane started from one string ran a program named after the whole line, died, and took the daemon's tmux
+        session with it. Real tmux, private server: both ways a pane can have been started."""
+        sock = f"grovy-respawn-{os.getpid()}"
+        self.addCleanup(subprocess.run, ["tmux", "-L", sock, "kill-server"], capture_output=True)
+        mark = os.path.join(TMP, f"respawned-{os.getpid()}")
+        for how in (["sh -c \"echo one >> " + mark + "; exec sleep 60\""],          # one string (a shell runs it)
+                    ["sh", "-c", "echo two >> " + mark + "; exec sleep 60"]):        # an argument array
+            subprocess.run(["tmux", "-L", sock, "-f", "/dev/null", "new-session", "-d", "-s", "d", *how], check=True)
+            pid = subprocess.run(["tmux", "-L", sock, "list-panes", "-t", "=d:", "-F", "#{pane_pid}"],
+                                 capture_output=True, text=True).stdout.strip()
+            real = subprocess.run
+            with mock.patch.object(update.subprocess, "run",
+                                   lambda argv, **k: real(argv[:1] + ["-L", sock] + argv[1:], **k)):
+                target, argv = update.daemon_pane(int(pid))
+                update._run(["tmux", "respawn-pane", "-k", "-t", target, *argv])
+            time.sleep(0.5)
+            alive = subprocess.run(["tmux", "-L", sock, "has-session", "-t", "=d"], capture_output=True).returncode
+            self.assertEqual(alive, 0, f"the pane died after respawning {how}")
+            subprocess.run(["tmux", "-L", sock, "kill-session", "-t", "=d"], capture_output=True)
+        self.assertEqual(open(mark).read().split(), ["one", "one", "two", "two"])
 
 
 class TestSetupAndCustomCss(unittest.TestCase):

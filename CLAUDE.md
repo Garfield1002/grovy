@@ -21,8 +21,9 @@ If `$GROVY_SESSION` (or `$CCS_SESSION`, for sessions started before the rename f
 - `index.html` is hot-reloaded by the daemon, and the user gets it on their next page reload.
 - The daemon loads `grovyd.py` and `grovylib/` once, so changes to them need a daemon restart (changes to the modules
   above reach hooks at once, and the daemon only after the restart). Restarting never touches Claude sessions:
-  `tmux respawn-pane -k -t =grovyd: "<same command line it was started with>"` (check it with
-  `tmux list-panes -t =grovyd: -F '#{pane_start_command}'`). Restart only after the tests pass. Events sent during
+  `eval "tmux respawn-pane -k -t =grovyd: $(tmux list-panes -t =grovyd: -F '#{pane_start_command}')"` (the start
+  command is printed shell-quoted: passed back as one quoted string, it runs a program named after the whole line,
+  the pane dies and takes the `grovyd` session with it; this happened). Then check it answers (`grovy ls`). Restart only after the tests pass. Events sent during
   the ~1s gap are lost.
 - Never `pkill -f 'grovy serve'`: the pattern matches your own shell's command line and kills it.
   Use a pidfile, or a `[c]cs serve` style pattern.
