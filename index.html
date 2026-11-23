@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/assets/icon-180.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <style>
-:root { --bg:#f7f6f3; --fg:#24231f; --mut:#77756e; --faint:#a9a69e; --card:#fff; --line:#e4e2dc;
+:root { --bg:#f7f6f3; --fg:#24231f; --mut:#77756e; --faint:#a9a69e; --card:#fcfbf8; --line:#e4e2dc;
   --acc:#b5462d; --user:#e6e9dc; --code:#efede7; --ok:#5b7a48; --warn:#b07a1e; --bad:#9e3a30; --busy:#3e5482;
   --serif:"Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
   --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .2 0 0 0 0 .18 0 0 0 0 .12 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
@@ -130,8 +130,8 @@ body.home header h1 { font-size:21px; font-weight:500; letter-spacing:.02em; }
 /* markdown */
 .md > :first-child { margin-top:0 } .md > :last-child { margin-bottom:0 }
 .md p { margin:0 0 .7em; }
-.md h1, .md h2, .md h3, .md h4 { margin:1.1em 0 .4em; line-height:1.3; }
-.md h1 { font-size:1.25em } .md h2 { font-size:1.15em } .md h3, .md h4 { font-size:1.03em }
+.md h1, .md h2, .md h3, .md h4 { margin:1.1em 0 .4em; line-height:1.3; font-family:var(--serif); font-weight:600; }
+.md h1 { font-size:1.35em } .md h2 { font-size:1.22em } .md h3, .md h4 { font-size:1.08em }
 .md ul, .md ol { margin:0 0 .7em; padding-left:1.4em; } .md li { margin:.2em 0; }
 .md li > ul, .md li > ol { margin:.2em 0 0; }
 .md blockquote { margin:0 0 .7em; padding:2px 0 2px 12px; border-left:3px solid var(--line); color:var(--mut); }
@@ -156,12 +156,10 @@ body.home header h1 { font-size:21px; font-weight:500; letter-spacing:.02em; }
 
 /* typing indicator (lives outside the re-rendered list so its animation never restarts) */
 #typing { max-width:760px; margin:0 auto; width:100%; padding:2px 14px 10px; display:flex; align-items:center; gap:10px; }
-.dots { display:inline-flex; gap:5px; padding:11px 14px; background:var(--card); border:1px solid var(--line);
-  border-radius:18px 18px 18px 4px; }
-.dots i { width:7px; height:7px; border-radius:50%; background:var(--busy); animation:hop 1.3s ease-in-out infinite; }
-.dots i:nth-child(2) { animation-delay:.16s } .dots i:nth-child(3) { animation-delay:.32s }
-@keyframes hop { 0%,60%,100% { transform:translateY(0); opacity:.5 } 30% { transform:translateY(-5px); opacity:1 } }
-#typing.stalled .dots i { background:var(--faint); animation-duration:3.2s; }
+.dots { display:inline-flex; align-items:center; height:30px; padding:0 4px; }   /* one ink dot, breathing slowly */
+.dots i { width:9px; height:9px; border-radius:50%; background:var(--busy); animation:breathe 2.8s ease-in-out infinite; }
+.dots i + i { display:none; }
+#typing.stalled .dots i { background:var(--faint); animation-duration:4.5s; }
 .tool { font:12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background:var(--code); border-radius:7px;
   padding:3px 8px; max-width:45vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tool.fade { animation:fadein .45s ease-out; }
@@ -374,7 +372,7 @@ body.fulledit { overflow:hidden; }
 /* widgets: the frame around every one (the types themselves: extensions/widgets.js) */
 .wg { margin:.4em 0 .9em; padding:12px; border:1px solid var(--line); border-radius:12px; background:var(--card); }
 .wg.werr { color:var(--bad); font-size:14px; border-style:dashed; }
-.wt { font-weight:650; margin:0 0 10px; }
+.wt { font-family:var(--serif); font-weight:600; font-size:1.06em; margin:0 0 10px; }
 .wn { font-size:13px; color:var(--mut); }
 .lf { margin-top:8px; font-size:12.5px; color:var(--mut); } .lf.failed { color:var(--bad) } .lf.running::before { content:"● "; color:var(--busy) }
 @keyframes flash { from { box-shadow:0 0 0 3px var(--busy); } to { box-shadow:0 0 0 3px transparent; } }

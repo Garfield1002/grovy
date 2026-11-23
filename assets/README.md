@@ -1,3 +1,4 @@
 Icon and backdrop from [grove](https://github.com/Garfield1002/grove) (MIT, same author):
-`packaging/grove.svg` rendered to the `icon-*.png` sizes (64 colours), and `crates/grove/assets/backdrop.svg`
-as is. Served by the daemon from `/assets/` without the login token (they hold nothing private).
+the tree of `packaging/grove.svg`, printed in ink (`#24231f`) on paper (`#f7f6f3`) for the `icon-*.png` sizes and
+`logo.png` (the page itself draws the tree as a CSS mask in `--fg`), and `crates/grove/assets/backdrop.svg` as is.
+Served by the daemon from `/assets/` without the login token (they hold nothing private).
