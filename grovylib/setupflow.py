@@ -462,7 +462,7 @@ def _setup_graft(a, rec, total):
     trunk, taken = graft.ask_trunk(rec, a.trunk)
     name = graft.ask_name(rec, taken, a.name)
     port = a.port if a.port is not None else ask_port("127.0.0.1", rec, _own_port())
-    term = tui.select(f"Let {trunk} open a terminal on this computer's sessions (grovy attach {name}:SESSION)?", [
+    term = tui.select(f"Let {trunk} open a terminal here (grovy attach {name}:SESSION, grovy shell {name})?", [
         {"label": "Yes", "value": True, "hint": f"a full terminal: whoever controls {trunk} can then run commands here"},
         {"label": "No", "value": False, "hint": "the trunk can still list, start, stop and message them"},
     ], default=0 if rec.get("terminal", True) else 1)

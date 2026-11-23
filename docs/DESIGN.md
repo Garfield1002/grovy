@@ -821,7 +821,12 @@ fresh before the refresh starts, so a burst of tabs starts one). `logs` reads `G
 grovy-terminal` (a browser can't send Upgrade) gets `101`, then the graft's grovyd runs `tmux attach-session -t
 =grovy-NAME` in a pseudo-terminal (TERM and size from `X-Term`/`X-Rows`/`X-Cols`) and relays it: its output as
 raw bytes; input as frames (type byte, 2-byte length; type 0 keys, type 1 rows+cols). Detaching (C-b d) or the
-session ending closes it; either side closing kills the attach. A TERM the graft has no terminfo entry for (kitty,
+session ending closes it; either side closing kills the attach (the graft waits 0.2s after the trunk's side closes,
+so keys typed just before `~.` reach tmux). **`grovy shell MACHINE`** is the same relay on `POST /api/shell`, under the
+same `GROVY_TERMINAL=on` (the user's choice: a terminal on a session already lets you run anything there): the graft
+runs `tmux new-session -A -s grovy_shell -c ~` (your login shell, in a plain tmux session that isn't a grovy one,
+so a dropped link leaves it running and the next `grovy shell` joins it). `grovy shell trunk` on a graft is
+`ssh -t TRUNK exec tmux new-session -A -s grovy_shell` with your usual ssh. A TERM the graft has no terminfo entry for (kitty,
 ghostty...) becomes `xterm-256color` (tmux would refuse it). The child's environment and argv are built before the
 fork (`execvpe`); when the relay ends the pty is closed first and the tmux client gets SIGHUP, then SIGKILL after 3s
 (a hung tmux server can't keep the thread and its connection slot; the pty is non-blocking, and input tmux

@@ -193,7 +193,7 @@ def candidates(parser, words):
     top = cmds[0] if cmds else None
     if (top, a.dest) in SESSION_ARGS:
         return session_names(cur)
-    if top == "ls" and a.dest == "machine":
+    if top in ("ls", "shell") and a.dest == "machine":
         return sorted(machines())
     if top == "new" and a.dest == "name":
         return [m + ":" for m in sorted(machines()) if machines()[m] == "peer"] if cur else []

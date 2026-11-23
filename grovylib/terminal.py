@@ -1,4 +1,6 @@
-"""`grovy attach pc:NAME`: a terminal on another machine's session, relayed by its grovy over the peer tunnel.
+"""`grovy attach pc:NAME`: a terminal on another machine's session, relayed by its grovy over the peer tunnel; and
+`grovy shell pc`: a login shell there (`POST /api/shell`, the same relay), in the tmux session SHELL_SESSION
+(`new-session -A`: a dropped link leaves it running, the next `grovy shell` joins it; C-b d leaves it).
 
 The graft's grovyd answers `POST /api/sessions/NAME/terminal` (token, `X-Grovy: 1`, `Upgrade: grovy-terminal`; a
 browser can't send that header) with `101 Switching Protocols` when `GROVY_TERMINAL=on` (grovy setup asks, for a
@@ -28,6 +30,7 @@ TERM_RE = re.compile(r"[A-Za-z0-9._+-]{1,40}")
 DATA, SIZE = 0, 1
 TMUX = ["tmux"]   # the tmux command (tests point it at a private server)
 FALLBACK_TERM = "xterm-256color"
+SHELL_SESSION = "grovy_shell"   # a plain tmux session (not a grovy one: grovy's are grovy-NAME, tagged @grovy_state)
 # What a program (tmux) turns on and must turn off; sent when a link drops before it could: alternate screen, mouse
 # modes, bracketed paste, focus events off; cursor shown; attributes reset.
 RESET = b"\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[0m"
@@ -73,10 +76,16 @@ def _pending(sock):
     return sock.pending() if hasattr(sock, "pending") else 0   # TLS keeps decrypted bytes select() can't see
 
 
+def shell_argv():
+    """Your login shell (tmux's default-command), in your home folder, in SHELL_SESSION: made, or joined."""
+    return [*TMUX, "new-session", "-A", "-s", SHELL_SESSION, "-c", os.path.expanduser("~")]
+
+
 def serve(sock, name, rows=24, cols=80, term=FALLBACK_TERM):
-    """The graft's side, on the request's socket after the 101: attach to the session in a pty and relay."""
+    """The graft's side, on the request's socket after the 101: attach to the session (name None: the shell) in a
+    pty and relay."""
     import pty
-    argv = [*TMUX, "attach-session", "-t", "=" + tmuxctl.tmux_name(name)]
+    argv = shell_argv() if name is None else [*TMUX, "attach-session", "-t", "=" + tmuxctl.tmux_name(name)]
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     env["TERM"] = pick_term(term)
     pid, fd = pty.fork()   # the child only execs: everything it needs was built above, before the fork
@@ -106,7 +115,8 @@ def serve(sock, name, rows=24, cols=80, term=FALLBACK_TERM):
                 sock.sendall(data)
             if sock in ready:
                 data = sock.recv(65536)
-                if not data:
+                if not data:   # the other side ended it (~.): let tmux take in what was typed just before
+                    time.sleep(0.2)
                     return
                 buf += data
                 while len(buf) >= 3:
@@ -164,7 +174,8 @@ def _request(peer, name, rows, cols, term):
     try:
         c.connect()
         sock = c.sock
-        sock.sendall((f"POST /api/sessions/{name}/terminal HTTP/1.1\r\nHost: localhost\r\n"
+        path = "/api/shell" if name is None else f"/api/sessions/{name}/terminal"
+        sock.sendall((f"POST {path} HTTP/1.1\r\nHost: localhost\r\n"
                       f"Authorization: Bearer {peer.conf['token']}\r\nX-Grovy: 1\r\nConnection: Upgrade\r\n"
                       f"Upgrade: {UPGRADE}\r\nX-Term: {term}\r\nX-Rows: {rows}\r\nX-Cols: {cols}\r\n"
                       "Content-Length: 0\r\n\r\n").encode())
@@ -201,14 +212,15 @@ def _request(peer, name, rows, cols, term):
 
 
 def attach(peer, name, stdin=None, stdout=None):
-    """The trunk's side: open the terminal on `peer` (a peers.Peer) and relay this terminal to it until it ends.
-    Returns an exit code; raises RuntimeError with a readable reason when it can't start."""
+    """The trunk's side: open the terminal on `peer` (a peers.Peer) and relay this terminal to it until it ends
+    (name None: the shell). Returns an exit code; raises RuntimeError with a readable reason when it can't start."""
+    what = "grovy shell" if name is None else "grovy attach"
     import termios
     import tty
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     if not stdin.isatty():
-        raise RuntimeError("grovy attach needs a terminal")
+        raise RuntimeError(f"{what} needs a terminal")
     fd = stdin.fileno()
 
     def size():
@@ -288,4 +300,4 @@ def attach(peer, name, stdin=None, stdout=None):
         signal.signal(signal.SIGTERM, prev_term)
         c.close()
         if why:
-            print(f"\r\ngrovy attach: {why}", file=sys.stderr)
+            print(f"\r\n{what}: {why}", file=sys.stderr)
