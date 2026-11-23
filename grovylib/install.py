@@ -7,7 +7,7 @@ import socket
 import subprocess
 import sys
 
-from . import claude, client, core, sessions, tls, tmuxctl
+from . import claude, client, core, sessions, tls, tmuxctl, tui
 
 
 def lan_bases(url):
@@ -43,13 +43,13 @@ def _login_warnings(bases, tok, ours=False):
     """The notes cmd_url and setup both print: the certificate to install first, a warning if the daemon is
     local-only or has no token."""
     if ours and tls.cert_der():
-        print(f"New device? Install {tls.public_cert()} on it first (copy the file over yourself; `grovy tls init` "
-              f"says how). Its SHA-256 fingerprint is\n  {tls.fingerprint(tls.cert_der())}", file=sys.stderr)
+        tui.caution(f"New device? Install {tls.public_cert()} on it first (copy the file over yourself; `grovy tls "
+                    f"init` says how). Its SHA-256 fingerprint is\n  {tls.fingerprint(tls.cert_der())}")
     if all(_is_local(b) for b in bases):
-        print("note: the daemon only listens on this computer, so these links won't open on a phone.\n"
-              "Restart it with --bind 0.0.0.0 (or your VPN address), or set GROVY_BIND.", file=sys.stderr)
+        tui.caution("note: the daemon only listens on this computer, so these links won't open on a phone.\n"
+                    "Restart it with --bind 0.0.0.0 (or your VPN address), or set GROVY_BIND.")
     if not tok:
-        print("(no token: anyone who can reach these addresses can use grovy)", file=sys.stderr)
+        tui.caution("(no token: anyone who can reach these addresses can use grovy)")
 
 
 def cmd_url(_):
@@ -59,18 +59,27 @@ def cmd_url(_):
     except (OSError, ValueError):
         core.die("grovyd not running (grovy serve)")
     for link in links:
-        print(link)
+        print(tui.paint(link, "bold"))
     _login_warnings(bases, tok, ours)
     return 0
 
 
 def cmd_doctor(_):
-    ok = True
+    ok, failed, fancy = True, 0, tui.color_on(sys.stdout)
 
     def check(label, good, detail=""):
-        nonlocal ok
+        nonlocal ok, failed
         ok &= bool(good)
-        print(f"[{'ok' if good else 'FAIL'}] {label}" + (f": {detail}" if detail else ""))
+        failed += not good
+        if not fancy:   # the plain form it always had, for anything reading it
+            print(f"[{'ok' if good else 'FAIL'}] {label}" + (f": {detail}" if detail else ""))
+        elif good:
+            print(f"  {tui.paint('✓', 'green', 'bold')} {label}" + (f"  {tui.paint(detail, 'dim')}" if detail else ""))
+        else:
+            print(f"  {tui.paint('✗', 'red', 'bold')} {tui.paint(label, 'bold')}" + (f": {detail}" if detail else ""))
+
+    def info(text):
+        print(f"  {tui.paint('·', 'dim')} {tui.paint(text, 'dim')}" if fancy else f"[info] {text}")
 
     check("python >= 3.11", sys.version_info >= (3, 11), sys.version.split()[0])
     t = shutil.which("tmux")
@@ -88,11 +97,11 @@ def cmd_doctor(_):
             check("https certificate", not soon, paths[0] + (" expires within 30 days: rerun `grovy tls init` (or renew "
                                                              "your own)" if soon else ""))
             if paths == (tls.own_cert(), None):
-                ok = tls.matches() is not False
-                check("https certificate matches grovy.crt", ok,
-                      "" if ok else "devices that install grovy.crt won't trust it; rerun `grovy tls init`")
+                same = tls.matches() is not False   # not `ok`: that would forget the failures before it
+                check("https certificate matches grovy.crt", same,
+                      "" if same else "devices that install grovy.crt won't trust it; rerun `grovy tls init`")
         else:
-            print("[info] https: off (grovy tls init)")
+            info("https: off (grovy tls init)")
     except (OSError, ValueError) as e:   # ssl.SSLError is an OSError
         check("https certificate", False, str(e))
     try:
@@ -103,13 +112,16 @@ def cmd_doctor(_):
             check("daemon finds claude", st["claude"], st["claude"] or f"{claude.claude_cmd()!r} not on the daemon's PATH "
                   "(set PATH or GROVY_CLAUDE in its environment)")
     except (OSError, ValueError) as e:
-        print(f"[info] daemon not running ({e}): start it with `grovy serve`")
+        info(f"daemon not running ({e}): start it with `grovy serve`")
     live, reg = tmuxctl.tmux_managed(), sessions.registry()
     for n in sorted(live):
         hs = os.path.join(sd, "hooks", f"{n}.json")
         check(f"session {n}: hooks file", os.path.exists(hs), hs)
     for n in sorted(set(reg) - set(live)):
-        print(f"[info] session {n}: exited (grovy resume {n} / grovy forget {n})")
+        info(f"session {n}: exited (grovy resume {n} / grovy forget {n})")
+    if fancy:
+        print("\n" + (tui.paint("all good", "green", "bold") if ok else
+                      tui.paint(f"{failed} problem{'s' if failed != 1 else ''}", "red", "bold")))
     return 0 if ok else 1
 
 

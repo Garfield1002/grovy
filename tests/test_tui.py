@@ -61,6 +61,50 @@ class TestTui(unittest.TestCase):
         with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
             self.assertEqual(tui.paint("x", "bold", stream=tty), "x")
 
+    def test_table_widths_and_styles(self):
+        tty = mock.Mock(isatty=lambda: True)
+        with mock.patch.dict(os.environ, {"TERM": "xterm"}):
+            os.environ.pop("NO_COLOR", None)
+            lines, w = tui.table([["日本", ("idle", "green"), "/a"], [[("pc:", "dim"), "b"], "x", "/b"]],
+                                 header=["NAME", "STATE", "PATH"], stream=tty, total=80)
+        self.assertEqual(w, [4, 5, 4])
+        plain = [tui._ANSI.sub("", x) for x in lines]
+        self.assertEqual(plain, ["NAME  STATE  PATH", "日本  idle   /a", "pc:b  x      /b"])   # 日本 is 4 columns
+        self.assertIn("\x1b[32midle\x1b[0m", lines[1])
+        self.assertIn("\x1b[2mNAME\x1b[0m", lines[0])
+        self.assertEqual(tui.cell_width("é"), 1)   # a combining accent takes no column
+
+    def test_table_cuts_to_the_terminal(self):
+        rows = [["name", "idle", "/home/me/" + "deep/" * 20 + "end"]]
+        lines, _ = tui.table(rows, header=["NAME", "STATE", "PATH"], cut_start=(2,), total=40)
+        self.assertTrue(all(tui.cell_width(x) <= 40 for x in lines))
+        self.assertTrue(lines[1].endswith("deep/end") and "…" in lines[1])   # a path keeps its end
+        lines, _ = tui.table([["a", "x" * 100]], total=20)
+        self.assertEqual(lines[0], "a  " + "x" * 16 + "…")
+        lines, _ = tui.table([["a", "/" + "s" * 30, "why it failed"]], shrink=(1, 2), cut_start=(1,), total=30)
+        self.assertEqual(lines[0], "a  …" + "s" * 11 + "  why it failed")   # the socket is cut first
+        lines, _ = tui.table([["日本語日本語日本語"]], total=7)
+        self.assertLessEqual(tui.cell_width(lines[0]), 7)
+
+    def test_table_plain_off_a_terminal_and_with_no_color(self):
+        tty = mock.Mock(isatty=lambda: True)
+        rows = [[("a", "red", "bold"), [("pc:", "dim"), "b"]]]
+        self.assertNotIn("\x1b", "".join(tui.table(rows, header=["X", "Y"], stream=io.StringIO())[0]))
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1", "TERM": "xterm"}):
+            self.assertNotIn("\x1b", "".join(tui.table(rows, header=["X", "Y"], stream=tty)[0]))
+
+    def test_table_cells_cannot_carry_escape_sequences(self):
+        lines, w = tui.table([["evil\x1b]52;c;x\x07", "\x1b[2Jx\nfake row"]], stream=io.StringIO())
+        self.assertNotIn("\x1b", lines[0])
+        self.assertNotIn("\n", lines[0])
+        self.assertNotIn("\x07", lines[0])
+        self.assertEqual(w[0], len("evil?]52;c;x?"))
+
+    def test_table_lines_up_a_second_block(self):
+        _, w = tui.table([["a", "idle", "/a"]], header=["NAME", "STATE", "PATH"], total=80)
+        lines, _ = tui.table([["pc:b", "working", "/b"]], widths=w, total=80)
+        self.assertEqual(lines[0], "pc:b  working  /b")
+
     def test_tree_fits_and_its_text_goes_below_when_narrow(self):
         self.assertLessEqual(max(len(x) for x in tui.TREE), 42)
         side = ["grovy", "", "Claude Code sessions in tmux,"]

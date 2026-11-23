@@ -97,6 +97,9 @@ grovy url                      # the phone link again (also on the phone: â‹¯ â†
 grovy doctor                   # check that everything is in order
 ```
 
+In a terminal, `grovy ls` is a coloured table (sessions waiting on you stand out). Piped into another command, or
+with `NO_COLOR` set or `--plain`, it prints the plain columns scripts can read.
+
 `grovy setup` also sets up tab completion in bash (commands, options, session names); for a shell without the
 bash-completion package, add `eval "$(grovy completion bash)"` to `~/.bashrc`.
 

@@ -109,7 +109,8 @@ def sock_path():
 
 
 def die(msg, code=1):
-    print(f"grovy: {msg}", file=sys.stderr)
+    from . import tui   # only when it's needed: hooks import this module
+    print(tui.paint("grovy:", "red", "bold", stream=sys.stderr) + f" {msg}", file=sys.stderr)
     sys.exit(code)
 
 

@@ -15,7 +15,7 @@ import shlex
 import subprocess
 import sys
 
-from . import core, install, peers, terminal
+from . import core, install, peers, terminal, tui
 
 COMMANDS = ("attach", "logs", "kill", "resume", "forget", "rename", "new")
 FIND_GROVY = 'g="$HOME/.local/bin/grovy"; [ -x "$g" ] || g=grovy; exec "$g" '
@@ -105,25 +105,25 @@ def _run(a):
         return 0
     if a.cmd in ("kill", "forget"):
         _call(peer, "POST", f"{q}/{a.cmd}", {})
-        print(f"{'killed' if a.cmd == 'kill' else 'forgot'} {machine}:{name}")
+        tui.done(f"{'killed' if a.cmd == 'kill' else 'forgot'} {machine}:{name}")
         return 0
     if a.cmd == "resume":
         if a.fresh:
             core.die("--fresh works on the machine itself only (the API resumes the conversation)")
-        print(terminal.clean(_call(peer, "POST", f"{q}/resume", {}).get("ok") or f"resumed {machine}:{name}", line=True))
+        tui.done(terminal.clean(_call(peer, "POST", f"{q}/resume", {}).get("ok") or f"resumed {machine}:{name}", line=True))
         return 0
     if a.cmd == "rename":
         new = a.new
         if not core.valid_name(new):
             core.die(f"bad session name {a.new!r}")
         _call(peer, "POST", f"{q}/rename", {"name": new})
-        print(f"renamed {machine}:{name} -> {machine}:{new}")
+        tui.done(f"renamed {machine}:{name} -> {machine}:{new}")
         return 0
     if a.cmd == "new":
         if [x for x in a.claude_args if x != "--"]:
             core.die("extra claude arguments work on the machine itself only")
         _call(peer, "POST", "/api/sessions", {"name": name, "path": a.path})
-        print(f"started {machine}:{name} in {a.path} on {machine}  (grovy attach {machine}:{name})")
+        tui.done(f"started {machine}:{name} in {a.path} on {machine}", f"  (grovy attach {machine}:{name})")
         return 0
     core.die(f"{a.cmd} doesn't work on another machine")
 

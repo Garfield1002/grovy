@@ -1,4 +1,5 @@
-"""A small terminal UI for `grovy setup` and `grovy cleanup`: colours, step lines, arrow-key menus. Stdlib only.
+"""A small terminal UI for `grovy setup`, `grovy cleanup` and the other commands people read (`grovy ls`, `doctor`,
+...): colours, step lines, tables, arrow-key menus. Stdlib only.
 
 Everything degrades: colours are off when stdout isn't a terminal, `NO_COLOR` is set or `TERM=dumb`; without a
 terminal on stdin (a pipe, `-y`), every question returns its default without asking, so a scripted setup takes the
@@ -11,6 +12,7 @@ import re
 import select as _select
 import shutil
 import sys
+import unicodedata
 
 _CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "blue": "34", "cyan": "36"}
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -34,6 +36,106 @@ def paint(text, *styles, stream=None):
 
 def visible_len(s):
     return len(_ANSI.sub("", s))
+
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
+
+
+def safe(text):
+    """One line of text that can't move the cursor or restyle the terminal: control characters (escape sequences
+    included) become "?". Every table cell goes through it, whatever terminal.clean already did."""
+    return _CONTROL.sub("?", str(text))
+
+
+def _char_width(ch):
+    if unicodedata.combining(ch) or unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def cell_width(s):
+    """The columns `s` takes on a terminal: wide (CJK, most emoji) characters count 2, combining marks 0, colour
+    codes nothing."""
+    return sum(_char_width(ch) for ch in _ANSI.sub("", s))
+
+
+def fit(text, n, start=False):
+    """Plain `text` cut to at most n columns with "…" (at the start with `start`: a path keeps its end)."""
+    if cell_width(text) <= n:
+        return text
+    if n <= 0:
+        return ""
+    chars, used = (reversed(text) if start else iter(text)), 0
+    kept = []
+    for ch in chars:
+        w = _char_width(ch)
+        if used + w > n - 1:
+            break
+        kept.append(ch)
+        used += w
+    kept = "".join(reversed(kept)) if start else "".join(kept)
+    return "…" + kept if start else kept + "…"
+
+
+def _segments(cell):
+    """A cell as [(text, styles)]: a str, (text, style, ...), or a list of those (e.g. a dim "pc:" before a name)."""
+    if isinstance(cell, list):
+        return [x for c in cell for x in _segments(c)]
+    if isinstance(cell, tuple):
+        return [(safe(cell[0]), tuple(cell[1:]))]
+    return [(safe(cell), ())]
+
+
+def _fit_segments(segs, n, start=False):
+    """Segments cut like fit() would cut their text; the "…" takes the style of the segment it replaces."""
+    text = "".join(t for t, _ in segs)
+    if cell_width(text) <= n:
+        return segs
+    keep = len(fit(text, n, start)) - 1   # characters kept: fit drops them from one end only
+    if start:
+        drop, out = len(text) - keep, []
+        for t, st in segs:
+            out.append((t[drop:], st))
+            drop = max(0, drop - len(t))
+        out = [x for x in out if x[0]]
+        return [("…", out[0][1] if out else segs[-1][1])] + out
+    out = []
+    for t, st in segs:
+        out.append((t[:keep], st))
+        keep = max(0, keep - len(t))
+    out = [x for x in out if x[0]]
+    return out + [("…", out[-1][1] if out else segs[0][1])]
+
+
+def table(rows, header=None, widths=(), shrink=-1, cut_start=(), stream=None, total=None, gap=2):
+    """A borderless table: (lines, column widths). Columns are as wide as their widest cell (or `widths`, so a
+    second block can line up under a first), `gap` spaces apart; if that's wider than the terminal, column `shrink`
+    (the last by default; a tuple: those, in order, until it fits) is cut with "…" (at its start for columns in
+    `cut_start`). The header is dim, cells are styled per segment (see _segments), and every cell is made safe()
+    before it is measured or printed."""
+    rows = [[_segments(c) for c in r] for r in rows]
+    head = [[(safe(h), ("dim",))] for h in header] if header else None
+    ncol = max([len(r) for r in rows] + [len(head) if head else 0, len(widths)])
+    for r in rows + ([head] if head else []):
+        r += [[("", ())]] * (ncol - len(r))
+    w = [max([cell_width("".join(t for t, _ in r[i])) for r in rows + ([head] if head else [])] +
+             [widths[i] if i < len(widths) else 0]) for i in range(ncol)]
+    room = (total if total is not None else width() - 1) - gap * (ncol - 1)
+    for k in ((shrink,) if isinstance(shrink, int) else shrink) if ncol else ():
+        k %= ncol
+        if sum(w) > room:
+            floor = max(6, cell_width("".join(t for t, _ in head[k])) if head else 0)
+            w[k] = min(w[k], max(floor, room - (sum(w) - w[k])))
+    lines = []
+    for r in ([head] if head else []) + rows:
+        parts = []
+        for i, segs in enumerate(r):
+            segs = _fit_segments(segs, w[i], i in cut_start or i - ncol in cut_start)
+            cell = "".join(paint(t, *st, stream=stream) if st else t for t, st in segs if t)
+            pad = w[i] - cell_width("".join(t for t, _ in segs))
+            parts.append(cell + (" " * pad if i < ncol - 1 else ""))
+        lines.append((" " * gap).join(parts).rstrip())
+    return lines, w
 
 
 AUTO = False   # -y: take every default even on a terminal
@@ -77,6 +179,21 @@ def fail(text):
 
 def note(text):
     say(paint(text, "dim"))
+
+
+def done(text, hint="", stream=None):
+    """A command's result line: "✓ text hint" with the hint dim on a terminal; exactly text + hint otherwise."""
+    stream = stream or sys.stdout
+    if color_on(stream):
+        print(paint("✓", "green", "bold", stream=stream) + " " + text + paint(hint, "dim", stream=stream), file=stream)
+    else:
+        print(text + hint, file=stream)
+
+
+def caution(text, stream=None):
+    """A warning or note on stderr: "⚠ text" in yellow on a terminal; the text unchanged otherwise."""
+    stream = stream or sys.stderr
+    print((paint("⚠", "yellow", "bold", stream=stream) + " " + text) if color_on(stream) else text, file=stream)
 
 
 def step(n, total, title):

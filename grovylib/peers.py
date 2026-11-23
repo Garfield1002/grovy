@@ -1056,22 +1056,37 @@ def _sock_request(msg):
     return client.sock_request(msg, timeout=3)
 
 
+PEER_LOOK = {"online": ("●", "green"), "connecting": ("◌", "cyan"), "stale": ("▲", "yellow"), "offline": ("○", "dim")}
+
+
 def cmd_ls(_):
+    """The grafts in peers.json and how the daemon sees them: a table on a terminal, tab-separated otherwise."""
+    from . import tui
     conf, problems = read_config()
     live = {}
     try:
         live = {p["name"]: p for p in (_sock_request({"type": "peers"}) or {}).get("peers", [])}
     except (OSError, ValueError):
-        print("(grovyd isn't running here: showing peers.json only)", file=sys.stderr)
+        tui.caution("(grovyd isn't running here: showing peers.json only)")
+    fancy = tui.color_on(sys.stdout)
     if not conf:
-        print(f"no peers ({config_path()})")
+        print(tui.paint("no peers", "dim") + f" ({tui.short(config_path())})" if fancy else f"no peers ({config_path()})")
+    rows = []
     for name, e in sorted(conf.items()):
         st = live.get(name)
-        what = ("not loaded yet" if st is None else st["state"] + ("" if st["state"] == "online" else
-                f", last seen {ago(st.get('last_seen'))}" + (f": {st['error']}" if st.get("error") else "")))
-        print(f"{name}\t{e['socket']}\t{what}")
+        why = "" if st is None or st["state"] == "online" else (
+            f"last seen {ago(st.get('last_seen'))}" + (f": {st['error']}" if st.get("error") else ""))
+        if not fancy:
+            print(f"{name}\t{e['socket']}\t" + ("not loaded yet" if st is None else st["state"] + (", " + why if why else "")))
+            continue
+        look = PEER_LOOK.get(st["state"] if st else None, ("?", "dim"))
+        rows.append([name, tui.short(e["socket"]), (f"{look[0]} {st['state'] if st else 'not loaded yet'}", *look[1:]),
+                     (why, "dim")])
+    if rows:
+        print("\n".join(tui.table(rows, header=["NAME", "SOCKET", "STATE", ""], shrink=(1, 3),
+                                    cut_start=(1,))[0]))
     for p in problems:
-        print("problem: " + p, file=sys.stderr)
+        tui.caution("problem: " + p)
     return 1 if problems else 0
 
 

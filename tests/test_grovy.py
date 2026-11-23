@@ -1154,7 +1154,7 @@ class TestCompletion(unittest.TestCase):
         self.assertIn("grovy at|attach", out)
         self.assertIn("grovy page |publish rm ls", out)
         self.assertIn("grovy attach x|", out)   # no session x: nothing (and bash falls back to file names)
-        self.assertIn("grovy ls --|--help --here", out)
+        self.assertIn("grovy ls --|--help --here --plain", out)
 
     def test_cleanup_removes_only_its_own_file(self):
         path = completion.path()
@@ -1211,6 +1211,119 @@ class TestTrunkFromAGraft(unittest.TestCase):
             with mock.patch.object(remote, "run", lambda a: a.name):
                 self.assertEqual(cli.main(["attach", "Tups"]), "trunk:Tups")   # the name alone is enough
         self.assertIn("(Tups is trunk:Tups)", err.getvalue())
+
+
+class FakeTty(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class TestLsLooks(unittest.TestCase):
+    """`grovy ls` is a coloured table on a terminal, and exactly the plain columns it always was anywhere else:
+    remote.trunk_lines parses `grovy ls --here` from a graft by whitespace, and scripts may too."""
+    PLAIN = ("NAME             STATE        PATH\n"
+             "a                idle         /home/me/a\n"
+             "b                needs_input  /w/b\n"
+             "old              exited       /o\n"
+             "pc:build         working      /x\n")
+
+    def ls(self, argv, out, env=None, remote_rows=(("pc:build", "working", "/x"),)):
+        err = io.StringIO()
+        reg = {"a": {"cwd": "/home/me/a"}, "b": {"cwd": "/w/b"}, "old": {"cwd": "/o"}}
+        status = {"sessions": {"a": {"state": "idle"}, "b": {"state": "needs_input"}}}
+        with mock.patch.object(sessions, "registry", lambda: reg), \
+                mock.patch.object(tmuxctl, "tmux_managed", lambda: {"a": "%1", "b": "%2"}), \
+                mock.patch.object(client, "sock_request", lambda msg, **kw: status), \
+                mock.patch.object(remote, "trunk_host", lambda: None), \
+                mock.patch.object(remote, "peer_lines", lambda only=None: (list(remote_rows), ["laptop: offline"])), \
+                mock.patch.object(completion, "remember", lambda names: None), \
+                mock.patch.dict(os.environ, {"TERM": "xterm", **(env or {})}), \
+                mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            if not env or "NO_COLOR" not in env:
+                os.environ.pop("NO_COLOR", None)
+            cli.main(argv)
+        return out.getvalue(), err.getvalue()
+
+    def test_plain_when_not_a_terminal_byte_for_byte(self):
+        out, err = self.ls(["ls"], io.StringIO())
+        self.assertEqual(out, self.PLAIN)
+        self.assertEqual(err, "laptop: offline\n")
+        self.assertEqual(self.ls(["ls"], FakeTty(), env={"NO_COLOR": "1"})[0], self.PLAIN)
+        self.assertEqual(self.ls(["ls", "--plain"], FakeTty())[0], self.PLAIN)
+        out, _ = self.ls(["ls"], io.StringIO(), remote_rows=())
+        self.assertEqual(out, self.PLAIN.replace("pc:build         working      /x\n", ""))
+
+    def test_trunk_lines_still_parses_it(self):
+        out, _ = self.ls(["ls", "--here"], io.StringIO())
+        rows, notes = remote.trunk_lines("me@hub", run=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, out, ""))
+        self.assertEqual([r[:2] for r in rows], [("trunk:a", "idle"), ("trunk:b", "needs_input"), ("trunk:old", "exited")])
+
+    def test_a_table_with_colours_on_a_terminal(self):
+        with mock.patch.dict(os.environ, {"HOME": "/home/me"}), mock.patch.object(tui, "width", lambda: 80), \
+                mock.patch.object(shutil, "get_terminal_size", lambda *a: os.terminal_size((80, 24))):
+            out, err = self.ls(["ls"], FakeTty())
+            # pc:build is wider than this machine's names: the 4 lines shown at once are drawn again, lined up
+            self.assertIn("\x1b[4A\x1b[J", out)
+            screen = out.split("\x1b[J")[-1]
+            with mock.patch.object(shutil, "get_terminal_size", lambda *a: os.terminal_size((80, 4))):
+                tail = self.ls(["ls"], FakeTty())[0]   # too tall to be sure it's on the screen: a block of its own
+            self.assertNotIn("\x1b[J", tail)
+            self.assertTrue(tui._ANSI.sub("", tail).endswith("pc:build  ● working      /x\n"))
+        out = screen
+        self.assertIn("\x1b[", out)
+        lines = [tui._ANSI.sub("", x) for x in out.splitlines()]
+        self.assertEqual(lines[0].split(), ["NAME", "STATE", "PATH"])
+        self.assertIn("~/a", lines[1])   # the home folder as ~
+        self.assertIn("needs input", lines[2])
+        self.assertTrue(lines[4].startswith("pc:build"))
+        col = lines[0].index("PATH")
+        self.assertEqual({x[col - 1:col + 1] for x in lines[1:]}, {" ~", " /"}, lines)   # one table, lined up
+        self.assertIn("\x1b[33;1m▲ needs input", out)   # what wants you stands out
+        self.assertIn("laptop: offline", err)
+
+
+class TestCliLooks(unittest.TestCase):
+    def test_die_is_red_on_a_terminal_only(self):
+        for stream, coloured in ((io.StringIO(), False), (FakeTty(), True)):
+            with mock.patch("sys.stderr", stream), mock.patch.dict(os.environ, {"TERM": "xterm"}), \
+                    self.assertRaises(SystemExit):
+                os.environ.pop("NO_COLOR", None)
+                core.die("nope")
+            self.assertEqual(tui._ANSI.sub("", stream.getvalue()), "grovy: nope\n")
+            self.assertEqual("\x1b[" in stream.getvalue(), coloured)
+
+    def test_done_lines_are_unchanged_off_a_terminal(self):
+        out = io.StringIO()
+        tui.done("started x in tmux session grovy-x", "  (grovy attach x)", stream=out)
+        self.assertEqual(out.getvalue(), "started x in tmux session grovy-x  (grovy attach x)\n")
+
+    def test_peer_ls_plain_unchanged(self):
+        out = io.StringIO()
+        conf = {"pc": {"socket": "/s/pc.sock"}, "lap": {"socket": "/s/lap.sock"}, "new": {"socket": "/s/n.sock"}}
+        live = {"peers": [{"name": "pc", "state": "online"},
+                          {"name": "lap", "state": "offline", "last_seen": None, "error": "refused"}]}
+        with mock.patch.object(peers, "read_config", lambda: (conf, [])), \
+                mock.patch.object(peers, "_sock_request", lambda msg: live), mock.patch("sys.stdout", out):
+            peers.cmd_ls(None)
+        self.assertEqual(out.getvalue(), f"lap\t/s/lap.sock\toffline, last seen {peers.ago(None)}: refused\n"
+                                         "new\t/s/n.sock\tnot loaded yet\npc\t/s/pc.sock\tonline\n")
+
+    def test_doctor_keeps_an_earlier_failure(self):
+        """grovy doctor said all was well (exit 0) when tmux was missing but grovy's certificate matched: the
+        certificate check overwrote the result so far."""
+        which = lambda c: None if c == "tmux" else "/bin/" + c   # noqa: E731
+        with mock.patch.object(shutil, "which", which), \
+                mock.patch.object(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "1.0", "")), \
+                mock.patch.object(tls, "cert_paths", lambda: (tls.own_cert(), None)), \
+                mock.patch.object(tls, "context", lambda *a: None), \
+                mock.patch.object(tls, "expires_soon", lambda p: False), \
+                mock.patch.object(tls, "matches", lambda *a: True), \
+                mock.patch.object(client, "sock_request", mock.Mock(side_effect=OSError("down"))), \
+                mock.patch.object(tmuxctl, "tmux_managed", lambda: {}), \
+                mock.patch.object(sessions, "registry", lambda: {}), \
+                redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(install.cmd_doctor(None), 1)
+        self.assertIn("[FAIL] tmux: not found", out.getvalue())
 
 
 class TestPlainNamesAcrossMachines(unittest.TestCase):

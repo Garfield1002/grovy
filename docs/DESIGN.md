@@ -794,6 +794,22 @@ session can publish pages but can't make one public.
 
 ## Other machines (peers)
 
+**How the CLI looks (`grovylib/tui.py`).** Commands people read (`ls`, `peer ls`, `page ls`, `doctor`, `url`, the
+result lines of `new`/`kill`/`rename`/`resume`/`forget`, `core.die`'s `grovy:`) are styled only when their stream is
+a terminal and neither `NO_COLOR` nor `TERM=dumb` is set (`tui.color_on`, per stream: stdout and stderr each on their
+own); anywhere else they print exactly what they always did, byte for byte, because `remote.trunk_lines` parses a
+trunk's `grovy ls --here` by whitespace columns and scripts may parse the rest (`grovy ls --plain` asks for that on a
+terminal too; `forget` stays silent off a terminal). `tui.table` is borderless: column widths from display width
+(wide characters 2, combining marks 0), the header dim, one column (or several, in order) cut with … to fit the
+terminal (paths from their start, so their end shows), and every cell passed through `tui.safe` (control characters
+become `?`) before it is measured, whatever cleaning the caller did. `grovy ls` colours STATE by what it asks of
+you: idle green, working/starting cyan, needs input bold yellow, error bold red, exited/unknown/`running?` dim, an
+unknown state plain; this machine's paths use `~`, other machines' names have a dim `pc:`. Local rows are printed
+at once; when other machines' rows arrive and need wider columns, the local lines are redrawn in place (cursor up,
+erase) so it stays one table, but only if they surely are still on the screen (fewer lines than the terminal's
+height, each narrower than it); otherwise the remote rows follow as their own block. Notes on stderr get a yellow ⚠
+on a terminal. `grovy ls trunk` from a terminal runs `ssh -t`, so the trunk's grovy draws its own table.
+
 **The CLI on another machine's sessions (`grovylib/remote.py`).** `MACHINE:NAME` names a session elsewhere (local
 names never hold a colon). On a trunk, MACHINE is a graft from peers.json: `attach`, `logs`, `kill`, `resume`,
 `forget`, `rename`, `new` (no extra claude arguments, no `--fresh`) go straight to that graft's grovy through its
