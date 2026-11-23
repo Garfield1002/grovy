@@ -15,7 +15,7 @@
   --acc:#b5462d; --user:#e6e9dc; --code:#efede7; --ok:#5b7a48; --warn:#b07a1e; --bad:#9e3a30; --busy:#3e5482;
   --serif:"Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
   --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .2 0 0 0 0 .18 0 0 0 0 .12 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
-@media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ebe9e4; --mut:#9c998f; --faint:#64625c;
+@media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#d9d4c7; --mut:#958f82; --faint:#64625c;
   --card:#21211f; --line:#33322f; --acc:#d98463; --user:#2c3427; --code:#252523; --ok:#93b27b; --warn:#d8a64c;
   --bad:#d97a68; --busy:#93a7d8;
   --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .95 0 0 0 0 .93 0 0 0 0 .86 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); } }
@@ -78,7 +78,7 @@ main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px
 .sess.nested { padding-left:22px; border-left:2px solid var(--line); }   /* a worktree, nested under its root project */
 .empty { text-align:center; color:var(--mut); padding:48px 10px; }
 /* the grove backdrop (from grove, the same author's tmux agent manager), only on the session list */
-#backdrop { display:none; position:fixed; right:-4vw; bottom:0; height:min(86vh, 800px); aspect-ratio:941/1672;
+#backdrop { display:none; position:fixed; right:-6vw; bottom:0; height:min(100vh, 1000px); aspect-ratio:941/1672;
   background:var(--fg); opacity:.27; pointer-events:none; z-index:0;
   -webkit-mask:url(/assets/backdrop.svg) center bottom / contain no-repeat; mask:url(/assets/backdrop.svg) center bottom / contain no-repeat; }
 body.home #backdrop { display:block; }
