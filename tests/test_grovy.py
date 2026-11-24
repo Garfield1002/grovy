@@ -4936,6 +4936,28 @@ class TestHttp(unittest.TestCase):
                 self.assertEqual(self.upload("a", b"x")[0], 401)
         self.assertEqual(sorted(os.listdir(os.path.join(top, "a"))), [os.path.basename(res["path"])])
 
+    def test_report_screenshot(self):
+        """Report's picture of the page is saved before its issue session exists, where every session may read it
+        (the attachments folder, in ".report", which no session can be named), and only a PNG is taken."""
+        top = os.path.join(tempfile.mkdtemp(dir=TMP), "grovy-r", "attachments")
+        png = b"\x89PNG\r\n\x1a\n" + b"pixels" * 20000   # more than one read chunk
+        shot = lambda data, ctype="application/octet-stream": self.req(   # noqa: E731
+            "/api/report/screenshot", raw=data, headers={"Content-Type": ctype})
+        with mock.patch.object(core, "attachments_dir", lambda: top):
+            code, body, _ = shot(png)
+            self.assertEqual(code, 200, body)
+            path = json.loads(body)["path"]
+            self.assertEqual(os.path.dirname(path), os.path.join(top, ".report"))
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), png)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertEqual(shot(b"<svg>not a png</svg>")[0], 400)
+            self.assertEqual(shot(b"")[0], 400)
+            self.assertEqual(shot(png, "application/json")[0], 415)
+            with mock.patch.object(self.httpd, "token", "secret"):
+                self.assertEqual(shot(png)[0], 401)
+        self.assertEqual(os.listdir(os.path.join(top, ".report")), [os.path.basename(path)])
+
     def test_attachment_thumbnails(self):
         top = os.path.join(tempfile.mkdtemp(dir=TMP), "grovy-t", "attachments")
         with mock.patch.object(core, "attachments_dir", lambda: top):

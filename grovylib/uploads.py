@@ -44,6 +44,43 @@ def prune_attachments(top, ttl=ATTACH_TTL):
             pass
 
 
+def save_file(dirname, filename, read, size):
+    """Stream size bytes from read(n) into a new file in the attachments folder's dirname, pruning old ones first."""
+    if size > MAX_UPLOAD:
+        return 413, f"too large (the limit is {MAX_UPLOAD // 2**20} MB)"
+    if size <= 0:
+        return 400, "empty file"
+    try:
+        top = private_dir(core.attachments_dir())
+        prune_attachments(top)
+        d = os.path.join(top, dirname)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+    except OSError as e:
+        return 500, f"can't use the attachments folder: {e}"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(filename or "")).strip("._-")[:80] or "file"
+    path = os.path.join(d, f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}-{safe}")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        return 500, f"can't save it: {e}"
+    try:
+        with os.fdopen(fd, "wb") as f:
+            left = size
+            while left:
+                chunk = read(min(left, 1 << 16))
+                if not chunk:
+                    raise OSError("upload cut short")
+                f.write(chunk)
+                left -= len(chunk)
+    except OSError as e:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return 400, f"not saved: {e}"
+    return 200, {"path": path, "name": safe, "size": size}
+
+
 class Attachments:
     """Files sent from the phone: part of Store."""
 
@@ -53,39 +90,19 @@ class Attachments:
         with self.lock:
             if name not in self.sessions:
                 return 404, "no such session"
-        if size > MAX_UPLOAD:
-            return 413, f"too large (the limit is {MAX_UPLOAD // 2**20} MB)"
-        if size <= 0:
-            return 400, "empty file"
-        try:
-            top = private_dir(core.attachments_dir())
-            prune_attachments(top)
-            d = os.path.join(top, name)
-            os.makedirs(d, mode=0o700, exist_ok=True)
-        except OSError as e:
-            return 500, f"can't use the attachments folder: {e}"
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(filename or "")).strip("._-")[:80] or "file"
-        path = os.path.join(d, f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}-{safe}")
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        except OSError as e:
-            return 500, f"can't save it: {e}"
-        try:
-            with os.fdopen(fd, "wb") as f:
-                left = size
-                while left:
-                    chunk = read(min(left, 1 << 16))
-                    if not chunk:
-                        raise OSError("upload cut short")
-                    f.write(chunk)
-                    left -= len(chunk)
-        except OSError as e:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-            return 400, f"not saved: {e}"
-        return 200, {"path": path, "name": safe, "size": size}
+        return save_file(name, filename, read, size)
+
+    def save_report_shot(self, read, size):
+        """The screenshot Report takes of the page (extensions/report.js), saved before its issue session exists, in
+        the attachments folder every session may read. ".report" can't be a session's name, so never clashes."""
+        if size < 8 or size > MAX_UPLOAD:
+            return 400, "not a screenshot"
+        head = read(8)
+        if head != b"\x89PNG\r\n\x1a\n":
+            return 400, "not a PNG"
+        first = [head]
+        return save_file(".report", "screenshot.png", lambda n: first.pop() if first else read(n), size)
+
 
     def read_attachment(self, name, filename, images=False):
         """An image the phone sent (thumbnails), or with images=True one Claude kept with `grovy image` (image

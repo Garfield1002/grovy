@@ -216,7 +216,7 @@ def extensions_off_path():
 
 
 def extensions_off():
-    """The page extensions turned off in ⋯ → Extensions: one list for every device, kept in the state dir."""
+    """The page extensions turned off in ⚙ → Extensions: one list for every device, kept in the state dir."""
     try:
         with open(extensions_off_path(), encoding="utf-8") as f:
             names = json.load(f)
@@ -228,7 +228,7 @@ def extensions_off():
 
 
 def set_extension(name, on):
-    """⋯ → Extensions: turn one on or off. It applies when a page next loads (an extension can't be undone live)."""
+    """⚙ → Extensions: turn one on or off. It applies when a page next loads (an extension can't be undone live)."""
     if not isinstance(name, str) or not EXT_NAME.fullmatch(name):
         return 400, {"error": "bad extension name"}
     if not isinstance(on, bool):
@@ -248,7 +248,7 @@ def set_extension(name, on):
     return 200, {"off": sorted(off)}
 
 
-# Themes (⋯ → Theme): a CSS file added after grovy's own styles, before custom.css. Built-in ones are in themes/ in
+# Themes (⚙ → Theme): a CSS file added after grovy's own styles, before custom.css. Built-in ones are in themes/ in
 # the grovy folder; the user's own in ~/.config/grovy/themes/, where one with the same name replaces a built-in. The
 # choice is kept in the state dir, for every device; none (or a theme that is gone) means grovy's default look.
 THEMES_DIR = os.path.join(core.HERE, "themes")
@@ -311,7 +311,7 @@ def current_theme():
 
 
 def set_theme(name):
-    """⋯ → Theme: name, or None for grovy's default look. It applies when a page next loads."""
+    """⚙ → Theme: name, or None for grovy's default look. It applies when a page next loads."""
     if name is not None and (not isinstance(name, str) or name not in themes()):
         return 400, {"error": "no such theme"}
     try:
@@ -326,7 +326,7 @@ def load_index():
     with open(INDEX_PATH, "rb") as f:   # LF, as the browser sees it (a CR LF checkout would break the hash)
         html = f.read().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     scripts = re.findall(rb"<script>(.*?)</script>", html, re.S)   # grovy's own script (taken before anything is added)
-    # what ⋯ → Extensions turned off, read by the page before its extensions start
+    # what ⚙ → Extensions turned off, read by the page before its extensions start
     off = html_escape(json.dumps(extensions_off())).encode()
     html = html.replace(b"</head>", b'<meta name="grovy-off" content="' + off + b'">\n</head>', 1)
     theme = current_theme()
@@ -807,6 +807,8 @@ class Http(http.server.BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/sessions/([^/]+)/attachments", urlsplit(self.path).path)
         if m:   # a raw file body, streamed to disk; octet-stream still forces a CORS preflight
             return self._upload(m.group(1), urlsplit(self.path).path)
+        if urlsplit(self.path).path == "/api/report/screenshot":   # Report's picture of the page (extensions/report.js)
+            return self._report_shot()
         m = re.fullmatch(r"/api/sessions/([^/]+)/terminal", urlsplit(self.path).path)
         if m:   # `grovy attach pc:NAME` from the trunk (grovylib/terminal.py)
             return self._terminal(m.group(1))
@@ -929,6 +931,17 @@ class Http(http.server.BaseHTTPRequestHandler):
                                                       self.rfile.read, n)
         return self._send(code, res if code == 200 else {"error": res})
 
+    def _report_shot(self):
+        self.close_connection = True   # an error leaves the body unread
+        if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/octet-stream":
+            return self._err(415, "Content-Type must be application/octet-stream")
+        try:
+            n = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return self._err(411, "Content-Length required")
+        code, res = self.server.store.save_report_shot(self.rfile.read, n)
+        return self._send(code, res if code == 200 else {"error": res})
+
     def _route_post(self, path, body):
         """Run one POST action; returns (status, JSON body). Never sends anything itself."""
         store = self.server.store
@@ -952,15 +965,15 @@ class Http(http.server.BaseHTTPRequestHandler):
                 print(f"grovyd: CLIENT ERROR from {self.client_address[0]}: {msg}", file=sys.stderr, flush=True)
             return 200, {"status": "logged"}
         if path == "/api/login-link":
-            # For ⋯ → Login link (signing in another device). The cookie is HttpOnly so the page can't read it; only
+            # For ⚙ → Login link (signing in another device). The cookie is HttpOnly so the page can't read it; only
             # a logged-in, same-origin POST (JSON, so a cross-site page can't even send it) gets the token back.
             return 200, {"token": self.server.token or ""}
         if path == "/api/sessions":
             return wrap(*store.create(body.get("name"), body.get("path"), body.get("ask"),
                                       body.get("resume"), body.get("fork")))
-        if path == "/api/extensions":   # ⋯ → Extensions
+        if path == "/api/extensions":   # ⚙ → Extensions
             return set_extension(body.get("name"), body.get("on"))
-        if path == "/api/theme":   # ⋯ → Theme
+        if path == "/api/theme":   # ⚙ → Theme
             return set_theme(body.get("theme"))
         if path == "/api/projects/new":
             return _res(*store.new_project(body.get("kind"), body.get("name"), body.get("url")))

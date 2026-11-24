@@ -4,7 +4,7 @@
 // never navigates or closes anything, so cancelling drops you right back where you were. You paint over the region(s)
 // you don't like (it can span several things); grovy works out which on-screen elements that covers and describes
 // *those* to the agent, so you never have to see or name the DOM. Add a line about what's wrong, and grovy files it
-// as an issue in your grovy repo (one worktree, one session) — the same machinery as ⋯ → New issue, just aimed at
+// as an issue in your grovy repo (one worktree, one session) — the same machinery as ＋ → New issue, just aimed at
 // grovy itself and started from a picture of the screen.
 //
 // A built-in extension that uses only window.grovy; the work is grovy's own (grovylib/issues.py, /api/report).
@@ -75,12 +75,16 @@ grovy.extension("report", grovy => {
   const toPage = (x, y) => ({x: (x - fitTo.x0) / fitTo.k, y: (y - fitTo.y0) / fitTo.k});
   const toScreen = p => ({x: fitTo.x0 + fitTo.k * p.x, y: fitTo.y0 + fitTo.k * p.y});
 
-  function collect(strokes) {   // the distinct on-screen elements under the paint, topmost first, overlay excluded
-    const seen = new Map();   // element -> its line
+  function bare(fn) {   // run fn on the page as it really is: the overlay hidden, the page unshrunk; then put both back
     overlay.style.visibility = "hidden";   // so elementFromPoint sees the page, not us
     const again = shrunk && (() => shrink(...overlay._bars()));
     unshrink();   // the real layout: real elements under the points, real rects in what the agent is told
-    try {
+    try { return fn(); } finally { if (again) again(); overlay.style.visibility = ""; }
+  }
+
+  function collect(strokes) {   // the distinct on-screen elements under the paint, topmost first, overlay excluded
+    const seen = new Map();   // element -> its line
+    {
       for (const s of strokes) for (let i = 0; i < s.length; i += 3) {
         if (s[i].x < 0 || s[i].y < 0 || s[i].x >= innerWidth || s[i].y >= innerHeight) continue;   // off the page
         const el = document.elementFromPoint(s[i].x, s[i].y);
@@ -88,15 +92,128 @@ grovy.extension("report", grovy => {
         if (!seen.has(el)) seen.set(el, describe(el));
         if (seen.size >= 15) break;
       }
-    } finally { if (again) again(); overlay.style.visibility = ""; }
+    }
     return [...seen.values()];
   }
 
-  function context(strokes) {
-    const dpr = Math.round((window.devicePixelRatio || 1) * 10) / 10;
-    const lines = [`Screen: ${location.hash || "#/"}  (${clip(document.title, 60)})`,
-                   `Viewport: ${innerWidth}×${innerHeight} @${dpr}x · theme ${metaTheme()} · ${scheme()}`];
-    const els = strokes.length ? collect(strokes) : [];
+  // A picture of the page as it is, with the paint on top, for the agent to look at. No library: the live DOM is cloned
+  // (the overlay left out), its state the clone can't carry is written in (form values, canvases and images as data
+  // URLs, scroll offsets, where fixed and stuck elements are on screen), and the clone is drawn inside an SVG
+  // <foreignObject>, which the browser rasterizes like any image. Called with the page unshrunk; null when the browser
+  // won't (an older Safari taints such a canvas), and the report then goes without it.
+  function clonePage() {
+    const W = innerWidth, H = innerHeight, sx = scrollX, sy = scrollY;
+    const root = document.documentElement, copy = root.cloneNode(true);
+    const live = [root, ...root.querySelectorAll("*")], dup = [copy, ...copy.querySelectorAll("*")];
+    const fixes = [];   // read every live layout first, then write to the clone
+    live.forEach((el, i) => {
+      const c = dup[i];
+      if (!c || (overlay && (el === overlay || overlay.contains(el)))) return;
+      if (/^(SCRIPT|NOSCRIPT)$/.test(el.tagName)) return fixes.push(() => c.remove());
+      if (el.tagName === "TEXTAREA") fixes.push(() => { c.textContent = el.value; });
+      else if (el.tagName === "INPUT") fixes.push(() => {
+        if (/^(checkbox|radio)$/.test(el.type)) el.checked ? c.setAttribute("checked", "") : c.removeAttribute("checked");
+        else if (el.type !== "password") c.setAttribute("value", el.value);
+      });
+      else if (el.tagName === "CANVAS") {
+        let url = ""; try { url = el.toDataURL(); } catch (e) {}
+        const r = el.getBoundingClientRect();
+        fixes.push(() => { const img = document.createElement("img"); img.src = url; img.className = el.className;
+          img.style.cssText = el.style.cssText + `;width:${r.width}px;height:${r.height}px`; c.replaceWith(img); });
+      } else if (el.tagName === "IMG" && el.complete && el.naturalWidth && !/^data:/.test(el.currentSrc || el.src)) {
+        try {
+          const cv = document.createElement("canvas"); cv.width = el.naturalWidth; cv.height = el.naturalHeight;
+          cv.getContext("2d").drawImage(el, 0, 0); const url = cv.toDataURL(); fixes.push(() => c.setAttribute("src", url));
+        } catch (e) {}
+      }
+      if (el.scrollTop || el.scrollLeft) {
+        if (el !== root && el !== document.body) {
+          const t = `translate(${-el.scrollLeft}px, ${-el.scrollTop}px)`;
+          fixes.push(() => { for (const k of c.children) k.style.transform = t + " " + (k.style.transform || ""); });
+        }
+      }
+      const pos = el.nodeType === 1 && el !== root && el !== document.body ? getComputedStyle(el).position : "";
+      if (pos === "fixed") {   // the picture is the whole document seen through a window at the scroll offset
+        const r = el.getBoundingClientRect();
+        fixes.push(() => Object.assign(c.style, {position: "absolute", top: r.top + sy + "px", left: r.left + sx + "px",
+          width: r.width + "px", height: r.height + "px", right: "auto", bottom: "auto", margin: "0", transform: "none"}));
+      } else if (pos === "sticky") {   // where it is stuck now, minus where it would sit if it scrolled away
+        const stuck = el.getBoundingClientRect(), was = el.style.position;
+        el.style.position = "relative"; const flow = el.getBoundingClientRect(); el.style.position = was;
+        fixes.push(() => Object.assign(c.style, {position: "relative", top: stuck.top - flow.top + "px",
+          left: stuck.left - flow.left + "px"}));
+      }
+    });
+    fixes.forEach(f => f());
+    const docH = Math.max(root.scrollHeight, sy + H), docW = Math.max(root.scrollWidth, sx + W);
+    copy.style.width = docW + "px"; copy.style.height = docH + "px";
+    const xhtml = new XMLSerializer().serializeToString(copy);
+    return {W, H, svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="${sx} ${sy} ${W} ${H}">` +
+      `<foreignObject x="0" y="0" width="${docW}" height="${docH}">${xhtml}</foreignObject></svg>`};
+  }
+
+  async function picture(page, strokes) {   // page: clonePage()'s result → a PNG Blob with the paint drawn on, or null
+    try {
+      const img = new Image();
+      img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(page.svg);
+      await img.decode();
+      const k = Math.min(2, window.devicePixelRatio || 1), cv = document.createElement("canvas");
+      cv.width = Math.round(page.W * k); cv.height = Math.round(page.H * k);
+      const g = cv.getContext("2d"); g.scale(k, k);
+      g.fillStyle = getComputedStyle(document.body).backgroundColor || "#fff"; g.fillRect(0, 0, page.W, page.H);
+      g.drawImage(img, 0, 0, page.W, page.H);
+      g.lineWidth = 26; g.lineCap = g.lineJoin = "round"; g.strokeStyle = "rgba(255,60,30,.45)";
+      for (const s of strokes) {
+        if (!s.length) continue;
+        g.beginPath(); g.moveTo(s[0].x, s[0].y);
+        for (const p of s) g.lineTo(p.x, p.y);
+        if (s.length === 1) g.lineTo(s[0].x + .01, s[0].y);
+        g.stroke();
+      }
+      return await new Promise(res => cv.toBlob(res, "image/png"));   // throws if the browser tainted the canvas
+    } catch (e) { return null; }
+  }
+
+  async function upload(png) {   // → the path the issue's Claude can read, or "" (the report still goes)
+    if (!png) return "";
+    try {
+      const r = await fetch("/api/report/screenshot", {method: "POST", body: png,
+        headers: {"Content-Type": "application/octet-stream"}});
+      return r.ok ? (await r.json()).path || "" : "";
+    } catch (e) { return ""; }
+  }
+
+  function where() {   // where the user is, in words: the screen, the session and what's open over it
+    const out = [];
+    const name = grovy.session, st = grovy.state;
+    if (name) out.push(`Session "${name}"` + (st ? ` — state ${st.state || "?"}` + (st.cwd ? `, in ${st.cwd}` : "") : ""));
+    else out.push("The session list (home screen)");
+    const sheet = document.querySelector("#sheet:not(.hidden) #sheetbody h2");
+    if (sheet) out.push(`A sheet is open over it: “${clip(sheet.textContent.trim(), 60)}”`);
+    const vis = id => { const e = document.getElementById(id); return e && !e.classList.contains("hidden") && e.getClientRects().length > 0; };
+    for (const [id, what] of [["viewer", "the file viewer"], ["ctx", "a right-click menu"], ["err", "an error banner"]])
+      if (vis(id)) out.push(`Also open: ${what}` + (id === "err" ? ` (“${clip(document.getElementById(id).textContent.trim(), 120)}”)` : ""));
+    const docH = document.documentElement.scrollHeight;
+    out.push(`Scrolled ${Math.round(scrollY)}px of ${Math.max(0, docH - innerHeight)}px` +
+             (docH - innerHeight - scrollY < 40 ? " (at the bottom)" : scrollY < 40 ? " (at the top)" : ""));
+    const f = document.activeElement;
+    if (f && f !== document.body && !(overlay && overlay.contains(f))) out.push("Focused: " + describe(f));
+    out.push(`Layout: ${innerWidth >= 900 ? "wide (sidebar)" : "phone"} · ${navigator.userAgent.replace(/\s+/g, " ").slice(0, 160)}`);
+    return out;
+  }
+
+  function capture(strokes) {   // everything else read from the page, in one pass over its real layout
+    return bare(() => {
+      const dpr = Math.round((window.devicePixelRatio || 1) * 10) / 10;
+      return {els: strokes.length ? collect(strokes) : [],
+              head: [`Screen: ${location.hash || "#/"}  (${clip(document.title, 60)})`, ...where(),
+                     `Viewport: ${innerWidth}×${innerHeight} @${dpr}x · theme ${metaTheme()} · ${scheme()}`]};
+    });
+  }
+
+  function context(strokes, {head, els}, shot) {
+    const lines = [...head, shot ? `Screenshot of the screen as it was, the paint in translucent red (read it): ${shot}`
+                                 : "(no screenshot: this browser wouldn't draw the page)"];
     if (els.length) {
       lines.push(`Painted over ${strokes.length} region(s); the on-screen elements under the paint, topmost first:`);
       for (const e of els) lines.push("  - " + e);
@@ -112,6 +229,9 @@ grovy.extension("report", grovy => {
   }
 
   function open_() {
+    // the picture is of the page as it was when Report opened: before the keyboard (for the note) squeezes it
+    let page = null;
+    try { page = clonePage(); } catch (e) {}
     const canvas = h("canvas", {});
     const ctx = canvas.getContext("2d");
     const strokes = [];   // each is an array of {x, y} in page coordinates: where they are on the unshrunk page
@@ -179,8 +299,10 @@ grovy.extension("report", grovy => {
       if (!words) return;
       if (/^[/!]/.test(words)) { err.textContent = "Start the note with words: a leading / or ! would look like a command."; return; }
       busy = true; sync(); err.textContent = ""; file.textContent = "Filing…";
-      const ctxText = context(strokes);
       try {
+        const seen = capture(strokes);
+        const shot = page ? await upload(await picture(page, strokes)) : "";
+        const ctxText = context(strokes, seen, shot);
         const r = await grovy.api("/api/report", {note: words, context: ctxText});
         close();
         if (await grovy.ask(`Filed grovy issue ${r.name}` + (r.queued ? "." : " (open it to send your words).") +

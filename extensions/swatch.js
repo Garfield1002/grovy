@@ -2,7 +2,7 @@
 //
 // A built-in extension that uses only window.grovy. Only text that is exactly a hex colour counts, so the colour put
 // on the page is always one of those (checked here, never taken as markup). Code blocks are left alone.
-// To turn it off: grovy.disable("swatch") in custom.js, or ⋯ → Extensions.
+// To turn it off: grovy.disable("swatch") in custom.js, or ⚙ → Extensions.
 grovy.extension("swatch", grovy => {
   const {h} = grovy;
   grovy.css(`

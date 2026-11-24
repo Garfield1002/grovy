@@ -17,7 +17,7 @@ claude ──hooks──► grovy hook NAME ──unix socket──► grovyd �
 | `index.html` | the whole UI (vanilla JS, no innerHTML); a map of its parts opens its script |
 | `sw.js` | the service worker, served at `/sw.js`: shows push notifications and opens their session; caches nothing |
 | `plugins/` | built-in daemon plugins (`git.py`, `push.py`), written against the plugin `Api` like a user's own |
-| `themes/` | built-in themes for ⋯ → Settings → Theme (`nature.css`), CSS like a user's own (see "Making it yours") |
+| `themes/` | built-in themes for ⚙ → Theme (`nature.css`), CSS like a user's own (see "Making it yours") |
 | `tests/test_grovy.py`, `tests/test_peers.py` | unit + tmux integration tests (`python3 -m unittest discover -s tests`) |
 | `examples/` | systemd unit, Telegram notify script, the generated hook config |
 | `assets/` | icon sizes and the home-screen backdrop, from [grove](https://github.com/Garfield1002/grove), served without the token from an allowlist (`ASSETS` in `grovyd.py`); `logo.png` is only for the README, not served |
@@ -57,7 +57,7 @@ back on the login page. CSRF is covered without Strict — actions are POST, gua
 the Origin check, and GET API routes need the `X-Grovy` header a navigation can't set.) Without it the page shows "login needed" and the API returns 401. That page also has a field to
 paste the login link (or the token) into, a plain GET form to `/?token=`, since grovy added to an iPhone's home screen
 keeps cookies of its own and has no address bar to open the link in. A token in a URL is never written to the log. To rotate the token, delete the
-file and restart the daemon. ⋯ → Login link (on the session list only, not inside a session) shows the same link for the address the page was opened
+file and restart the daemon. ⚙ → Login link (on the session list only, not inside a session) shows the same link for the address the page was opened
 on: the cookie is HttpOnly, so the page asks `POST /api/login-link`, which returns the token only to a logged-in,
 same-origin JSON request (a cross-site page can't send one). A script injected into the page could read the token
 that way; the strict script CSP is what prevents that. `GROVY_AUTH=off` temporarily accepts requests without a token while still setting the
@@ -207,7 +207,7 @@ in a background thread with a 15s timeout, so a failing bot never blocks hooks o
 `examples/notify-telegram.sh` posts to an existing bot (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`).
 
 **Push notifications on your devices (Web Push).** Needs HTTPS (see "HTTPS"): browsers allow service workers and
-push only on a secure page. ⋯ → Notifications (on the session list; `extensions/push.js`) turns them on per device: it asks for permission
+push only on a secure page. ⚙ → Notifications (on the session list; `extensions/push.js`) turns them on per device: it asks for permission
 right inside the tap (iPhone shows the prompt nowhere else), subscribes with grovy's VAPID key and registers the
 subscription's endpoint with the built-in plugin `plugins/push.py`, which sends a test. On iPhone it only works in
 grovy opened from the home screen. The plugin listens to the same moments as `GROVY_NOTIFY_CMD` (its `notify` event,
@@ -250,7 +250,7 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   alone) and `widgets.js` (the widget types, see "Widgets"). Each registers with `grovy.extension(name, setup, {about})`; the setups run at start-up,
   after `custom.js`, so `grovy.disable(name)` there turns one off (or replace it: disable it and copy it under another
   name).
-* **⋯ → Settings → Extensions** (home menu, `index.html`) lists every named extension with its `about` line and a switch. A switch
+* **⚙ → Extensions** (the home screen's cog, `index.html`) lists every named extension with its `about` line and a switch. A switch
   saves at once through `POST /api/extensions {name, on}` into `extensions-off.json` in the state dir (one list for
   every device; names must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`, at most 200, and anything else in the file is
   ignored). `load_index()` puts the list in a `<meta name="grovy-off">` tag, and the page skips those extensions at
@@ -258,7 +258,7 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   It applies on reload only ("Reload to apply" shows while the switches differ from what's running), since an
   extension can't be undone live. One turned off in `custom.js` shows as such and can't be switched on here. Turning
   off an extension whose daemon plugin stays on (git, push) only hides its page side.
-* **Themes** (⋯ → Settings → Theme, home menu) are CSS files: built-in ones in `themes/` in the grovy folder (`nature.css`), the
+* **Themes** (⚙ → Theme, home menu) are CSS files: built-in ones in `themes/` in the grovy folder (`nature.css`), the
   user's in `~/.config/grovy/themes/NAME.css` (NAME `[a-z0-9][a-z0-9_-]{0,31}`; one with a built-in's name replaces
   it, unless it can't be used, e.g. a dangling link or a refused file: then the built-in shows; an empty file is used,
   so it blanks the built-in). `POST /api/theme {theme}` (a listed name, or `null` for the default look) saves the choice to `theme.json` in
@@ -281,7 +281,7 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   * `widget(type, render)`: adds or replaces a widget renderer.
   * `math(render)`: draws the math in replies (`render(tex, display)` returns a node or throws); replaces the built-in.
   * `menu(label, run, {where, when, section})`: a menu item; `where` is "session" (default, the open session's ⋯ menu),
-    "home" (grovy's settings ⋯ menu), "new" (the ＋ button) or "both". `when(state)` (the open session's state, null at
+    "home" (grovy's ⚙ Settings sheet), "new" (the ＋ button) or "both". `when(state)` (the open session's state, null at
     home) shows it only when it returns true (a throwing or non-true `when` hides it). `section` groups it under a header
     in the session menu ("Conversation", "Session", or a name of its own, in that order then first-seen). Every item also
     appears in the command palette (Ctrl/⌘+K).
@@ -530,14 +530,14 @@ becomes ■ (stop), which presses Esc (after a confirm); once you type, it becom
 ever sends, never stops. Esc
 emits no hook, so grovy records the interrupt itself and sets the state to `unknown`. The next send asks "type anyway?".
 
-**The header buttons.** On the session list, **＋** holds the ways to start something and **⋯** holds grovy's own
-settings. ＋ opens a short *New* menu — *New session* plus any extension that registers `grovy.menu(…, {where:"new"})`
-(the built-in *New issue* and *New project*); when only one exists it runs straight away, no menu. ⋯ opens *Settings*
-and *Search commands*; *Settings* is one sheet gathering *Notifications* (when on), *Theme*, *Extensions* and *Login link*,
-so the menu stays short. A right-click on the empty list gives everything at once, grouped (settings not nested), and the
+**The header buttons.** On the session list, **＋** holds the ways to start something, **⚡** opens the command
+palette and **⚙** grovy's own settings (the sidebar's header has the same three on a wide screen; ⋯ is only in a
+session). ＋ opens a short *New* menu — *New session* plus any extension that registers `grovy.menu(…, {where:"new"})`
+(the built-in *New issue* and *New project*); when only one exists it runs straight away, no menu. ⚙ opens *Settings*, one
+sheet gathering *Notifications* (when on), *Theme*, *Extensions* and *Login link*. A right-click on the empty list gives everything at once, grouped (settings not nested), and the
 command palette still reaches each setting by name.
 
-**Command palette.** *Search commands* (⋯, or `⌘K` on a Mac / `Ctrl+K` elsewhere) opens a searchable list of everything
+**Command palette.** *Search commands* (⚡ on the session list, ⋯ in a session, or `⌘K` on a Mac / `Ctrl+K` elsewhere) opens a searchable list of everything
 the current ⋯ menus offer — on the home screen the *New* and settings items, in a session that session's items — plus a
 jump to any other session or published page. Typing filters by a substring first, then a loose subsequence; ↑/↓ move
 (the highlighted *command* is kept across the async session/page fetch, not a row index, so it never jumps under you),
@@ -698,7 +698,15 @@ the `Issues` part of `Store`; the page side is the built-in extension `extension
   region(s) you dislike (it can span several elements); on filing, the overlay hides itself and samples points along
   the strokes with `document.elementFromPoint`, collecting the distinct on-screen elements under the paint (tag, id,
   classes, label/text, bounding rect) — so the user points visually and never sees the DOM. The note, that captured
-  context, the current route/viewport/theme, and grovy's repo and commit become the agent's first message.
+  context, where the user is (route, the open session with its state and folder, an open sheet/viewer/error banner,
+  scroll position, focus, layout and browser, viewport, theme) and grovy's repo and commit become the agent's first
+  message, with the path of a **screenshot**: when the overlay opens (before the keyboard squeezes the page) the live
+  DOM is cloned with what a clone loses written back in (form values, canvases and same-origin images as data URLs,
+  inner scroll offsets as transforms, fixed and stuck elements pinned where they are on screen), and on filing it is
+  drawn as an SVG `<foreignObject>` into a canvas, the paint on top, and sent as a PNG to `POST /api/report/screenshot`
+  (`Attachments.save_report_shot`: PNG only, into the attachments folder's `.report`, which every session may read and
+  no session can be named). No library; external fonts and CSS `url()` images other than `data:` ones don't show, and
+  where the browser refuses to draw it (an older Safari taints the canvas) the report goes without, and says so.
   `POST /api/report` → `Issues.report_grovy_issue`, which resolves grovy's own main checkout (`issues.grovy_repo`,
   from `core.HERE`, de-worktree'd via `--git-common-dir`) and files it with the ordinary `create_issue` path. On a
   graft it is refused with a clear message (filing on the trunk's grovy from a graft isn't wired up yet, so it never
@@ -1193,7 +1201,7 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
 * Events emitted while the daemon is down are not replayed.
 * **Peers** (other machines, see "Other machines"):
   * ＋ → New issue and ＋ → New project work on the hub only (an issue session that already exists on a peer can be
-    finished or discarded from the hub). ⋯ → Settings (Extensions, Theme, the login link), `custom.css`/`custom.js` are the hub's.
+    finished or discarded from the hub). ⚙ Settings (Extensions, Theme, the login link), `custom.css`/`custom.js` are the hub's.
   * The hub's plugins see peers' sessions only through `notify`; `grovy.on("event")`,
     `grovy.on("state")`, `grovy.sessions()`, `grovy.session()` and `grovy.send()` cover local sessions only. The hub's
     `grovy` command (`ls`, `attach`, `logs`, `kill`, ...) is local too: the terminal of a peer's session is on the peer.

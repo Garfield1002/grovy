@@ -252,6 +252,8 @@ mark { background:color-mix(in srgb, var(--warn) 35%, transparent); color:inheri
 .cmdsec { flex:none; font-size:11px; letter-spacing:.05em; text-transform:uppercase; color:var(--mut); margin-left:10px; white-space:nowrap; }
 #title.tap { cursor:pointer; } #title.tap::after { content:" ▾"; font-size:13px; color:var(--mut); }
 .hbtn { border:0; background:none; font-size:22px; line-height:1; min-width:40px; min-height:40px; padding:0 6px; color:var(--fg); }
+.hbtn svg { display:block; margin:auto; }
+:is(#add, #find, #gear) svg { width:24px; height:24px; }   /* ＋, ⚡, ⚙: one size, one stroke */
 .earlier { display:block; margin:6px auto 10px; border:1px solid var(--line); background:var(--card); border-radius:99px;
   padding:6px 16px; font-size:14px; min-height:36px; }
 #quick { display:flex; gap:8px; margin:0 0 8px; flex-wrap:wrap; }
@@ -416,7 +418,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   header { position:fixed; top:0; left:300px; right:0; min-height:0; padding:0 10px; background:none;
     border:0; pointer-events:none; }
   header > * { pointer-events:auto; }
-  #back, #title, #logo, #add, body.home #menu { display:none !important; }
+  #back, #title, #logo, #add, #find, #gear { display:none !important; }
   #pill { margin:6px 0 0 auto; }
   #live, #menu, #steps { margin-top:6px; background:var(--card); border:1px solid var(--line); border-radius:99px; }
   #live { padding:3px 10px; } #menu, #steps { min-height:32px; min-width:36px; font-size:18px; }
@@ -432,6 +434,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
 #side .sh a { flex:1; display:flex; align-items:center; gap:8px; font-weight:650; font-size:17px; color:inherit; text-decoration:none; }
 #side .sh .logo { display:block; width:22px; height:22px; }
 #side .sh .hbtn { font-size:19px; min-width:34px; min-height:34px; border-radius:8px; }
+#side .sh .hbtn svg { width:21px; height:21px; }
 #side .sh .hbtn:hover { background:var(--code); }
 /* the session list's own cards, made compact for the sidebar */
 #slist { flex:1; overflow-y:auto; padding:6px; }
@@ -491,16 +494,18 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   <button id="back" class="hidden" aria-label="Back">‹</button>
   <span id="logo" aria-hidden="true"></span>
   <h1 id="title">Sessions</h1>
-  <button id="add" class="hbtn" aria-label="New session">＋</button>
+  <button id="add" class="hbtn" aria-label="New session" title="New"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
   <span id="pill" class="pill hidden"><span id="pdot" class="dot"></span><span id="ptext"></span></span>
   <span id="live" title="live updates disconnected">offline</span>
   <button id="steps" class="hbtn hidden" aria-label="Output detail (tap to change)"
     title="Output detail (tap to change)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
     stroke-width="2" stroke-linecap="round"><path id="stepsicon" d="M4 12h16"/></svg></button>
+  <button id="find" class="hbtn hidden" aria-label="Run a command" title="Run a command (Ctrl/⌘+K)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/></svg></button>
+  <button id="gear" class="hbtn hidden" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
   <button id="menu" class="hbtn hidden" aria-label="Menu">⋯</button>
 </header>
 <nav id="side" aria-label="Sessions"><div class="sh"><a href="#/" aria-label="All sessions and pages"><span class="logo" aria-hidden="true"></span>grovy</a>
-  <button id="sadd" class="hbtn" aria-label="New session">＋</button><button id="smenu" class="hbtn" aria-label="Menu">⋯</button></div><div id="slist"></div></nav>
+  <button id="sadd" class="hbtn" aria-label="New session" title="New"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button id="sfind" class="hbtn" aria-label="Run a command" title="Run a command (Ctrl/⌘+K)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/></svg></button><button id="sgear" class="hbtn" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button></div><div id="slist"></div></nav>
 <div id="backdrop" aria-hidden="true"></div>
 <main id="main"></main>
 <div id="typing" class="hidden">
@@ -1953,7 +1958,7 @@ $("title").onclick = () => { if (view) switcher(); };
 
 // Menus and the command palette draw from one place: command descriptors {label, sub, section, run, danger}. ctxEntry
 // (below) turns a descriptor into a menu button; the palette searches their text. Things you start (New session, and
-// extensions' grovy.menu(…, {where:"new"}) items) sit on the ＋ button; grovy's own settings sit on the ⋯ menu. The
+// extensions' grovy.menu(…, {where:"new"}) items) sit on the ＋ button; grovy's own settings sit on the cog (⚙). The
 // order headers are grouped under, across every ⋯ and right-click menu; unlisted sections follow, first-seen.
 const MENU_ORDER = ["New", "Conversation", "Session", "grovy", "More"];
 const MOD = /Mac|iP(hone|ad|od)/.test(navigator.platform || "") ? "⌘" : "Ctrl+";
@@ -2003,13 +2008,11 @@ const newCmds = () => [{label: "New session", section: "New", run: () => { close
   ...extCmds("new").map(c => ({...c, section: c.section || "New"}))];
 const settingsCmds = () => [...extCmds("home").map(c => ({...c, section: c.section || "grovy"})),
   themeCmd(), extensionsCmd(), loginCmd()].filter(Boolean);
-// One unified Settings sheet gathers them all, so the ⋯ menu stays short: ⋯ → Settings → the one you want.
+// One unified Settings sheet gathers them all, opened by the cog on the home screen (and the sidebar).
 const settingsSheet = () => openSheet(h("h2", {}, "Settings"), ...settingsCmds().map(itemNode));
-const settingsCmd = () => ({label: "Settings", section: "grovy", sub: "Theme, extensions, and more", run: settingsSheet});
 const paletteCmd = () => ({label: "Search commands…", section: "grovy", sub: finePointer.matches ? MOD + "K" : "", run: palette});
 const loginCmd = () => ({label: "Login link", section: "grovy", sub: "Sign in on another device", run: loginSheet});
 const homeEntries = () => [...newCmds(), ...settingsCmds(), paletteCmd()];   // right-click on the home screen: everything, grouped
-const homeMenu = () => openSheet(h("h2", {}, "grovy"), ...[settingsCmd(), paletteCmd()].map(itemNode));
 function newMenu() {   // one tap when there's a single way to start something, a short menu when there are more
   const cmds = newCmds();
   if (cmds.length === 1) return cmds[0].run();
@@ -2071,7 +2074,9 @@ function extensionsSheet() {   // the switches save at once (for every device); 
     h("div", {style: "display:flex;gap:10px"}, reload));
   pending();
 }
-$("menu").onclick = () => view ? sessionMenu() : homeMenu();
+$("menu").onclick = () => { if (view) sessionMenu(); };   // the home screen has the cog and the search instead
+$("gear").onclick = $("sgear").onclick = settingsSheet;
+$("find").onclick = $("sfind").onclick = () => palette();
 async function updateSession(name) {   // the server decides whether it's safe; forcing is a separate, explicit tap
   if (!await ask(`Update "${name}"? Claude restarts with the latest grovy and resumes the same conversation.`, "Update")) return;
   const post = force => api(`/api/sessions/${encodeURIComponent(name)}/restart`, {force});
@@ -2187,7 +2192,7 @@ function pickList({items, title, sub = () => "", recent = null, search = null, s
   return h("div", {class: "picklist"}, items_.length > 1 ? bar : null, list);
 }
 
-// Command palette (Ctrl/⌘+K, or ⋯ → Search commands): everything the ⋯ menus offer right now, flattened and searched,
+// Command palette (Ctrl/⌘+K, the search icon on the home screen, or ⋯ → Search commands in a session): everything the ⋯ menus offer right now, flattened and searched,
 // plus a jump to any session or page. The same actions, reachable by name instead of by hunting through menus.
 function currentCmds() {
   const all = view ? [...sessionCmds(view, cur || {}), {label: "All sessions", section: "Go", run: () => { closeSheet(); go("#/"); }}, ...settingsCmds()]
@@ -2459,7 +2464,6 @@ function markSide() {   // highlight the open session at once, before the next f
 }
 wide.addEventListener("change", () => { refresh(); refreshSide(true); });
 $("sadd").onclick = newMenu;
-$("smenu").onclick = homeMenu;
 async function stepSession(d) {   // Alt+↑/↓: the previous/next session, in the list's order
   let list = sideList;
   if (!wide.matches || !list.length) {
@@ -2642,7 +2646,8 @@ function route() {
   const m = hash.match(/^#\/s\/((?:[a-z0-9][a-z0-9_-]{0,15}:)?[A-Za-z0-9_-]+)$/);
   view = m ? m[1] : null; lastEventId = 0; cur = null; first = true; lastTool = ""; cache.clear();
   older = []; noMore = false; closeSheet(); $("quick").replaceChildren(); canStop = false;
-  $("add").classList.toggle("hidden", !!view); $("menu").classList.remove("hidden");
+  for (const id of ["add", "find", "gear"]) $(id).classList.toggle("hidden", !!view);
+  $("menu").classList.toggle("hidden", !view);
   $("steps").classList.toggle("hidden", !view); turns = []; turnOpen.clear(); $("says").textContent = "";
   $("title").classList.toggle("tap", !!view); $("resume").classList.add("hidden");
   $("back").classList.toggle("hidden", !view);
@@ -2831,7 +2836,7 @@ window.grovy = Object.freeze({
     WIDGETS[type] = (spec, live) => render(spec, live);
     if (booted) { cache.clear(); refresh(); }   // registered later on: redraw the messages that use it
   },
-  // a menu item; where: "session" (default, the open session's ⋯ menu), "home" (grovy's settings ⋯ menu), "new" (the
+  // a menu item; where: "session" (default, the open session's ⋯ menu), "home" (grovy's ⚙ Settings sheet), "new" (the
   // ＋ button, for things to start) or "both" (session + home); when(state): shown only when it returns true (state:
   // the open session's, or null on the home screen); section: a header to group it under in the session menu
   // ("Conversation", "Session", or any name of your own). Every item also turns up in the command palette (Ctrl/⌘+K).

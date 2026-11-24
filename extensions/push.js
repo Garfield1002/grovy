@@ -1,4 +1,4 @@
-// Notifications: ⋯ → Notifications turns push notifications on or off for this device (when a session needs you,
+// Notifications: ⚙ → Notifications turns push notifications on or off for this device (when a session needs you,
 // finishes or fails, even with grovy closed), and sends a test.
 //
 // A built-in extension that uses only window.grovy. The sending is the built-in push plugin (plugins/push.py); what
@@ -75,7 +75,7 @@ grovy.extension("push", grovy => {
       const sub = await registration.pushManager.getSubscription();
       if (sub && !same(sub.options.applicationServerKey, server)) {   // made for another grovy key: start over
         await sub.unsubscribe();
-        return grovy.say("grovy's notification key has changed: tap ⋯ → Notifications again to turn them back on.");
+        return grovy.say("grovy's notification key has changed: tap ⚙ → Notifications again to turn them back on.");
       }
       if (sub && Notification.permission === "granted") {
         try { await call("subscribe", sub.endpoint); } catch (e) { /* settings still work; a test will tell */ }
@@ -89,4 +89,4 @@ grovy.extension("push", grovy => {
   // failed push). Never unsubscribe here: without a tap, the device couldn't subscribe again.
   if (can && Notification.permission === "granted")
     reg.then(r => r && r.pushManager.getSubscription()).then(sub => sub && call("subscribe", sub.endpoint)).catch(() => {});
-}, {about: "⋯ → Notifications"});
+}, {about: "⚙ → Notifications"});

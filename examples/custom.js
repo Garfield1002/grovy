@@ -27,7 +27,7 @@
      grovy.math(render)                 draw the LaTeX in replies yourself: render(tex, display) returns a node,
                                         or throws (the TeX then shows as written)
      grovy.menu(label, run, {where})    a menu item: where "session" (default, the open session's ⋯ menu), "home"
-                                        (grovy's ⋯ → Settings sheet), "new" (the ＋ button, for things to start) or
+                                        (grovy's ⚙ Settings sheet), "new" (the ＋ button, for things to start) or
                                         "both"; add when: state => true/false to show it only sometimes (state: the
                                         open session's, null on the home screen); add section: "Conversation" |
                                         "Session" | your own name to group it under a header in the session menu.
@@ -44,9 +44,9 @@
      grovy.on("send", text)             return new text to send instead, or false to keep it from being sent
                                         (answer at once: an async hook stops the send)
      grovy.extension(name, setup, {about})   a named extension: setup(grovy) runs at start-up; about is its
-                                        line in ⋯ → Extensions, where it can be switched off
+                                        line in ⚙ → Extensions, where it can be switched off
      grovy.disable(name)                turn off a built-in extension, e.g. grovy.disable("context-bar") (or switch
-                                        it off in ⋯ → Extensions, which needs no code)
+                                        it off in ⚙ → Extensions, which needs no code)
      grovy.extensions                   the named extensions, whether each is on, and their about lines
 
    Claude's words and tool inputs are untrusted: build with grovy.h / grovy.md, never innerHTML.

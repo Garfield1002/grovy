@@ -11,10 +11,10 @@ away: `grovy attach NAME` puts you in the real session (detach with Ctrl-b d).
 - **The list:** every session with live status (working, idle, needs you), context used, and the last activity.
 - **Start, resume, rename, stop:** ＋ starts something — a session in any trusted folder (or continue or fork a past
   conversation there), a quick issue, or a new project. The folder list has a search box and a Recent ⇄ A–Z sort, so
-  it stays quick with many projects. ⋯ holds grovy's own settings. ⋯ on a session renames or stops it; an ended
+  it stays quick with many projects. ⚙ holds grovy's own settings. ⋯ on a session renames or stops it; an ended
   session can be resumed later.
-- **Command palette:** ⋯ → Search commands, or `Ctrl`/`⌘`+`K` on a keyboard, opens one searchable list of everything
-  you can do here plus a jump to any session or page — start typing and press Enter.
+- **Command palette:** ⚡ on the session list (⋯ → Search commands in a session), or `Ctrl`/`⌘`+`K` on a keyboard,
+  opens one searchable list of everything you can do here plus a jump to any session or page — start typing and press Enter.
 - **Background work:** subagents and commands Claude left running show as "idle · 2 running"; tap the strip above
   the message box to see each one, how long it has run and what it is doing.
 - **Updating a session:** after `grovy update`, ⋯ → Update session gives a running session the newest grovy
@@ -63,7 +63,7 @@ normal question in the terminal is still there.
   ⋯ → Finish issue shows the commits; one tap merges them into your main branch and cleans everything up.
 - **Report (for grovy itself):** press **Alt+R**, or hold two fingers on the screen for a moment, to paint over
   anything in grovy's own UI you don't like, add a line about what's wrong, and file it as an issue in your grovy
-  repo. It paints on top of what you were doing and leaves it untouched, so cancelling puts you right back.
+  repo; the agent gets a screenshot with your paint on it. It paints on top of what you were doing and leaves it untouched, so cancelling puts you right back.
 - **New projects:** ＋ → New project makes a blank repository or clones one into `~/dev` and starts Claude in it.
   For a clone, you see first which of its files Claude would load (some can run commands) and say whether to trust it.
 - **Git:** ⋯ → Git shows the session's repository as a graph of branches and commits; tap a commit for its files
@@ -73,7 +73,7 @@ normal question in the terminal is still there.
 
 ## Notifications
 
-With [HTTPS](setup.md#https) on, ⋯ → Notifications on each phone lets you hear when a session needs you, finishes or
+With [HTTPS](setup.md#https) on, ⚙ → Notifications on each phone lets you hear when a session needs you, finishes or
 fails, even with grovy closed. The notification travels empty through your phone maker's push service; the phone
 then fetches what happened from grovy itself. On iPhone, open grovy from the home screen first (Share → Add to
 Home Screen).
@@ -96,7 +96,7 @@ grovy attach api               # the real terminal
 grovy resume api               # continue an ended session
 grovy rename api backend       # rename it
 grovy kill api                 # stop it
-grovy url                      # the phone link again (also on the phone: ⋯ → Login link)
+grovy url                      # the phone link again (also on the phone: ⚙ → Login link)
 grovy update                   # update grovy itself
 grovy doctor                   # check that everything is in order
 ```
