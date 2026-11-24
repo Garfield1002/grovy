@@ -706,7 +706,7 @@ function fillComposer(text) {   // interactive widgets only ever propose a messa
 }
 
 const WIDGETS = {};   // type -> render(spec, live), added with grovy.widget (the built-in ones: extensions/widgets.js)
-function md(src) {
+function md(src, opts = {}) {   // opts.widgets === false: ```widget stays code (the user's own messages)
   const lines = String(src).replace(/\r\n?/g, "\n").split("\n"), root = h("div", {class: "md"});
   let i = 0, para = [];
   const flush = () => { if (para.length) { root.append(h("p", {}, para.flatMap((l, k) => k ? [h("br"), ...inline(l)] : inline(l)))); para = []; } };
@@ -719,7 +719,7 @@ function md(src) {
       while (i < lines.length && !lines[i].trim().startsWith(fence)) code.push(lines[i++]);
       i++;
       const text = code.join("\n");
-      if (m[2].toLowerCase() === "widget") {
+      if (m[2].toLowerCase() === "widget" && opts.widgets !== false) {
         try { root.append(widget(text)); continue; }
         catch (e) { root.append(h("div", {class: "wg werr"}, "Widget not shown: " + e.message)); }
       }
@@ -750,7 +750,7 @@ function md(src) {
     if (/^\s*>/.test(l)) {
       flush(); const q = [];
       while (i < lines.length && /^\s*>/.test(lines[i])) q.push(lines[i++].replace(/^\s*>\s?/, ""));
-      const bq = md(q.join("\n")); bq.className = ""; root.append(h("blockquote", {}, ...bq.childNodes)); continue;
+      const bq = md(q.join("\n"), opts); bq.className = ""; root.append(h("blockquote", {}, ...bq.childNodes)); continue;
     }
     if (LI.test(l)) {                                                  // (nested) lists by indentation
       flush(); const stack = [];
@@ -897,13 +897,14 @@ function quoteNode(lines) {
   if (who) el.onclick = () => jumpTo(body, el);
   return el;
 }
-function userText(t) {   // a user message; its "> " lines (from Quote) show as a quote block
+function userText(t, stamp) {   // a user message, in markdown; its "> " lines (from Quote) show as a quote block.
+  // STAMP (its time and ticks) goes at the end of the last paragraph, where it floats on the last line when it fits
   const out = []; let q = [], txt = [];
   const flush = () => {
     if (q.length) out.push(quoteNode(q));
     if (txt.length) {   // blocks already break the line
       const t = txt.join("\n").replace(/\n+$/, "");
-      if (t) out.push(out.length ? t.replace(/^\n/, "") : t);
+      if (t.trim()) out.push(md(t, {widgets: false}));
     }
     q = []; txt = [];
   };
@@ -914,6 +915,10 @@ function userText(t) {   // a user message; its "> " lines (from Quote) show as 
     else { if (q.length) flush(); txt.push(l); }
   }
   flush();
+  const last = out[out.length - 1];
+  if (stamp && last && last.classList.contains("md") && last.lastElementChild && last.lastElementChild.tagName === "P")
+    last.lastElementChild.append(stamp);
+  else if (stamp) out.push(stamp);
   return out;
 }
 
@@ -975,7 +980,7 @@ function eventNode(e, isLatestReply, turn) {
     case "UserPromptSubmit": {
       const m = String(d.prompt || "").match(MACHINE);
       if (m) return machineNode(m[1], d.prompt);      // not typed by you: subagent reports, task notices
-      return h("div", {class: "u", ctx: () => userCtx(unwrap(d.prompt))}, ...userText(unwrap(d.prompt)), h("span", {class: "st in"}, sent(d.sent || e.ts), READ()));
+      return h("div", {class: "u", ctx: () => userCtx(unwrap(d.prompt))}, ...userText(unwrap(d.prompt), h("span", {class: "st in"}, sent(d.sent || e.ts), READ())));
     }
     case "Stop": {
       const text = d.last_assistant_message || "";
@@ -1007,7 +1012,7 @@ function eventNode(e, isLatestReply, turn) {
     case "SessionStart": return sysLine(SOURCE[d.source] || "session started");
     case "SessionEnd": return sysLine("Claude exited", d.reason && d.reason !== "other" ? " (" + d.reason.replace(/_/g, " ") + ")" : "");
     case "Exited": return sysLine("terminal closed");
-    case "Steered": return h("div", {class: "u", ctx: () => userCtx(unwrap(d.prompt))}, ...userText(unwrap(d.prompt)), h("span", {class: "st in", title: "sent while Claude worked: it read it at its next step"}, sent(d.sent || e.ts), READ()));
+    case "Steered": return h("div", {class: "u", ctx: () => userCtx(unwrap(d.prompt))}, ...userText(unwrap(d.prompt), h("span", {class: "st in", title: "sent while Claude worked: it read it at its next step"}, sent(d.sent || e.ts), READ())));
     case "Killed": return h("div", {class: "err"}, "⚠ Killed by the system's out-of-memory killer: memory ran short on this machine, "
       + "probably because of a big job (here or elsewhere). Resume continues the conversation.");
     case "Interrupted": return sysLine("■ interrupted from the phone");
@@ -1824,7 +1829,7 @@ function searchSheet() {
       return h("button", {class: "hit", onclick: () => openSheet(
           h("button", {class: "more", onclick: searchSheet}, "‹ Back to results"),
           h("div", {class: "w"}, new Date(e.ts * 1000).toLocaleString()),
-          e.type === "UserPromptSubmit" ? h("div", {class: "u"}, text) : h("div", {class: "a"}, md(text)))},
+          e.type === "UserPromptSubmit" ? h("div", {class: "u"}, ...userText(text)) : h("div", {class: "a"}, md(text)))},
         h("div", {class: "w"}, (e.type === "UserPromptSubmit" ? "You · " : "Claude · ") + new Date(e.ts * 1000).toLocaleString()),
         h("div", {class: "s"}, snip, h("mark", {}, hit), rest));
     }) : [h("div", {class: "sys"}, "No matches.")]));
