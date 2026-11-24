@@ -74,15 +74,20 @@ def worktrees_dir(root):
 
 
 def grovy_repo():
-    """The main checkout of grovy's own source tree (core.HERE), or None if it isn't a git repository. core.HERE may
-    be a linked worktree (grovy running from one): resolve to the main checkout, which is where issues are filed."""
+    """The main checkout of grovy's own source tree (core.HERE), or None. core.HERE may be a linked worktree (grovy
+    running from one): resolve to the main checkout, which is where issues are filed. Returns None unless that root is
+    a git repository whose top is grovy itself (has grovy.py and grovylib/) — so grovy's source dropped *inside* a
+    larger repo (a monorepo) resolves to that enclosing repo and is refused, rather than filing against the wrong one."""
     here = core.HERE
     try:
         common = git(here, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
     except GitError:
         return None
-    root = os.path.dirname(common) if os.path.basename(common) == ".git" else here
-    return repo_root(root)
+    root = repo_root(os.path.dirname(common) if os.path.basename(common) == ".git" else here)
+    if not root or not (os.path.isfile(os.path.join(root, "grovy.py"))
+                        and os.path.isdir(os.path.join(root, "grovylib"))):
+        return None
+    return root
 
 
 def slug(text):

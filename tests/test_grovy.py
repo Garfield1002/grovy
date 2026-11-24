@@ -3422,6 +3422,51 @@ class TestTrustQuestion(unittest.TestCase):
         self.assertEqual(keys, [])
 
 
+class TestGrovyRepo(unittest.TestCase):
+    """issues.grovy_repo() resolves grovy's OWN main checkout from core.HERE, and refuses anything that isn't it."""
+
+    def make_grovy(self, where):   # a directory that looks like a grovy checkout
+        os.makedirs(os.path.join(where, "grovylib"))
+        with open(os.path.join(where, "grovy.py"), "w") as f:
+            f.write("# grovy\n")
+
+    def test_normal_checkout(self):
+        repo = os.path.realpath(tempfile.mkdtemp(dir=TMP))
+        gitc(repo, "init", "-q", "-b", "main")
+        self.make_grovy(repo)
+        gitc(repo, "add", "-A")
+        gitc(repo, "commit", "-q", "-m", "first")
+        with mock.patch.object(core, "HERE", repo):
+            self.assertEqual(issues.grovy_repo(), repo)
+
+    def test_linked_worktree_resolves_to_main_checkout(self):
+        repo = os.path.realpath(tempfile.mkdtemp(dir=TMP))
+        gitc(repo, "init", "-q", "-b", "main")
+        self.make_grovy(repo)
+        gitc(repo, "add", "-A")
+        gitc(repo, "commit", "-q", "-m", "first")
+        wt = os.path.join(repo, ".claude", "worktrees", "x")
+        gitc(repo, "worktree", "add", "-q", "-b", "wt", wt)
+        with mock.patch.object(core, "HERE", wt):   # running from a worktree, as this very session is
+            self.assertEqual(issues.grovy_repo(), repo)
+
+    def test_source_inside_a_larger_repo_is_refused(self):
+        parent = os.path.realpath(tempfile.mkdtemp(dir=TMP))
+        gitc(parent, "init", "-q", "-b", "main")           # the enclosing repo is NOT grovy
+        with open(os.path.join(parent, "readme"), "w") as f:
+            f.write("mono\n")
+        inner = os.path.join(parent, "tools", "grovy")      # grovy's source dropped inside it (not its own repo)
+        self.make_grovy(inner)
+        gitc(parent, "add", "-A")
+        gitc(parent, "commit", "-q", "-m", "first")
+        with mock.patch.object(core, "HERE", inner):
+            self.assertIsNone(issues.grovy_repo())          # must not resolve to the parent repo
+
+    def test_not_a_repo(self):
+        with mock.patch.object(core, "HERE", os.path.realpath(tempfile.mkdtemp(dir=TMP))):
+            self.assertIsNone(issues.grovy_repo())
+
+
 class TestIssues(StoreCase):
     def setUp(self):
         super().setUp()

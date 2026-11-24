@@ -20,6 +20,8 @@ grovy.extension("report", grovy => {
 #grovy-report .rep-bot { bottom:0; border-top:1px solid var(--line); flex-wrap:wrap; padding-bottom:calc(8px + env(safe-area-inset-bottom)); }
 #grovy-report .rep-hint { color:var(--fg); font-size:14px; font-weight:600; flex:1; }
 #grovy-report .rep-sub { color:var(--mut); font-size:12px; width:100%; margin:-2px 0 2px; }
+#grovy-report .rep-err { color:var(--bad); font-size:13px; width:100%; }
+#grovy-report .rep-err:empty { display:none; }
 #grovy-report textarea { width:100%; box-sizing:border-box; }
 #grovy-report .rep-spacer { flex:1; }
 #grovy-report .rep-min { padding:4px 10px; font-size:13px; }`);
@@ -78,11 +80,12 @@ grovy.extension("report", grovy => {
   }
 
   function open_() {
-    const dpr = window.devicePixelRatio || 1;
     const canvas = h("canvas", {});
     const ctx = canvas.getContext("2d");
     const strokes = [];   // each is an array of {x, y} in viewport (CSS) pixels
+    let busy = false;     // a filing POST is in flight: Esc and ✕ wait for it (it files what you asked for)
     const fit = () => {
+      const dpr = window.devicePixelRatio || 1;   // read each time: browser zoom / a move between monitors can change it
       canvas.width = Math.round(innerWidth * dpr); canvas.height = Math.round(innerHeight * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0); redraw();
     };
@@ -98,42 +101,44 @@ grovy.extension("report", grovy => {
       }
     };
 
-    let drawing = null;
+    const active = new Map();   // pointerId -> its stroke, so several fingers paint separate strokes, not one tangle
     canvas.addEventListener("pointerdown", e => {
       e.preventDefault(); canvas.setPointerCapture(e.pointerId);
-      drawing = [{x: e.clientX, y: e.clientY}]; strokes.push(drawing); redraw(); sync();
+      const stroke = [{x: e.clientX, y: e.clientY}];
+      active.set(e.pointerId, stroke); strokes.push(stroke); redraw(); sync();
     });
     canvas.addEventListener("pointermove", e => {
-      if (!drawing) return;
-      e.preventDefault(); drawing.push({x: e.clientX, y: e.clientY}); redraw();
+      const stroke = active.get(e.pointerId);
+      if (!stroke) return;
+      e.preventDefault(); stroke.push({x: e.clientX, y: e.clientY}); redraw();
     });
-    const end = () => { drawing = null; };
+    const end = e => active.delete(e.pointerId);
     canvas.addEventListener("pointerup", end);
     canvas.addEventListener("pointercancel", end);
 
     const hint = h("div", {class: "rep-hint"}, "Paint over what's wrong");
     const undo = h("button", {class: "btn rep-min", onclick: () => { strokes.pop(); redraw(); sync(); }}, "Undo");
     const clear = h("button", {class: "btn rep-min", onclick: () => { strokes.length = 0; redraw(); sync(); }}, "Clear");
-    const cancel = h("button", {class: "btn rep-min", "aria-label": "Cancel", onclick: close}, "✕");
+    const cancel = h("button", {class: "btn rep-min", "aria-label": "Cancel", onclick: () => { if (!busy) close(); }}, "✕");
     const top = h("div", {class: "rep-top"}, hint, undo, clear, cancel);
 
     const note = h("textarea", {class: "field", rows: 2, placeholder: "What don't you like? (e.g. “move this button, it's too close to Discard”)"});
+    const err = h("div", {class: "rep-err"});   // shown IN the overlay: grovy.say() would paint behind it (higher z-index)
     const file = h("button", {class: "btn allow", disabled: ""}, "File grovy issue");
     const bot = h("div", {class: "rep-bot"},
       h("div", {class: "rep-sub"}, "Filed as an issue in your grovy repo — a worktree and a session of its own."),
-      note, h("div", {class: "rep-spacer"}), file);
+      err, note, h("div", {class: "rep-spacer"}), file);
 
     overlay = h("div", {id: "grovy-report"}, canvas, top, bot);
     document.body.appendChild(overlay);
 
-    let busy = false;
     function sync() { file.disabled = busy || !note.value.trim(); }
-    note.oninput = sync;
+    note.oninput = () => { err.textContent = ""; sync(); };
     file.onclick = async () => {
       const words = note.value.trim();
       if (!words) return;
-      if (/^[/!]/.test(words)) return grovy.say("Start the note with words: a leading / or ! would look like a command.");
-      busy = true; sync(); file.textContent = "Filing…";
+      if (/^[/!]/.test(words)) { err.textContent = "Start the note with words: a leading / or ! would look like a command."; return; }
+      busy = true; sync(); err.textContent = ""; file.textContent = "Filing…";
       const ctxText = context(strokes);
       try {
         const r = await grovy.api("/api/report", {note: words, context: ctxText});
@@ -145,11 +150,11 @@ grovy.extension("report", grovy => {
         }
       } catch (e) {
         busy = false; file.textContent = "File grovy issue"; sync();
-        grovy.say("Not filed: " + e.message);
+        err.textContent = "Not filed: " + e.message;   // e.g. the graft / untrusted-repo refusal — must be readable here
       }
     };
 
-    onkey = e => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+    onkey = e => { if (e.key === "Escape" && !busy) { e.preventDefault(); close(); } };
     addEventListener("keydown", onkey, true);
     onresize_ = () => fit();
     addEventListener("resize", onresize_);
