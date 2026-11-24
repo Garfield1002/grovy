@@ -1,0 +1,70 @@
+// The message box (index.html richBox), driven in a real browser: tests/test_grovy.py TestRichBoxBrowser adds this
+// to a copy of index.html (fetch stubbed) and screenshots it in headless Firefox. The top-left pixel says the verdict:
+// green when every check passed; red otherwise, with the failures listed (open the page to read them).
+document.addEventListener("DOMContentLoaded",()=>{
+ const R=[]; const ok=(name,c,extra="")=>R.push((c?"PASS ":"FAIL ")+name+(c?"":" "+extra));
+ document.getElementById("composer").classList.remove("hidden");
+ const el=input;
+ const T="Can you **fix** the `bug`?\n> quoted *it*\n```\ncode **no**\n```\n- item\n";
+ el.value=T; ok("roundtrip", el.value===T, JSON.stringify(el.value));
+ ok("bold span", !!el.querySelector(".rt-b"), el.innerHTML.slice(0,200));
+ ok("code not parsed inside", !el.querySelector(".rt-cb .rt-b"));
+ ok("end br", !!el.querySelector("br[data-end]"));
+ el.focus(); ok("focus caret end", el.selectionStart===T.length, el.selectionStart);
+ el.value="hello"; el.focus(); el.setSelectionRange(5,5);
+ document.execCommand("insertText", false, " *wor");
+ ok("typed", el.value==="hello *wor", JSON.stringify(el.value));
+ ok("no em yet", !el.querySelector(".rt-i"));
+ document.execCommand("insertText", false, "ld*");
+ ok("em after closing", !!el.querySelector(".rt-i") && el.value==="hello *world*", JSON.stringify(el.value)+" "+el.innerHTML);
+ ok("caret kept", el.selectionStart===13, el.selectionStart);
+ document.execCommand("insertText", false, " more");
+ ok("typing after em", el.value==="hello *world* more" && el.selectionStart===18, JSON.stringify(el.value)+" "+el.selectionStart+" "+el.innerHTML);
+ el.setSelectionRange(5,5);
+ el.dispatchEvent(new InputEvent("beforeinput",{inputType:"insertParagraph",cancelable:true,bubbles:true}));
+ ok("enter newline", el.value==="hello\n *world* more" && el.selectionStart===6, JSON.stringify(el.value)+" "+el.selectionStart);
+ el.value=""; ok("empty", el.childNodes.length===0 && el.matches(":empty"));
+ el.focus(); document.execCommand("insertText", false, "abc");
+ el.dispatchEvent(new InputEvent("beforeinput",{inputType:"insertLineBreak",cancelable:true,bubbles:true}));
+ ok("trailing newline", el.value==="abc\n" && el.selectionStart===4, JSON.stringify(el.value)+" "+el.selectionStart);
+ document.execCommand("insertText", false, "d");
+ ok("type on new line", el.value==="abc\nd", JSON.stringify(el.value)+" "+el.innerHTML);
+ const pe=new Event("paste",{cancelable:true,bubbles:true}); Object.defineProperty(pe,"clipboardData",{value:{getData:t=>t==="text/plain"?"**p**\r\nq":"<b>x</b>"}});
+ el.dispatchEvent(pe);
+ ok("paste plain", el.value==="abc\nd**p**\nq", JSON.stringify(el.value));
+ el.dispatchEvent(new InputEvent("beforeinput",{inputType:"historyUndo",cancelable:true,bubbles:true}));
+ ok("undo paste", el.value==="abc\nd", JSON.stringify(el.value));
+ el.dispatchEvent(new InputEvent("beforeinput",{inputType:"historyRedo",cancelable:true,bubbles:true}));
+ ok("redo", el.value==="abc\nd**p**\nq", JSON.stringify(el.value));
+ el.value="x"; el.dispatchEvent(new InputEvent("beforeinput",{inputType:"historyUndo",cancelable:true,bubbles:true}));
+ ok("set resets undo", el.value==="x", JSON.stringify(el.value));
+
+ // review fixes
+ el.value=""; el.replaceChildren(document.createTextNode(""), document.createElement("br"));
+ ok("padding br empty", el.value==="", JSON.stringify(el.value));
+ el.replaceChildren(document.createTextNode("ab"), document.createElement("br"), document.createElement("br"));
+ ok("br br = one newline", el.value==="ab\n", JSON.stringify(el.value));
+ const d1=document.createElement("div"); d1.textContent="ab"; const d2=document.createElement("div"); d2.append(document.createElement("br"));
+ el.replaceChildren(d1,d2); ok("div div br", el.value==="ab\n", JSON.stringify(el.value));
+ el.value="**b**"; el.focus(); el.setSelectionRange(5,5);
+ ok("caret out of marker", !getSelection().anchorNode.parentElement.closest(".rt-mk"), getSelection().anchorNode.parentElement.className);
+ el.value="a**b**"; el.focus(); el.setSelectionRange(1,1);
+ ok("caret before opener stays plain", getSelection().anchorNode.data==="a");
+ el.value="abc"; el.focus(); el.setSelectionRange(3,3); document.execCommand("insertText",false,"d");
+ el.dispatchEvent(new KeyboardEvent("keydown",{key:"z",ctrlKey:true,bubbles:true,cancelable:true}));
+ ok("ctrl+z", el.value==="abc", JSON.stringify(el.value));
+ el.dispatchEvent(new KeyboardEvent("keydown",{key:"y",ctrlKey:true,bubbles:true,cancelable:true}));
+ ok("ctrl+y", el.value==="abcd", JSON.stringify(el.value));
+ el.value="/cmd "; el.focus(); document.execCommand("insertText",false,"q");
+ el.dispatchEvent(new KeyboardEvent("keydown",{key:"z",ctrlKey:true,bubbles:true,cancelable:true}));
+ ok("undo to page-set value", el.value==="/cmd ", JSON.stringify(el.value));
+ el.value=("line\n").repeat(40); el.style.maxHeight="120px"; el.focus(); el.setSelectionRange(el.value.length,el.value.length); el.scrollTop=0;
+ for(let i=0;i<3;i++) el.dispatchEvent(new InputEvent("beforeinput",{inputType:"insertParagraph",cancelable:true,bubbles:true}));
+ ok("enter reveals caret", el.scrollTop+el.clientHeight>=el.scrollHeight-30, el.scrollTop+"/"+el.scrollHeight);
+ el.style.maxHeight="";
+ el.placeholder="Steer Claude…"; ok("placeholder prop", el.dataset.placeholder==="Steer Claude…");
+ const bad=R.filter(r=>!r.startsWith("PASS"));
+ const v=document.createElement("pre"); v.id="verdict";
+ v.style.cssText="position:fixed;inset:0;z-index:2147483647;margin:0;padding:8px;font-size:12px;background:"+(bad.length?"#ff0000":"#00ff00");
+ v.textContent=bad.length?bad.join("\n"):"ok"; document.body.append(v);
+});

@@ -5752,6 +5752,56 @@ class TestRichBox(unittest.TestCase):
             [{"c": "rt-q", "k": [mk("> "), {"c": "rt-i", "k": [mk("*"), "q", mk("*")]}]}]])
 
 
+def _png_first_pixel(path):
+    """(r, g, b) of a PNG's top-left pixel: the first pixel of the first row is stored as is whatever its filter."""
+    import struct
+    import zlib
+    data = open(path, "rb").read()
+    pos, idat, ctype = 8, b"", None
+    while pos < len(data):
+        n, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        chunk = data[pos + 8:pos + 8 + n]
+        if kind == b"IHDR":
+            ctype = chunk[9]
+        elif kind == b"IDAT":
+            idat += chunk
+        pos += 12 + n
+    raw = zlib.decompressobj().decompress(idat, 16)
+    assert ctype in (2, 6), ctype
+    return tuple(raw[1:4])
+
+
+@unittest.skipUnless(shutil.which("firefox"), "firefox not installed")
+class TestRichBoxBrowser(unittest.TestCase):
+    """The message box in a real browser (tests/richbox_check.js): what node can't run (the DOM, the caret)."""
+    STUB = """<script>
+window.fetch = async () => { const d = {sessions: [], machines: [], pages: [], events: [], commands: []};
+  return {ok: true, status: 200, headers: new Headers({"content-type": "application/json"}), json: async () => d,
+          text: async () => JSON.stringify(d)}; };
+window.EventSource = function () { this.close = () => {}; };
+</script>"""
+
+    def test_message_box(self):
+        """Review of the rich box: a browser's padding <br> read as a newline (Select all + Cut left "\n", the
+        paperclip hidden); the caret left inside a closing marker; Ctrl+Z/Ctrl+Y never reached it on Chrome; a
+        page-set value couldn't be undone back to; Enter at the end of a long draft left the caret out of sight."""
+        d = tempfile.mkdtemp(dir=TMP)
+        page = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
+        check = open(os.path.join(ROOT, "tests", "richbox_check.js"), encoding="utf-8").read()
+        page = page.replace("<head>", "<head>" + self.STUB, 1).replace("</style>", "*{animation:none!important}</style>", 1)
+        page = page.replace("</body>", "<script>" + check + "</script></body>")
+        html, png = os.path.join(d, "box.html"), os.path.join(d, "box.png")
+        with open(html, "w", encoding="utf-8") as f:
+            f.write(page)
+        os.makedirs(os.path.join(d, "profile"))
+        subprocess.run(["firefox", "--headless", "--no-remote", "--profile", os.path.join(d, "profile"),
+                        "--window-size=390,844", "--screenshot", png, "file://" + html],
+                       capture_output=True, timeout=120)
+        self.assertTrue(os.path.exists(png), "firefox made no screenshot")
+        r, g, b = _png_first_pixel(png)
+        self.assertTrue(g > 200 and r < 60, f"checks failed (pixel {r},{g},{b}): open {html} in a browser to see which")
+
+
 @unittest.skipUnless(shutil.which("node"), "node not installed")
 class TestLinksExtension(unittest.TestCase):
     """extensions/links.js, run in node on a minimal DOM: what a reply's links become."""

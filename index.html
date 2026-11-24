@@ -302,7 +302,7 @@ textarea, #input { flex:1; font:inherit; font-size:16px; padding:11px 14px; bord
 textarea:focus, #input:focus { border-color:var(--mut); }
 /* the message box: markdown shown as you type, the markers kept (richBox) */
 #input { overflow-y:auto; white-space:pre-wrap; overflow-wrap:anywhere; cursor:text; line-height:1.4; }
-#input:empty::before { content:attr(data-placeholder); color:var(--mut); pointer-events:none; }
+#input:empty::before { content:attr(data-placeholder); content:attr(data-placeholder) / ""; color:var(--mut); pointer-events:none; }
 #input .rt-mk { color:var(--mut); } #input .rt-b, #input .rt-h { font-weight:700; } #input .rt-i { font-style:italic; }
 #input .rt-s { text-decoration:line-through; } #input .rt-q { color:var(--mut); } #input .rt-l { color:var(--acc); }
 #input :is(.rt-c, .rt-cb) { font:.88em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background:var(--code); border-radius:4px; }
@@ -1451,46 +1451,89 @@ function richSegs(text) {
 // at nodes a re-render replaced) isn't text.
 function richBox(el) {
   try { el.contentEditable = "plaintext-only"; } catch (e) { el.contentEditable = "true"; }   // older browsers
-  const textOf = n => {
-    let s = "";
-    for (const c of n.childNodes) {
-      if (c.nodeType === 3) s += c.data;
-      else if (c.nodeName === "BR") s += c.hasAttribute("data-end") ? "" : "\n";
-      else if (c.nodeType === 1) {
-        if (/^(DIV|P)$/.test(c.nodeName) && s && !s.endsWith("\n")) s += "\n";   // a line a browser added its way
-        s += textOf(c);
-      }
-    }
-    return s;
+  // A <br> that ends the box or a line a browser added (<div>…<br></div>) is its padding, there so an empty last line
+  // shows: no newline of the user's (ours, after a real last newline, is marked data-end).
+  // With PT ({node, off, at: -1}, a DOM point), also where that point falls in the text (pt.at): one walk, no clone.
+  const textOf = (root, pt) => {
+    let out = "";
+    const walk = (n, top) => {
+      const all = [...n.childNodes];
+      let last = all.length - 1;
+      while (last >= 0 && all[last].nodeType === 3 && !all[last].data) last--;
+      all.forEach((c, i) => {
+        if (pt && pt.at < 0 && pt.node === n && pt.off === i) pt.at = out.length;
+        if (c.nodeType === 3) {
+          if (pt && pt.at < 0 && pt.node === c) pt.at = out.length + Math.min(pt.off, c.data.length);
+          out += c.data;
+        } else if (c.nodeName === "BR")
+          out += c.hasAttribute("data-end") || (i === last && (top || /^(DIV|P)$/.test(n.nodeName))) ? "" : "\n";
+        else if (c.nodeType === 1) {
+          if (/^(DIV|P)$/.test(c.nodeName) && out && !out.endsWith("\n")) out += "\n";   // a line a browser added its way
+          walk(c, false);
+        }
+      });
+      if (pt && pt.at < 0 && pt.node === n && pt.off >= all.length) pt.at = out.length;
+    };
+    walk(root, true);
+    return out;
   };
-  const read = () => (el.childNodes.length === 1 && el.firstChild.nodeName === "BR") ? "" : textOf(el).replace(/ /g, " ");
+  // the text, read once per change: a keystroke asks for it a dozen times (drafts, autosize, picker...)
+  let cache = "", dirty = true;
+  const mo = new MutationObserver(() => { dirty = true; });
+  mo.observe(el, {childList: true, subtree: true, characterData: true});
+  const read = () => {
+    if (mo.takeRecords().length) dirty = true;
+    if (dirty) { cache = textOf(el).replace(/\u00a0/g, " "); dirty = false; }
+    return cache;
+  };
   const sigSegs = ps => ps.map(p => typeof p === "string" ? p : "\u0001" + p.c + "\u0002" + sigSegs(p.k) + "\u0003").join("");
   const sigDom = n => [...n.childNodes].map(c => c.nodeType === 3 ? c.data
     : c.nodeName === "SPAN" ? "\u0001" + c.className + "\u0002" + sigDom(c) + "\u0003"
     : c.nodeName === "BR" && c.hasAttribute("data-end") ? "\u0004" : "\u0005").join("");
   const build = p => typeof p === "string" ? document.createTextNode(p) : h("span", {class: p.c}, ...p.k.map(build));
   const offsetOf = (node, off) => {
-    const r = document.createRange(); r.setStart(el, 0); r.setEnd(node, off);
-    const d = document.createElement("div"); d.append(r.cloneContents());
-    return textOf(d).length;
+    const pt = {node, off, at: -1};
+    textOf(el, pt);
+    return pt.at < 0 ? read().length : pt.at;
   };
+  // the DOM point for a text offset; at a boundary between pieces, outside a marker when it can be (after "**b**"
+  // what you type goes after the marker, not into it)
   const pointAt = off => {
-    let acc = 0, found = null;
+    let acc = 0;
+    const cands = [], idx = c => [...c.parentNode.childNodes].indexOf(c);
     const walk = n => {
       for (const c of n.childNodes) {
-        if (found) return;
-        if (c.nodeType === 3) { if (off <= acc + c.data.length) { found = [c, off - acc]; return; } acc += c.data.length; }
-        else if (c.nodeName === "BR") {
+        if (acc > off) return;
+        if (c.nodeType === 3) {
+          if (off >= acc && off <= acc + c.data.length) cands.push([c, off - acc, !!c.parentElement.closest(".rt-mk")]);
+          acc += c.data.length;
+        } else if (c.nodeName === "BR") {
           if (c.hasAttribute("data-end")) continue;
-          if (off <= acc) { found = [n, [...n.childNodes].indexOf(c)]; return; }
+          if (off === acc) cands.push([c.parentNode, idx(c), false]);
           acc += 1;
         } else walk(c);
       }
     };
     walk(el);
-    if (found) return found;
+    const best = cands.find(c => !c[2]) || cands[0];
+    if (best && best[2] && best[1] === best[0].data.length) {   // the end of a closing marker that ends its spans:
+      let top = best[0];                                         // just after them, in plain text
+      while (top.parentNode !== el && top.parentNode.lastChild === top) top = top.parentNode;
+      if (top.parentNode === el && top.nodeType === 1) return [el, idx(top) + 1];
+    }
+    if (best) return [best[0], best[1]];
     const end = el.querySelector("br[data-end]");
-    return [el, end ? [...el.childNodes].indexOf(end) : el.childNodes.length];
+    return [el, end ? idx(end) : el.childNodes.length];
+  };
+  // like a textarea, keep the caret in sight (a selection set from script doesn't scroll)
+  const reveal = () => {
+    const s = getSelection();
+    if (!s || !s.rangeCount) return;
+    const r = s.getRangeAt(0).getBoundingClientRect(), b = el.getBoundingClientRect();
+    if (!r.height) { if (sel()[0] >= read().length) el.scrollTop = el.scrollHeight; return; }
+    const bottom = b.bottom - parseFloat(getComputedStyle(el).paddingBottom || 0);
+    if (r.bottom > bottom) el.scrollTop += r.bottom - bottom + 4;
+    else if (r.top < b.top) el.scrollTop -= b.top - r.top + 4;
   };
   const sel = () => {
     const s = getSelection();
@@ -1522,27 +1565,41 @@ function richBox(el) {
   const replaceSel = text => {
     const [a, b] = sel(), v = read(), nv = v.slice(0, a) + text + v.slice(b);
     record(nv, a + text.length, false);
-    render(nv, true); select(a + text.length); fire();
+    render(nv, true); select(a + text.length); fire(); reveal();
   };
-  const restore = st => { render(st.v, true); if (document.activeElement === el) select(st.s); lastPush = 0; fire(); };
+  const restore = st => { render(st.v, true); if (document.activeElement === el) { select(st.s); reveal(); } lastPush = 0; fire(); };
+  const step = back => {
+    const from = back ? undo : redo, to = back ? redo : undo;
+    if (from.length) { to.push(cur); cur = from.pop(); restore(cur); }
+  };
   el.addEventListener("beforeinput", e => {
     if (e.inputType === "insertParagraph" || e.inputType === "insertLineBreak") { e.preventDefault(); replaceSel("\n"); }
-    else if (e.inputType === "historyUndo") { e.preventDefault(); if (undo.length) { redo.push(cur); cur = undo.pop(); restore(cur); } }
-    else if (e.inputType === "historyRedo") { e.preventDefault(); if (redo.length) { undo.push(cur); cur = redo.pop(); restore(cur); } }
+    else if (e.inputType === "historyUndo") { e.preventDefault(); step(true); }   // a phone's undo (the keys: below)
+    else if (e.inputType === "historyRedo") { e.preventDefault(); step(false); }
     else if (/^format/.test(e.inputType)) e.preventDefault();   // Ctrl+B and the like: markdown is typed, not applied
   });
+  // Ctrl/Cmd+Z, Ctrl+Y, Ctrl/Cmd+Shift+Z: Chrome sends undo's beforeinput only when its own undo stack (empty: every
+  // change here is ours) has something
+  el.addEventListener("keydown", e => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey || e.isComposing) return;
+    const k = e.key.toLowerCase();
+    if (k === "z" || (k === "y" && !e.shiftKey)) { e.preventDefault(); step(k === "z" && !e.shiftKey); }
+  });
   el.addEventListener("paste", e => {
-    const t = e.clipboardData && e.clipboardData.getData("text/plain");
+    const d = e.clipboardData, t = d && (d.getData("text/plain") || d.getData("text/uri-list"));
     e.preventDefault();
     if (t) replaceSel(t.replace(/\r\n?/g, "\n"));
   });
+  let composing = false;   // some keyboards send input events without isComposing in the middle of a word
+  el.addEventListener("compositionstart", () => { composing = true; });
+  el.addEventListener("blur", () => { if (composing) { composing = false; render(read()); } });   // no compositionend came
   el.addEventListener("input", e => {
-    if (e.isComposing) return;   // a phone keyboard is building a word: leave its text alone until it's done
+    if (e.isComposing || composing) return;   // a phone keyboard is building a word: leave its text alone until done
     const v = read();
     render(v);
     record(v, sel()[0], true);
   });
-  el.addEventListener("compositionend", () => { const v = read(); render(v); record(v, sel()[0], true); });
+  el.addEventListener("compositionend", () => { composing = false; const v = read(); render(v); record(v, sel()[0], true); });
   el.addEventListener("focus", () => {   // like a textarea: focusing it (not tapping in it) puts the caret at the end
     const s = getSelection();
     if (!s || !s.rangeCount || !el.contains(s.anchorNode)) select(read().length);
@@ -1551,11 +1608,11 @@ function richBox(el) {
     get: read,
     // set by the page (a session's draft, a quote, cleared after sending): a fresh start for undo, which must never
     // bring back another session's draft
-    set(v) { v = String(v ?? ""); undo = []; redo = []; cur = {v, s: v.length}; render(v, true); if (document.activeElement === el) select(v.length); },
+    set(v) { v = String(v ?? ""); undo = []; redo = []; cur = {v, s: v.length}; lastPush = 0; render(v, true); if (document.activeElement === el) select(v.length); },
   });
   Object.defineProperty(el, "placeholder", {
     get: () => el.dataset.placeholder || "",
-    set(v) { el.dataset.placeholder = v; el.setAttribute("aria-placeholder", v); },
+    set(v) { if (el.dataset.placeholder !== v) { el.dataset.placeholder = v; el.setAttribute("aria-placeholder", v); } },
   });
   el.setSelectionRange = (a, b) => select(a, b);
   Object.defineProperty(el, "selectionStart", {get: () => sel()[0]});
