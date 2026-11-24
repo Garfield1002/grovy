@@ -25,9 +25,9 @@ away: `grovy attach NAME` puts you in the real session (detach with Ctrl-b d).
   without waiting or interrupting (the button turns blue). With the box empty, the same button is ■ to stop Claude.
 - **Quote and copy:** each reply has Copy and Quote buttons; or select part of it and tap Quote selection. Tap a
   quote to jump back to where it came from. "Worked for 2m · 14 tool calls" under a reply lists what Claude ran.
-- **Steps:** the ☰ button at the top cycles how much you see on the way to each answer, live as it works: just the
-  answers, or also Claude's words between tool calls, or also the tool calls themselves. Tap "Worked for …" under a
-  reply to open or close just that one.
+- **Steps:** the stacked-lines button at the top cycles how much you see on the way to each answer, live as it works:
+  just the answers, or also Claude's words between tool calls, or also the tool calls themselves (the icon grows a
+  line at each step). Tap "Worked for …" under a reply to open or close just that one.
 - **Long messages:** once a message outgrows the box, it takes the whole screen; the ⤢ / ⤡ button in its corner
   switches by hand.
 - **Formatting:** type markdown (`**bold**`, `*italic*`, `` `code` ``, `> quote`, lists) and the message box shows it

@@ -477,8 +477,8 @@ Longer prompts take the literal bracketed-paste path, with control characters st
   and `SessionEnd` end it. `tx` lives in `state.json`, so a daemon restart mid-turn resumes where it was. It is
   removed from what the browser is sent. Verified (Claude Code 2.1.325): the answer's own text block reaches the file
   ~100ms *after* the `Stop` hook, so it's dropped with the ended `tx`. That's harmless, since `Stop` carries it. `detail`/`history` limits don't count steps, and `HISTORY` is 600 to make room.
-  UI: steps belong to the next `Stop` (or `StopFailure`), else to the live turn. The header's ☰ button cycles the
-  default output-detail level (`localStorage` `grovy-steps`, per device): `none` (answers only, the default),
+  UI: steps belong to the next `Stop` (or `StopFailure`), else to the live turn. The header's output-detail button
+  cycles the level (`localStorage` `grovy-steps`, per device): `none` (answers only, the default),
   `text` (Claude's text steps but not the tool-call steps) or `all` (both). Its icon is a stack of one, two or three
   lines for the level (the colour deepening too), since the header has no room for a label. The legacy `"1"` is `all`.
   "Worked for …" overrides the level for one turn — fully open (`all`) or closed (`none`) — until the next view

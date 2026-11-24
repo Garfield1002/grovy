@@ -479,7 +479,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   <button id="add" class="hbtn" aria-label="New session">＋</button>
   <span id="pill" class="pill hidden"><span id="pdot" class="dot"></span><span id="ptext"></span></span>
   <span id="live" title="live updates disconnected">offline</span>
-  <button id="steps" class="hbtn hidden" aria-pressed="false" aria-label="Output detail (tap to change)"
+  <button id="steps" class="hbtn hidden" aria-label="Output detail (tap to change)"
     title="Output detail (tap to change)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
     stroke-width="2" stroke-linecap="round"><path id="stepsicon" d="M4 12h16"/></svg></button>
   <button id="menu" class="hbtn hidden" aria-label="Menu">⋯</button>
@@ -967,7 +967,7 @@ function workedNode(d, turn) {   // "Worked for 2m 10s · 14 tools ›" in the r
   const n = d.tool_count || 0, tools = Array.isArray(d.tools) ? d.tools : [];
   const text = (timed ? "Worked for " + dur(d.worked) : "Steps") + (n ? ` · ${n} tool${n > 1 ? "s" : ""}` : "");
   if (turn) return {label: h("button", {class: "wkb more-t", "data-turn": turn, "aria-expanded": "false",
-    onclick: () => { turnOpen.set(turn, turnLevel(turn) === "none" ? "all" : "none"); showSteps(); }}, text), list: null};
+    onclick: () => { turnOpen.set(turn, turnLevel(turn) === "all" ? "none" : "all"); showSteps(); }}, text), list: null};
   if (!tools.length) return {label: h("span", {class: "wkb"}, text), list: null};
   const list = h("ol", {class: "wkl hidden"}, ...tools.map(x => h("li", {ctx: () => [{label: "Copy", sub: `${x.tool || ""} ${x.arg || ""}`.trim(),
       run: () => copyQuiet(`${x.tool || ""} ${x.arg || ""}`.trim())}]}, h("b", {}, String(x.tool || "")), x.arg ? " " + x.arg : "")),
@@ -1348,7 +1348,8 @@ function showSteps() {
   const sb = $("steps");
   sb.dataset.level = level;
   $("stepsicon").setAttribute("d", LVL_ICON[level]);
-  sb.setAttribute("aria-pressed", String(level !== "none"));
+  // No aria-pressed: this cycles three levels, not a two-state toggle, so "pressed" can't tell text from all. The
+  // accessible name carries the state instead.
   const lbl = "Output detail: " + LVL_LABEL[level] + " (tap to change)";
   sb.setAttribute("aria-label", lbl); sb.setAttribute("title", lbl);
   for (const t of turns) {
@@ -1361,7 +1362,7 @@ function showSteps() {
     for (const x of t.steps) x.n.classList.toggle("hidden", dup.has(x) || !visible(x.d, lvl));
     const btn = t.stop && cache.get("e" + t.stop + "S") || cache.get("e" + t.stop + "LS");
     const b = btn && btn.querySelector("button.wkb[data-turn]");
-    if (b) b.setAttribute("aria-expanded", String(lvl !== "none"));
+    if (b) b.setAttribute("aria-expanded", String(lvl === "all"));
   }
   if (cur) $("says").classList.toggle("hidden", level !== "none" || !$("says").textContent);
 }
@@ -1370,6 +1371,7 @@ $("steps").onclick = () => {
   try { localStorage.setItem("grovy-steps", level); } catch (e) {}
   showSteps();
 };
+showSteps();   // set the icon, colour and label from the saved level now, so unhiding the button shows no stale state
 async function loadEarlier() {
   const btn = cache.get("earlier"); if (btn) btn.textContent = "Loading…";
   try {
