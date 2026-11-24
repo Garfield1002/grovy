@@ -228,14 +228,14 @@ header h1, .sess .name, #sheet h2, #side .sh a, .md :is(h1, h2, h3, h4), .wt, .s
 .folders .item { padding:10px 12px; min-height:48px; }
 .folders .item.sel { background:color-mix(in srgb, var(--busy) 12%, var(--bg)); font-weight:650; }
 /* pickList: a searchable, sortable one-of list (folders, projects…) */
-.pick { margin:0 0 12px; } .pick > .folders { margin-bottom:0; }
-.pick .pickbar { display:flex; gap:8px; align-items:stretch; margin:0 0 8px; }
-.pick .pickbar .field { margin:0; flex:1; min-width:0; }
-.pick .sort { display:flex; flex:none; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
-.pick .sort button { border:0; background:var(--card); color:var(--mut); font:inherit; font-size:14px; font-weight:600; padding:0 12px; min-height:44px; }
-.pick .sort button + button { border-left:1px solid var(--line); }
-.pick .sort button.sel { background:color-mix(in srgb, var(--busy) 16%, var(--bg)); color:var(--fg); }
-.pick .none { padding:12px 4px; color:var(--mut); font-size:14px; text-align:left; }
+.picklist { margin:0 0 12px; } .picklist > .folders { margin-bottom:0; }
+.picklist .pickbar { display:flex; gap:8px; align-items:stretch; margin:0 0 8px; }
+.picklist .pickbar .field { margin:0; flex:1; min-width:0; }
+.picklist .sort { display:flex; flex:none; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+.picklist .sort button { border:0; background:var(--card); color:var(--mut); font:inherit; font-size:14px; font-weight:600; padding:0 12px; min-height:44px; }
+.picklist .sort button + button { border-left:1px solid var(--line); }
+.picklist .sort button.sel { background:color-mix(in srgb, var(--busy) 16%, var(--bg)); color:var(--fg); }
+.picklist .none { padding:12px 4px; color:var(--mut); font-size:14px; text-align:left; }
 .toggle { display:flex; align-items:center; gap:10px; margin:0 0 14px; font-size:15px; }
 .toggle input { width:22px; height:22px; }
 .toggle.ext { align-items:flex-start; } .toggle.ext input { flex:none; margin-top:1px; }
@@ -2140,7 +2140,7 @@ function pickList({items, title, sub = () => "", recent = null, search = null, s
     if (!items_.length) return list.replaceChildren(h("div", {class: "none"}, empty));
     const xs = items_.filter(x => key(x).includes(q)).sort(
       order === "recent" && recent ? (a, b) => (recent(b) - recent(a)) || byName(a, b) : byName);
-    if (!xs.length) return list.replaceChildren(h("div", {class: "none"}, "No folder matches your search."));
+    if (!xs.length) return list.replaceChildren(h("div", {class: "none"}, "No match."));
     list.replaceChildren(...xs.map(x => {
       const a = {class: "item" + (x === picked ? " sel" : ""), onclick: () => { picked = x; draw(); onPick(x); }};
       if (ctx) a.ctx = el => ctx(x, el);
@@ -2151,7 +2151,7 @@ function pickList({items, title, sub = () => "", recent = null, search = null, s
   }
   box.oninput = () => { q = box.value.trim().toLowerCase(); draw(); };
   draw();
-  return h("div", {class: "pick"}, items_.length > 1 ? bar : null, list);
+  return h("div", {class: "picklist"}, items_.length > 1 ? bar : null, list);
 }
 
 async function newSession(state = {}) {

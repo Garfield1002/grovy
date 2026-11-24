@@ -5908,7 +5908,7 @@ console.log(JSON.stringify(out));""")
         self.assertEqual(r["alpha"], ["apple", "banana", "cherry"])
         self.assertEqual(r["recentAgain"], ["apple", "cherry", "banana"])
         self.assertEqual(r["filtered"], ["apple", "banana"])          # banana, apple contain "a"; cherry doesn't
-        self.assertEqual(r["noMatch"], "No folder matches your search.")
+        self.assertEqual(r["noMatch"], "No match.")
         self.assertEqual(r["selected"], "cherry")                     # selected: items[2]
         self.assertEqual(r["picked"], ["apple"])                      # first row after clearing the filter (recent sort)
         self.assertEqual(r["sortMarked"], ["sel", ""])
