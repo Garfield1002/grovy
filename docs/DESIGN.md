@@ -658,6 +658,19 @@ the `Issues` part of `Store`; the page side is the built-in extension `extension
   moves it, only from the commit it was checked against. Then the session is stopped and forgotten, and the worktree
   (`git worktree remove`, which refuses if anything changed since) and the branch (once checked to be in the base branch: `git branch -d` would check the branch your checkout has out) deleted.
   Nothing is pushed.
+* **Report** (the built-in extension `extensions/report.js`, for bootstrapping grovy on itself) files an issue in
+  grovy's *own* repo straight from a picture of the screen. `Alt+R`, or a two-finger press-and-hold anywhere, opens a
+  paint overlay *on top of* the current page — a canvas plus a top action bar and a bottom note panel, appended to the
+  body at a very high `z-index`. It is deliberately non-destructive: it never changes the route or closes a sheet, so
+  the page stays live underneath and cancelling (✕ or Esc) drops you back exactly where you were. You paint over the
+  region(s) you dislike (it can span several elements); on filing, the overlay hides itself and samples points along
+  the strokes with `document.elementFromPoint`, collecting the distinct on-screen elements under the paint (tag, id,
+  classes, label/text, bounding rect) — so the user points visually and never sees the DOM. The note, that captured
+  context, the current route/viewport/theme, and grovy's repo and commit become the agent's first message.
+  `POST /api/report` → `Issues.report_grovy_issue`, which resolves grovy's own main checkout (`issues.grovy_repo`,
+  from `core.HERE`, de-worktree'd via `--git-common-dir`) and files it with the ordinary `create_issue` path. On a
+  graft it is refused with a clear message (filing on the trunk's grovy from a graft isn't wired up yet, so it never
+  quietly files on the graft's own copy — the one that isn't merged or deployed).
 
 **New projects.** ⋯ → New project (home screen) makes a project and starts a session in it (`grovylib/newproject.py`,
 the `NewProjects` part of `Store`; the page side is `extensions/projects.js`).

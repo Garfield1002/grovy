@@ -26,7 +26,8 @@ page you open on your phone (or any browser) over your home network or VPN. Noth
 - **Notifications** when a session needs you, finishes or fails.
 - **Desktop too:** a sidebar, right-click menus and keyboard shortcuts on a wide screen.
 - **Yours to change:** plain Python and one HTML file, no dependencies, nothing to build. Pick a theme or restyle it, add buttons
-  and widgets, or ask Claude to change grovy from inside grovy. [make it yours →](docs/customize.md)
+  and widgets, or ask Claude to change grovy from inside grovy — paint over anything you dislike (Alt+R) to fire off a
+  fix. [make it yours →](docs/customize.md)
 
 ## Install
 

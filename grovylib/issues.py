@@ -73,6 +73,18 @@ def worktrees_dir(root):
     return os.path.join(root, ".claude", "worktrees")
 
 
+def grovy_repo():
+    """The main checkout of grovy's own source tree (core.HERE), or None if it isn't a git repository. core.HERE may
+    be a linked worktree (grovy running from one): resolve to the main checkout, which is where issues are filed."""
+    here = core.HERE
+    try:
+        common = git(here, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    except GitError:
+        return None
+    root = os.path.dirname(common) if os.path.basename(common) == ".git" else here
+    return repo_root(root)
+
+
 def slug(text):
     words = re.findall(r"[a-z0-9]+", text.lower())
     out = ""
@@ -326,3 +338,34 @@ class Issues:
                 return 404, "not an issue"
             notes = self._close(name, issue, force=True)
         return 200, {"message": "discarded" + ("; " + "; ".join(notes) if notes else "")}
+
+    def report_grovy_issue(self, note, context="", ask=False):
+        """File an issue in grovy's own repository from the phone's "report" overlay (extensions/report.js): the user
+        painted over the screen and wrote what's wrong. Composes the agent's first message (their note, then the
+        captured on-screen context, with grovy's repo and commit) and creates the issue exactly like create_issue.
+        A graft can't yet file on its trunk, so filing is refused there with a clear message rather than quietly
+        filing on the graft's own copy (which isn't the one that gets merged and deployed)."""
+        from . import remote   # lazy: this module is imported by the hook, so keep its import cheap
+        if not isinstance(note, str) or not note.strip():
+            return 400, "say what you don't like"
+        trunk = remote.trunk_host()
+        if trunk:
+            return 409, (f"this grovy is grafted onto {trunk}: file grovy issues from the trunk itself for now "
+                         "(filing on the trunk from a graft isn't wired up yet)")
+        root = grovy_repo()
+        if not root:
+            return 409, "can't find grovy's own git repository to file the issue against"
+        if root not in self.lifecycle.trusted_projects():
+            return 409, (f"trust the grovy repo first: run `claude` in {root} once and accept its trust prompt, "
+                         "then try again")
+        try:
+            commit = git(root, "rev-parse", "--short", "HEAD").strip()
+        except GitError:
+            commit = "?"
+        body = context.strip() if isinstance(context, str) else ""
+        header = ("Filed from the grovy phone UI: I painted over part of the screen to point at what I mean.\n"
+                  f"grovy: {root} @ {commit}")
+        text = note.strip() + "\n\n---\n" + header + (("\n\n" + body) if body else "")
+        if len(text) > MAX_TEXT:   # the captured context mustn't push it past the issue-text limit
+            text = text[:MAX_TEXT - 1].rstrip() + "…"
+        return self.create_issue(root, text, ask)

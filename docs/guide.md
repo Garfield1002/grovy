@@ -56,6 +56,9 @@ normal question in the terminal is still there.
 - **Issues:** ⋯ → New issue starts Claude on one small fix in a copy of the project of its own (a git worktree, on
   a new branch). When it has committed, ⋯ → Finish issue shows the commits; one tap merges them into your main
   branch and cleans everything up.
+- **Report (for grovy itself):** press **Alt+R**, or hold two fingers on the screen for a moment, to paint over
+  anything in grovy's own UI you don't like, add a line about what's wrong, and file it as an issue in your grovy
+  repo. It paints on top of what you were doing and leaves it untouched, so cancelling puts you right back.
 - **New projects:** ⋯ → New project makes a blank repository or clones one into `~/dev` and starts Claude in it.
   For a clone, you see first which of its files Claude would load (some can run commands) and say whether to trust it.
 - **Git:** ⋯ → Git shows the session's repository as a graph of branches and commits; tap a commit for its files

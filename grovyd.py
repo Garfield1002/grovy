@@ -969,6 +969,8 @@ class Http(http.server.BaseHTTPRequestHandler):
             return _res(*store.discard_project(body.get("path"), body.get("token")), key="message")
         if path == "/api/issues":
             return _res(*store.create_issue(body.get("path"), body.get("text"), body.get("ask")))
+        if path == "/api/report":   # the "report" paint overlay (extensions/report.js): an issue in grovy's own repo
+            return _res(*store.report_grovy_issue(body.get("note"), body.get("context"), body.get("ask")))
         m = re.fullmatch(r"/api/issues/([^/]+)/(finish|discard)", path)
         if m and core.valid_name(m.group(1)):
             if m.group(2) == "finish":

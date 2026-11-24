@@ -3541,6 +3541,47 @@ class TestIssues(StoreCase):
         self.assertEqual(gitc(self.repo, "branch", "--list", "issue-*"), "")
         self.assertEqual(os.listdir(os.path.join(self.repo, ".claude", "worktrees")), [])
 
+    def test_report_files_an_issue_in_grovys_own_repo(self):
+        with mock.patch.object(issues, "grovy_repo", staticmethod(lambda: self.repo)), \
+             mock.patch.object(remote, "trunk_host", staticmethod(lambda: None)):
+            code, res = self.store.report_grovy_issue("the time is shown twice",
+                                                      "Screen: #/s/a\n  - <button.btn.allow> “Merge into main”")
+        self.assertEqual(code, 200, res)
+        name = res["name"]
+        self.assertTrue(name.startswith("issue-the-time-is-shown"), name)
+        self.assertEqual(self.store.issues[name]["root"], self.repo)
+        text = [p["text"] for p in self.store.prompts if p["session"] == name][0]
+        self.assertTrue(text.startswith("the time is shown twice"), text)   # the user's words come first
+        self.assertIn("painted over part of the screen", text)              # then the captured context
+        self.assertIn(self.repo, text)                                      # the grovy repo it files against
+        self.assertIn("<button.btn.allow>", text)                           # the element they pointed at
+
+    def test_report_needs_a_note(self):
+        self.assertEqual(self.store.report_grovy_issue("  ", "ctx")[0], 400)
+        self.assertEqual(self.started, [])
+
+    def test_report_is_refused_on_a_graft(self):
+        with mock.patch.object(issues, "grovy_repo", staticmethod(lambda: self.repo)), \
+             mock.patch.object(remote, "trunk_host", staticmethod(lambda: "bigbox")):
+            code, why = self.store.report_grovy_issue("x", "")
+        self.assertEqual(code, 409)
+        self.assertIn("grafted onto bigbox", why)
+        self.assertEqual(self.started, [])                                  # nothing started locally
+
+    def test_report_needs_the_grovy_repo_to_be_trusted(self):
+        untrusted = os.path.realpath(tempfile.mkdtemp(dir=TMP))
+        gitc(untrusted, "init", "-q", "-b", "main")
+        with open(os.path.join(untrusted, "x"), "w") as f:
+            f.write("a\n")
+        gitc(untrusted, "add", "x")
+        gitc(untrusted, "commit", "-q", "-m", "first")
+        with mock.patch.object(issues, "grovy_repo", staticmethod(lambda: untrusted)), \
+             mock.patch.object(remote, "trunk_host", staticmethod(lambda: None)):
+            code, why = self.store.report_grovy_issue("x", "")
+        self.assertEqual(code, 409)
+        self.assertIn("trust the grovy repo", why)
+        self.assertEqual(self.started, [])
+
     def test_finish_fast_forwards_and_cleans_up(self):
         name, issue = self.start_issue()
         self.settle(name)
