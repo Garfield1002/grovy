@@ -762,6 +762,21 @@ class TestConversations(StoreCase):
         self.assertEqual((c["id"], c["title"], c["first"], c["last"], c["messages"]),
                          (self.ID1, "My build", "Fix the build please", "Done.", 1))
 
+    def test_project_mtime(self):
+        home, folder = tempfile.mkdtemp(dir=TMP), tempfile.mkdtemp(dir=TMP)
+        u = lambda c: {"type": "user", "cwd": folder, "message": {"content": c}}
+        self.write(home, folder, self.ID1, [u("old")])
+        self.write(home, folder, self.ID2, [u("new")])
+        d = os.path.join(home, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(folder)))
+        os.utime(os.path.join(d, self.ID1 + ".jsonl"), (1000, 1000))
+        os.utime(os.path.join(d, self.ID2 + ".jsonl"), (9000, 9000))       # the newest transcript wins
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+            self.assertEqual(projects.project_mtime(folder), 9000)
+            bare = tempfile.mkdtemp(dir=TMP)                                # no transcripts: the folder's own mtime
+            os.utime(bare, (5000, 5000))
+            self.assertEqual(projects.project_mtime(bare), 5000)
+            self.assertEqual(projects.project_mtime("/no/such/folder-xyz"), 0)
+
     def test_resume_rules(self):
         started = []
         live_terminal = {self.ID2}
@@ -3575,7 +3590,9 @@ class TestIssues(StoreCase):
         self.assertEqual(self.store.create_issue(self.repo, "x" * 5000)[0], 413)
         name, issue = self.start_issue()
         self.assertEqual(self.store.create_issue(issue["worktree"], "x")[0], 400)   # a worktree isn't a project
-        self.assertEqual(self.store.issue_projects(), (200, [{"path": self.repo, "base": "main"}]))
+        code, got = self.store.issue_projects()
+        self.assertEqual((code, [(p["path"], p["base"]) for p in got]), (200, [(self.repo, "main")]))
+        self.assertIsInstance(got[0]["recent"], float)                     # for the picker's most-recent sort
 
     def test_failed_start_cleans_up(self):
         def fail(*a):
@@ -5836,6 +5853,75 @@ class TestRichBox(unittest.TestCase):
             ["hi ", {"c": "rt-b", "k": [mk("**"), "b", mk("**")]}, " ", {"c": "rt-c", "k": [mk("`"), "c", mk("`")]}],
             [{"c": "rt-cb", "k": ["```"]}, "\n", {"c": "rt-cb", "k": ["**x**"]}, "\n", {"c": "rt-cb", "k": ["```"]}],
             [{"c": "rt-q", "k": [mk("> "), {"c": "rt-i", "k": [mk("*"), "q", mk("*")]}]}]])
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestPickList(unittest.TestCase):
+    """index.html's pickList() (the reusable searchable/sortable list behind the folder and issue pickers), in node."""
+    HARNESS = r"""
+function h(tag, attrs, ...kids) {
+  const n = {tag, kids: kids.flat(Infinity).filter(k => k != null),
+             replaceChildren(...k) { this.kids = k.flat(Infinity).filter(x => x != null); }};
+  if (attrs) for (const k in attrs) n[k] = attrs[k];
+  return n;
+}
+function findAll(n, p, out = []) { if (n && typeof n === "object") {
+  if (p(n)) out.push(n); for (const k of n.kids || []) findAll(k, p, out); } return out; }
+function find(n, p) { return findAll(n, p)[0] || null; }
+function textOf(n) { return n == null ? "" : typeof n === "string" ? n : (n.kids || []).map(textOf).join(""); }
+"""
+
+    def run_pick(self, body):
+        src = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
+        fn = re.search(r"^function pickList\(\{items.*?^\}", src, re.S | re.M).group(0)
+        out = subprocess.run(["node", "-e", self.HARNESS + fn + body], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    SETUP = """
+const items = [{n: "banana", r: 1}, {n: "apple", r: 3}, {n: "cherry", r: 2}];
+const picked = [];
+const c = pickList({items, title: x => x.n, recent: x => x.r, selected: items[2],
+                    onPick: x => picked.push(x.n)});
+const list = find(c, n => n.class === "folders");
+const box = find(c, n => n.tag === "input");
+const alpha = find(c, n => n.tag === "button" && textOf(n) === "A–Z");
+const rec = find(c, n => n.tag === "button" && textOf(n) === "Recent");
+const titles = () => findAll(list, n => n.tag === "button" && (n.class || "").startsWith("item")).map(textOf);
+const type = s => { box.value = s; box.oninput(); };
+"""
+
+    def test_sorts_filters_and_picks(self):
+        r = self.run_pick(self.SETUP + """
+const out = {};
+out.recentFirst = titles();                                  // default when recent() is given: newest first
+alpha.onclick(); out.alpha = titles();                       // A–Z toggle
+rec.onclick(); out.recentAgain = titles();
+type("a"); out.filtered = titles();                          // search is a substring match, case-insensitive
+type("ZZ"); out.noMatch = textOf(list);
+type(""); out.selected = find(list, n => (n.class || "").includes("sel")) && textOf(find(list, n => (n.class || "").includes("sel")));
+const first = findAll(list, n => n.tag === "button" && (n.class || "").startsWith("item"))[0];
+first.onclick(); out.picked = picked;
+out.sortMarked = [rec.className, alpha.className];           // the active sort is marked after the pick redraw
+console.log(JSON.stringify(out));""")
+        self.assertEqual(r["recentFirst"], ["apple", "cherry", "banana"])
+        self.assertEqual(r["alpha"], ["apple", "banana", "cherry"])
+        self.assertEqual(r["recentAgain"], ["apple", "cherry", "banana"])
+        self.assertEqual(r["filtered"], ["apple", "banana"])          # banana, apple contain "a"; cherry doesn't
+        self.assertEqual(r["noMatch"], "No folder matches your search.")
+        self.assertEqual(r["selected"], "cherry")                     # selected: items[2]
+        self.assertEqual(r["picked"], ["apple"])                      # first row after clearing the filter (recent sort)
+        self.assertEqual(r["sortMarked"], ["sel", ""])
+
+    def test_one_item_hides_the_bar_and_empty_shows_the_message(self):
+        r = self.run_pick("""
+const one = pickList({items: [{n: "solo"}], title: x => x.n, recent: x => 0});
+const none = pickList({items: [], title: x => x.n, empty: "Nothing trusted yet."});
+console.log(JSON.stringify({
+  bar: !!find(one, n => n.class === "pickbar"),               // a 1-item list needs no search/sort bar
+  rows: findAll(one, n => n.tag === "button" && (n.class || "").startsWith("item")).map(textOf),
+  empty: textOf(find(none, n => n.class === "none"))}));""")
+        self.assertEqual(r, {"bar": False, "rows": ["solo"], "empty": "Nothing trusted yet."})
 
 
 def _png_first_pixel(path):

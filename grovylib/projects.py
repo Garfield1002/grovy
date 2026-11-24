@@ -73,6 +73,32 @@ def claude_home():
     return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 
 
+def _project_dir(folder):
+    """Where Claude files `folder`'s transcripts: projects/<path with non-alphanumerics as '-'>."""
+    return os.path.join(claude_home(), "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(folder)))
+
+
+def project_mtime(folder):
+    """A rough 'last worked on' time for a trusted folder, for a 'most recent' sort in the pickers: the
+    newest Claude transcript started there (a stat each, no parsing), else the folder's own mtime, else 0."""
+    import glob
+    best = 0.0
+    try:
+        for p in glob.glob(os.path.join(glob.escape(_project_dir(folder)), "*.jsonl")):
+            try:
+                best = max(best, os.stat(p).st_mtime)
+            except OSError:
+                pass
+    except OSError:
+        pass
+    if not best:
+        try:
+            best = os.path.getmtime(folder)
+        except OSError:
+            pass
+    return best
+
+
 def _text(content, user=False):
     """Plain text of a message: string content, or its text blocks (tool calls/results are skipped)."""
     if isinstance(content, str):
@@ -137,7 +163,7 @@ def conversations(folder, limit=50):
     projects/<folder with non-alphanumerics as '-'>/<id>.jsonl; each one's own cwd is verified too."""
     import glob
     folder = os.path.realpath(folder)
-    d = os.path.join(claude_home(), "projects", re.sub(r"[^A-Za-z0-9]", "-", folder))
+    d = _project_dir(folder)
     out = []
     for p in glob.glob(os.path.join(glob.escape(d), "*.jsonl")):
         if not UUID_RE.match(os.path.basename(p)[:-6]):

@@ -531,8 +531,11 @@ emits no hook, so grovy records the interrupt itself and sets the state to `unkn
 * **Folders.** Pick one from a list (never a typed path) of folders where Claude won't stop at the workspace-trust
   dialog, which would hold back every hook. Verified rule (Claude Code 2.1.325): a plain folder inherits trust from a
   trusted ancestor in `~/.claude.json`. A **git repo is its own boundary**: it needs to have been trusted itself
-  (open it once in a terminal). Optionally tick *Ask before running tools* (`--permission-mode default`); resume
-  remembers it.
+  (open it once in a terminal). The list is the reusable `pickList` (`index.html`, exposed to extensions as
+  `grovy.picker`): a search box filters it and a Recent ⇄ A–Z toggle sorts it, Recent first. "Recent" is a rough
+  "last worked on" time per folder — the newest Claude transcript started there, else the folder's own mtime
+  (`projects.project_mtime`, carried on each entry of `/api/projects`). Optionally tick *Ask before running tools*
+  (`--permission-mode default`); resume remembers it.
 * **Continue a conversation.** Picking a folder also lists Claude's saved conversations for it (from
   `~/.claude/projects/`), newest first, by AI title, size and age. Tapping one shows a preview (first message,
   Claude's last reply), then:
@@ -639,7 +642,9 @@ the `Issues` part of `Store`; the page side is the built-in extension `extension
   has no session of its own falls to the end, still indented.
 * ⋯ → New issue (home screen) lists the trusted projects that are git repositories (a main checkout, not a linked
   worktree), each with its default branch: origin's HEAD if it has one locally, else `main`, else `master`. Always that
-  branch, whatever is checked out: an issue is a fix for the main line. Claude Code's own `--worktree` isn't used: it
+  branch, whatever is checked out: an issue is a fix for the main line. The list is the same `grovy.picker` as New
+  session's folders (search box plus a Recent ⇄ A–Z sort, Recent being each project's `project_mtime`), so a long
+  project list stays usable; it's hidden when there's only one project. Claude Code's own `--worktree` isn't used: it
   branches from `origin`'s copy, which may be behind your local branch.
 * Starting one: the session's name is `issue-` plus the first words of the text (`-2`, `-3`... when taken; also never a
   branch or folder that exists), the branch has the same name, and the worktree is `<repo>/.claude/worktrees/<name>`.

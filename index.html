@@ -227,6 +227,15 @@ header h1, .sess .name, #sheet h2, #side .sh a, .md :is(h1, h2, h3, h4), .wt, .s
 .folders { max-height:38vh; overflow-y:auto; border:1px solid var(--line); border-radius:12px; margin-bottom:12px; }
 .folders .item { padding:10px 12px; min-height:48px; }
 .folders .item.sel { background:color-mix(in srgb, var(--busy) 12%, var(--bg)); font-weight:650; }
+/* pickList: a searchable, sortable one-of list (folders, projects…) */
+.pick { margin:0 0 12px; } .pick > .folders { margin-bottom:0; }
+.pick .pickbar { display:flex; gap:8px; align-items:stretch; margin:0 0 8px; }
+.pick .pickbar .field { margin:0; flex:1; min-width:0; }
+.pick .sort { display:flex; flex:none; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+.pick .sort button { border:0; background:var(--card); color:var(--mut); font:inherit; font-size:14px; font-weight:600; padding:0 12px; min-height:44px; }
+.pick .sort button + button { border-left:1px solid var(--line); }
+.pick .sort button.sel { background:color-mix(in srgb, var(--busy) 16%, var(--bg)); color:var(--fg); }
+.pick .none { padding:12px 4px; color:var(--mut); font-size:14px; text-align:left; }
 .toggle { display:flex; align-items:center; gap:10px; margin:0 0 14px; font-size:15px; }
 .toggle input { width:22px; height:22px; }
 .toggle.ext { align-items:flex-start; } .toggle.ext input { flex:none; margin-top:1px; }
@@ -2104,6 +2113,47 @@ function searchSheet() {
   setTimeout(() => q.focus(), 50);
 }
 
+// A searchable, sortable list for picking one item (folders, projects…). Returns the container node; it owns the
+// search text and sort order, filters and sorts on every keystroke, draws the selection, and calls onPick(item)
+// when one is tapped. Reused by New session's folder list and by extensions/issues.js (as grovy.picker).
+//   items     the array to choose from (an [] shows `empty`; a 1-item list hides the search/sort bar — nothing to do)
+//   title(x)  the main line; sub(x) the dimmed second line (optional). recent(x) a number (bigger = newer): when
+//             given, a Recent ⇄ A–Z toggle appears and Recent is the default. search(x) the text a query matches
+//             against (default: title + " " + sub). selected the item drawn selected to start. onPick(x) the tap
+//             handler. ctx(x, el) optional right-click items for an item. empty/placeholder: the empty-list text / hint.
+function pickList({items, title, sub = () => "", recent = null, search = null, selected = null,
+                   onPick = () => {}, ctx = null, empty = "Nothing here.", placeholder = "Search…"}) {
+  const items_ = [...items], key = x => (search ? search(x) : title(x) + " " + sub(x)).toLowerCase();
+  let picked = selected, q = "", order = recent ? "recent" : "alpha";
+  const box = h("input", {class: "field", type: "search", placeholder, autocapitalize: "off", autocorrect: "off"});
+  const list = h("div", {class: "folders"});
+  const rec = h("button", {onclick: () => { order = "recent"; draw(); }}, "Recent");
+  const alpha = h("button", {onclick: () => { order = "alpha"; draw(); }}, "A–Z");
+  const bar = h("div", {class: "pickbar"}, box, recent ? h("div", {class: "sort"}, rec, alpha) : null);
+  const mark = text => {   // the title with the query run highlighted
+    const i = q ? text.toLowerCase().indexOf(q) : -1;
+    return i < 0 ? [text] : [text.slice(0, i), h("mark", {}, text.slice(i, i + q.length)), text.slice(i + q.length)];
+  };
+  const byName = (a, b) => title(a).localeCompare(title(b));
+  function draw() {
+    if (recent) { rec.className = order === "recent" ? "sel" : ""; alpha.className = order === "alpha" ? "sel" : ""; }
+    if (!items_.length) return list.replaceChildren(h("div", {class: "none"}, empty));
+    const xs = items_.filter(x => key(x).includes(q)).sort(
+      order === "recent" && recent ? (a, b) => (recent(b) - recent(a)) || byName(a, b) : byName);
+    if (!xs.length) return list.replaceChildren(h("div", {class: "none"}, "No folder matches your search."));
+    list.replaceChildren(...xs.map(x => {
+      const a = {class: "item" + (x === picked ? " sel" : ""), onclick: () => { picked = x; draw(); onPick(x); }};
+      if (ctx) a.ctx = el => ctx(x, el);
+      const s = sub(x);
+      return h("button", a, h("div", {style: "min-width:0;flex:1"}, h("div", {}, ...mark(title(x))),
+        s ? h("div", {class: "sub"}, s) : null));
+    }));
+  }
+  box.oninput = () => { q = box.value.trim().toLowerCase(); draw(); };
+  draw();
+  return h("div", {class: "pick"}, items_.length > 1 ? bar : null, list);
+}
+
 async function newSession(state = {}) {
   let folders = [], taken = new Set(), machines = [], host = "";
   const machine = state.machine || null;   // null: this machine; else a peer's name (its sessions are "pc:NAME")
@@ -2112,7 +2162,8 @@ async function newSession(state = {}) {
     const all = await api("/api/sessions");
     machines = all.peers || []; host = all.host || "this machine";
     taken = new Set(all.sessions.filter(s => machineOf(s.name) === machine).map(s => localOf(s.name)));
-    folders = (await api("/api/projects" + (on ? "?" + on : ""))).projects;
+    folders = (await api("/api/projects" + (on ? "?" + on : ""))).projects
+      .map(f => typeof f === "string" ? {path: f, recent: 0} : f);   // an older peer sends bare paths
   } catch (e) {
     if (!machine) return say(e.message);
     folders = []; state = {...state, err: e.message};
@@ -2123,8 +2174,6 @@ async function newSession(state = {}) {
     let n = b, i = 2; while (taken.has(n)) n = b + "-" + i++; return n; };
   const name = h("input", {class: "field", placeholder: "name (letters, digits, - _)", autocapitalize: "off", autocorrect: "off"});
   name.value = state.name || ""; if (state.auto !== false) name.dataset.auto = "1";
-  const filter = h("input", {class: "field", type: "search", placeholder: "Filter folders…"});
-  const list = h("div", {class: "folders"});
   const convs = h("div", {});
   const ask = h("input", {type: "checkbox"}); ask.checked = !!state.ask;
   const go_ = h("button", {class: "btn allow", disabled: ""}, "Start fresh");
@@ -2141,29 +2190,30 @@ async function newSession(state = {}) {
           h("div", {class: "sub"}, `${c.messages} message${c.messages === 1 ? "" : "s"} · ${ago(c.mtime) || "now"}`,
             c.open_in ? " · open " + (c.open_in === "terminal" ? "in a terminal" : "in " + c.open_in.slice("grovy:".length)) : "")))))] : []));
   };
-  const draw = () => list.replaceChildren(...(!folders.length ? [h("div", {class: "sys", style: "padding:12px 4px;text-align:left"},
-      "No trusted folders yet. On the computer, run claude once in a project folder and accept its trust prompt; "
-      + "the folder then appears here.")] : []), ...folders.filter(f => f.toLowerCase().includes(filter.value.toLowerCase())).map(f =>
-    h("button", {class: "item" + (f === picked ? " sel" : ""), ctx: el => [press(el, "Start a session here"),
-        {label: "Copy path", sub: f, run: () => copyQuiet(f)}], onclick: () => {
-      picked = f; if (!name.value || name.dataset.auto) { name.value = unique(base(f)); name.dataset.auto = "1"; }
-      draw(); valid(); loadConvs(); }},
-      h("div", {}, base(f), h("div", {class: "sub"}, f)))));
+  const folderPick = pickList({
+    items: folders, title: f => base(f.path), sub: f => f.path, recent: f => f.recent,
+    selected: folders.find(f => f.path === picked) || null, placeholder: "Filter folders…",
+    empty: "No trusted folders yet. On the computer, run claude once in a project folder and accept its trust "
+      + "prompt; the folder then appears here.",
+    ctx: (f, el) => [press(el, "Start a session here"), {label: "Copy path", sub: f.path, run: () => copyQuiet(f.path)}],
+    onPick: f => {
+      picked = f.path; if (!name.value || name.dataset.auto) { name.value = unique(base(f.path)); name.dataset.auto = "1"; }
+      valid(); loadConvs();
+    }});
   name.oninput = () => { delete name.dataset.auto; valid(); };
-  filter.oninput = draw;
   go_.onclick = async () => {
     go_.disabled = true; note.textContent = "Starting Claude…";
     try { await api("/api/sessions", {name: full(name.value), path: picked, ask: ask.checked}); closeSheet(); go("#/s/" + full(name.value)); }
     catch (e) { note.className = "errline"; note.textContent = e.message; valid(); }
   };
-  draw(); valid(); if (picked) loadConvs();
+  valid(); if (picked) loadConvs();
   const pick = m => { if (m !== machine) newSession({ask: ask.checked, machine: m}); };
   const where = machines.length ? [h("div", {class: "lbl"}, "Machine"), h("div", {class: "machines"},
     h("button", {class: "btn" + (machine ? "" : " sel"), onclick: () => pick(null)}, host),
     machines.map(m => h("button", {class: "btn" + (m.name === machine ? " sel" : ""), onclick: () => pick(m.name)},
       m.name + (m.state === "online" ? "" : " (offline)"))))] : [];
   openSheet(h("h2", {}, "New session"), ...where, state.err ? h("div", {class: "errline"}, state.err) : null,
-    h("div", {class: "lbl"}, "Folder (ones Claude already trusts)"), filter, list, convs,
+    h("div", {class: "lbl"}, "Folder (ones Claude already trusts)"), folderPick, convs,
     h("div", {class: "lbl"}, "Name"), name,
     h("label", {class: "toggle"}, ask, "Ask before running tools"), note, h("div", {class: "row"}, go_));
 
@@ -2643,6 +2693,13 @@ window.grovy = Object.freeze({
   ask: (msg, ok, opts) => ask(msg, ok, opts),   // -> Promise<boolean>
   say: msg => say(msg),
   sheet: (...kids) => openSheet(...kids), closeSheet,
+  // a searchable, sortable list for picking one item; returns the node to drop in a sheet (see pickList above for opts)
+  picker(opts) {
+    if (!opts || !Array.isArray(opts.items)) throw new Error("grovy.picker: opts.items must be an array");
+    fnArg(opts.title, "grovy.picker opts.title");
+    for (const k of ["sub", "recent", "search", "onPick", "ctx"]) if (opts[k] != null) fnArg(opts[k], "grovy.picker opts." + k);
+    return pickList(opts);
+  },
   css(text) {   // styles of your own: after grovy's, before the user's custom.css (which must keep the last word)
     const el = h("style", {}, String(text)), user = $("custom-css");
     if (user) user.before(el); else document.head.append(el);

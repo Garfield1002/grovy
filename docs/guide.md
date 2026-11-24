@@ -10,7 +10,8 @@ away: `grovy attach NAME` puts you in the real session (detach with Ctrl-b d).
 
 - **The list:** every session with live status (working, idle, needs you), context used, and the last activity.
 - **Start, resume, rename, stop:** ＋ starts Claude in any trusted folder, or continues or forks a past conversation
-  there. ⋯ on a session renames or stops it; an ended session can be resumed later.
+  there. The folder list has a search box and a Recent ⇄ A–Z sort, so it stays quick with many projects. ⋯ on a
+  session renames or stops it; an ended session can be resumed later.
 - **Background work:** subagents and commands Claude left running show as "idle · 2 running"; tap the strip above
   the message box to see each one, how long it has run and what it is doing.
 - **Updating a session:** after `grovy update`, ⋯ → Update session gives a running session the newest grovy
@@ -55,8 +56,8 @@ normal question in the terminal is still there.
 ## Projects and git
 
 - **Issues:** ⋯ → New issue starts Claude on one small fix in a copy of the project of its own (a git worktree, on
-  a new branch). When it has committed, ⋯ → Finish issue shows the commits; one tap merges them into your main
-  branch and cleans everything up.
+  a new branch). Pick the project from the same searchable, sortable list as ＋, then say what to fix. When it has
+  committed, ⋯ → Finish issue shows the commits; one tap merges them into your main branch and cleans everything up.
 - **Report (for grovy itself):** press **Alt+R**, or hold two fingers on the screen for a moment, to paint over
   anything in grovy's own UI you don't like, add a line about what's wrong, and file it as an issue in your grovy
   repo. It paints on top of what you were doing and leaves it untouched, so cancelling puts you right back.

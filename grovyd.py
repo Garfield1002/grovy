@@ -27,7 +27,7 @@ from collections import deque
 from html import escape as html_escape
 from urllib.parse import urlsplit, parse_qs, quote, unquote
 
-from grovylib import claude, client, commands, core, newproject, notify, oom, pages, peers, plugins, terminal, tls, tmuxctl
+from grovylib import claude, client, commands, core, newproject, notify, oom, pages, peers, plugins, projects, terminal, tls, tmuxctl
 from grovylib.store import Store
 
 
@@ -715,7 +715,9 @@ class Http(http.server.BaseHTTPRequestHandler):
         if path == "/api/events":
             return self._sse()
         if path == "/api/projects":
-            return self._send(200, {"projects": store.lifecycle.trusted_projects()})
+            # each folder with a rough "last worked on" time, so the picker can offer a most-recent sort
+            return self._send(200, {"projects": [{"path": p, "recent": projects.project_mtime(p)}
+                                                 for p in store.lifecycle.trusted_projects()]})
         if path == "/api/projects/new":   # where ⋯ → New project makes them
             return self._send(200, {"dir": newproject.projects_dir()})
         if path == "/api/issues/projects":

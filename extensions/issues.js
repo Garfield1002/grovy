@@ -33,10 +33,9 @@ grovy.extension("issues", grovy => {
     const start = h("button", {class: "btn allow", disabled: ""}, "Start");
     let busy = false;   // one issue per tap, even if the text or project changes while it starts
     const valid = () => { start.disabled = busy || !(picked && text.value.trim()); };
-    const list = h("div", {class: "folders", style: "margin-bottom:12px"});
-    const draw = () => list.replaceChildren(...projects.map(p =>
-      h("button", {class: "item" + (p === picked ? " sel" : ""), onclick: () => { picked = p; draw(); valid(); }},
-        h("div", {}, base(p.path), h("div", {class: "sub"}, `from ${p.base} · ${p.path}`)))));
+    const list = grovy.picker({
+      items: projects, title: p => base(p.path), sub: p => `from ${p.base} · ${p.path}`, recent: p => p.recent,
+      selected: picked, placeholder: "Search projects…", onPick: p => { picked = p; valid(); }});
     text.oninput = valid;
     start.onclick = async () => {
       busy = true; valid(); note.className = "note"; note.textContent = "Making the worktree, starting Claude…";
@@ -52,7 +51,7 @@ grovy.extension("issues", grovy => {
         else { note.className = "errline"; note.textContent = e.message; }
       } finally { busy = false; valid(); }
     };
-    draw(); valid();
+    valid();
     grovy.sheet(h("h2", {}, "New issue"),
       h("p", {class: "iss-meta", style: "margin-top:0"}, "A branch in a worktree of its own, a session for it. When " +
         "Claude has committed the fix, ⋯ → Finish issue merges it and cleans up."),

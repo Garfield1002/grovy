@@ -12,7 +12,7 @@ import os
 import re
 import subprocess
 
-from . import core, sessions, states
+from . import core, projects, sessions, states
 
 GIT_TIMEOUT = 60
 MAX_TEXT = 4000
@@ -218,7 +218,7 @@ class Issues:
         for p in self.lifecycle.trusted_projects():
             if repo_root(p):
                 try:
-                    out.append({"path": p, "base": default_branch(p)})
+                    out.append({"path": p, "base": default_branch(p), "recent": projects.project_mtime(p)})
                 except GitError:
                     pass
         return 200, out

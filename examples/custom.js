@@ -10,6 +10,11 @@
      grovy.api(path, body?)             call grovy's API (GET, or POST with a JSON body), plugins' routes included
      grovy.ask(msg, ok) / grovy.say(msg)    a yes/no dialog (-> Promise<boolean>) / a message
      grovy.sheet(...nodes), grovy.closeSheet()   open your own dialog
+     grovy.picker({items, title, …})    a searchable, sortable list for picking one item, to drop in a sheet;
+                                        returns the node. title(x) is the main line, sub(x) the dimmed one (both
+                                        strings); recent(x) a number (bigger = newer) adds a Recent ⇄ A–Z toggle
+                                        (Recent default); onPick(x) is the tap handler; selected starts one picked;
+                                        a 1-item list hides the search bar. (This is grovy's own folder/issue picker.)
      grovy.css(text)                    add styles of your own
      grovy.slot("composer")             an element above the message box (below the reply buttons) to add things to
      grovy.session, grovy.state         the open session's name (null on the home screen) / a copy of its state
