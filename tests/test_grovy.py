@@ -5700,6 +5700,31 @@ console.log(JSON.stringify(box.childNodes.map(x => x.n)));""")
 
 
 @unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestInlineMarkdown(unittest.TestCase):
+    """index.html's inline(), run in node with h() making plain [tag, ...children] lists."""
+    def inline(self, *texts):
+        src = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
+        fn = re.search(r"^function inline\(text\) \{.*?^\}", src, re.S | re.M).group(0)
+        js = ("const h = (t, a, ...k) => [t, ...k.flat()]; const math = (x, d, s) => s;\n" + fn +
+              f"\nconsole.log(JSON.stringify({json.dumps(texts)}.map(inline)));")
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_italic_holds_bold_and_ends_at_its_first_marker(self):
+        """The user's "*test **test2** bob*" showed as an italic "test **test2" and stray asterisks; "*x* and *y*"
+        was one italic run from x to y."""
+        self.assertEqual(self.inline("*test **test2** bob*", "*x* and *y*", "_x_ and _y_", "snake_case_name",
+                                     "**b** *i*", "`*no*`"), [
+            [["em", "test ", ["strong", "test2"], " bob"]],
+            [["em", "x"], " and ", ["em", "y"]],
+            [["em", "x"], " and ", ["em", "y"]],
+            ["snake_case_name"],
+            [["strong", "b"], " ", ["em", "i"]],
+            [["code", "*no*"]]])
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
 class TestLinksExtension(unittest.TestCase):
     """extensions/links.js, run in node on a minimal DOM: what a reply's links become."""
     HARNESS = r"""

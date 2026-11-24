@@ -615,12 +615,13 @@ async function api(path, body) {
 // ---------------------------------------------------------------- markdown (subset, DOM-built, no HTML)
 function inline(text) {
   // One left-to-right scan; a code span wins at its position and nothing inside it is parsed,
-  // while bold/italic may contain code spans (handled by recursion).
+  // while bold/italic may contain code spans (handled by recursion). Italic takes a **bold** inside it whole
+  // ("*a **b** c*"), and ends at its first closing marker ("*x* and *y*" is two).
   const out = [];
   // Math ($…$, \(…\), and $$…$$ or \[…\] for display) comes last, so it only wins where it starts first: a dollar
   // amount is no math, since a closing $ follows no space and comes before no letter, digit, ( or { ("$5 and $10",
   // "$PATH:$HOME", "$(pwd)/$(ls)").
-  const re = /(`+)([^`]|[^`].*?[^`])\1(?!`)|\*\*(.+?)\*\*|__(.+?)__|\*([^\s*](?:.*?[^\s*])?)\*|(?<![\w])_([^\s_](?:.*?[^\s_])?)_(?![\w])|~~(.+?)~~|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>()`]*[^\s<>().,;:!?'"*_`])|\$\$(.+?)\$\$|\\\[(.+?)\\\]|\\\((.+?)\\\)|(?<![\w$\\])\$(?=[^\s$])((?:\\.|[^$\\])+?)(?<!\s)\$(?![\w$({])/g;
+  const re = /(`+)([^`]|[^`].*?[^`])\1(?!`)|\*\*(.+?)\*\*|__(.+?)__|\*(?![\s*])((?:\*\*(?!\s).+?\*\*|[^*])+?)(?<!\s)\*(?!\*)|(?<![\w])_(?![\s_])((?:__(?!\s).+?__|[^_])+?)(?<!\s)_(?![\w])|~~(.+?)~~|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>()`]*[^\s<>().,;:!?'"*_`])|\$\$(.+?)\$\$|\\\[(.+?)\\\]|\\\((.+?)\\\)|(?<![\w$\\])\$(?=[^\s$])((?:\\.|[^$\\])+?)(?<!\s)\$(?![\w$({])/g;
   let last = 0, m;
   while ((m = re.exec(text))) {
     if (m.index > last) out.push(text.slice(last, m.index));
