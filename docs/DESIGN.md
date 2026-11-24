@@ -479,7 +479,8 @@ Longer prompts take the literal bracketed-paste path, with control characters st
   ~100ms *after* the `Stop` hook, so it's dropped with the ended `tx`. That's harmless, since `Stop` carries it. `detail`/`history` limits don't count steps, and `HISTORY` is 600 to make room.
   UI: steps belong to the next `Stop` (or `StopFailure`), else to the live turn. The header's ☰ button cycles the
   default output-detail level (`localStorage` `grovy-steps`, per device): `none` (answers only, the default),
-  `text` (Claude's text steps but not the tool-call steps) or `all` (both). The legacy value `"1"` reads as `all`.
+  `text` (Claude's text steps but not the tool-call steps) or `all` (both). Its icon is a stack of one, two or three
+  lines for the level (the colour deepening too), since the header has no room for a label. The legacy `"1"` is `all`.
   "Worked for …" overrides the level for one turn — fully open (`all`) or closed (`none`) — until the next view
   change or toggle. Trailing text steps that the final answer contains are hidden, as repeats. Widgets aren't drawn
   in steps. When the level is `none`, the typing indicator shows the first line of the latest text step.

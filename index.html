@@ -481,7 +481,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   <span id="live" title="live updates disconnected">offline</span>
   <button id="steps" class="hbtn hidden" aria-pressed="false" aria-label="Output detail (tap to change)"
     title="Output detail (tap to change)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
-    stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg></button>
+    stroke-width="2" stroke-linecap="round"><path id="stepsicon" d="M4 12h16"/></svg></button>
   <button id="menu" class="hbtn hidden" aria-label="Menu">⋯</button>
 </header>
 <nav id="side" aria-label="Sessions"><div class="sh"><a href="#/" aria-label="All sessions and pages"><span class="logo" aria-hidden="true"></span>grovy</a>
@@ -1336,6 +1336,9 @@ let older = [], noMore = false, firstId = 0;
 // or closes it, overriding the default for that turn. A turn's last text step repeats its answer, so it's hidden.
 const LEVELS = ["none", "text", "all"];
 const LVL_LABEL = {none: "answers only", text: "Claude's words, not tool calls", all: "words and tool calls"};
+// Icon: a stack of lines that grows with the level (one for "none", two for "text", three for "all"), so the three
+// states read apart with no room for a label. The colour treatment (see CSS) deepens with the level too.
+const LVL_ICON = {none: "M4 12h16", text: "M4 9h16M4 15h12", all: "M4 6h16M4 12h12M4 18h9"};
 let level = (() => { try { const v = localStorage.getItem("grovy-steps"); return v === "1" ? "all" : LEVELS.includes(v) ? v : "none"; } catch (e) { return "none"; } })();
 let turns = [];                // [{key, steps: [{n, d}], final, stop}], from the last render
 const turnOpen = new Map();    // turn key -> "none"/"all", overriding the default level for that turn
@@ -1344,6 +1347,7 @@ const visible = (d, lvl) => lvl === "all" || (lvl === "text" && d.kind === "text
 function showSteps() {
   const sb = $("steps");
   sb.dataset.level = level;
+  $("stepsicon").setAttribute("d", LVL_ICON[level]);
   sb.setAttribute("aria-pressed", String(level !== "none"));
   const lbl = "Output detail: " + LVL_LABEL[level] + " (tap to change)";
   sb.setAttribute("aria-label", lbl); sb.setAttribute("title", lbl);
