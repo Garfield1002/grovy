@@ -685,9 +685,13 @@ the `Issues` part of `Store`; the page side is the built-in extension `extension
   (`git worktree remove`, which refuses if anything changed since) and the branch (once checked to be in the base branch: `git branch -d` would check the branch your checkout has out) deleted.
   Nothing is pushed.
 * **Report** (the built-in extension `extensions/report.js`, for bootstrapping grovy on itself) files an issue in
-  grovy's *own* repo straight from a picture of the screen. `Alt+R`, or a two-finger press-and-hold anywhere, opens a
+  grovy's *own* repo straight from a picture of the screen. `Alt+R`, or a two-finger press-and-hold anywhere (~0.55s; a
+  finger moving over 12px, lifting, or the browser cancelling the touch drops it: fingers always jitter a little), opens a
   paint overlay *on top of* the current page — a canvas plus a top action bar and a bottom note panel, appended to the
-  body at a very high `z-index`. It is deliberately non-destructive: it never changes the route or closes a sheet, so
+  body at a very high `z-index`. While it is open the page is shrunk into the space between the bars (each other
+  child of `<body>` gets the same translate+scale about the viewport's corner, so fixed sheets shrink too; refitted when
+  the window or a bar resizes); strokes are kept in page coordinates, and the page is unshrunk while sampling, so the
+  elements and rects the agent gets are the real ones. It is deliberately non-destructive: it never changes the route or closes a sheet, so
   the page stays live underneath and cancelling (✕ or Esc) drops you back exactly where you were. You paint over the
   region(s) you dislike (it can span several elements); on filing, the overlay hides itself and samples points along
   the strokes with `document.elementFromPoint`, collecting the distinct on-screen elements under the paint (tag, id,

@@ -6319,3 +6319,42 @@ await push();""")
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestReportGesture(unittest.TestCase):
+    """extensions/report.js's two-finger hold, run in node with fake touch events and a fake clock."""
+    HARNESS = r"""
+const L = {}, timers = []; let opened = 0;
+globalThis.addEventListener = (t, f) => (L[t] = L[t] || []).push(f);
+globalThis.removeEventListener = () => {};
+globalThis.setTimeout = (f, ms) => { timers.push(f); return timers.length; };
+globalThis.clearTimeout = id => { if (id) timers[id - 1] = null; };
+const tick = () => { const ts = timers.splice(0); ts.forEach(f => f && f()); };
+const fire = (t, pts) => (L[t] || []).forEach(f => f({touches: pts.map(([x, y]) => ({clientX: x, clientY: y}))}));
+const grovy = {h: () => ({}), css: () => {}, key: () => {}, extension: (name, f) => f(grovy)};
+"""
+
+    def run_gesture(self, body):
+        src = open(os.path.join(ROOT, "extensions", "report.js"), encoding="utf-8").read()
+        # start() would build the overlay; count the calls instead
+        src = src.replace("  function start() {", "  function start() { opened++; return;", 1)
+        out = subprocess.run(["node", "-e", self.HARNESS + src + body], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return int(out.stdout)
+
+    def test_hold_survives_finger_jitter(self):
+        """Holding two fingers never opened Report on a phone: the fingers' pixel of jitter fired touchmove, which
+        cancelled the hold."""
+        self.assertEqual(self.run_gesture("""
+fire("touchstart", [[100, 100]]); fire("touchstart", [[100, 100], [200, 100]]);
+fire("touchmove", [[101, 100], [200, 102]]); fire("touchmove", [[102, 101], [199, 103]]);
+tick(); console.log(opened);"""), 1)
+
+    def test_pinch_or_lift_cancels(self):
+        self.assertEqual(self.run_gesture("""
+fire("touchstart", [[100, 100], [200, 100]]); fire("touchmove", [[80, 100], [220, 100]]); tick();   // a pinch
+fire("touchstart", [[100, 100], [200, 100]]); fire("touchend", [[100, 100]]); tick();               // one finger up
+fire("touchstart", [[100, 100], [200, 100]]); fire("touchcancel", []); tick();                     // browser took it
+fire("touchstart", [[100, 100]]); tick();                                                           // one finger
+console.log(opened);"""), 0)
