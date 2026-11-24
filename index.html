@@ -69,7 +69,7 @@ main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px
 .sess .top { display:flex; gap:8px; align-items:center; }   /* pills stay centred on the name, whatever its font */
 .sess .name { font-weight:650; font-size:17px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .sess .when { font-size:13px; color:var(--mut); flex:none; }
-.sess .pin { font-size:12px; flex:none; opacity:.85; }
+.sess .pin { flex:none; color:var(--mut); opacity:.8; }
 .sess .sub { font-size:13px; color:var(--mut); }
 .sess .prev { font-size:15px; margin-top:2px; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2;
   -webkit-box-orient:vertical; overflow-wrap:anywhere; }
@@ -850,7 +850,10 @@ function sessCard(s, nested) {
     h("span", {class: dotClass(s)}),
     h("div", {class: "body"},
       h("div", {class: "top"}, h("span", {class: "name"}, ...nameNode(s.name)),
-        isSessionPinned(s.name) ? h("span", {class: "pin", title: "Pinned"}, "📌") : null,
+        isSessionPinned(s.name) ? sv("svg", {class: "pin", viewBox: "0 0 24 24", width: 13, height: 13, fill: "none",
+          stroke: "currentColor", "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round", role: "img", "aria-label": "Pinned"},
+          sv("title", {}, "Pinned"), sv("path", {d: "M12 17v5"}),
+          sv("path", {d: "M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"})) : null,
         s.pending_permissions ? h("span", {class: "badge"}, s.pending_permissions + " waiting") : null,
         h("span", {class: "when"}, ago(s.last_event))),
       h("div", {class: "sub"}, base(s.cwd), " · ", LABEL[s.state] || s.state,

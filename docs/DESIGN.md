@@ -700,7 +700,7 @@ the `Issues` part of `Store`; the page side is the built-in extension `extension
   `root` each issue's summary now carries). Several issues of one project stack under it; an issue whose root project
   has no session of its own falls to the end, still indented.
 * **Pinning a session** (⋯ → *Pin session*, *Unpin session* once pinned) floats it to the top of the list, marked
-  with a 📌. A project and its indented issues move as one block keeping their order, so pinning any session in a block
+  with a small pin glyph (a muted stroked icon, in keeping with the other header icons rather than a colour emoji). A project and its indented issues move as one block keeping their order, so pinning any session in a block
   raises the whole block (pin a nested issue and its project comes up with it). Pins are a per-device view preference,
   kept by name in `localStorage` (`grovy-pins:sessions`); a name no longer in the list is ignored, *Remove from list*
   drops it, and *Rename* carries it to the new name. Nothing server-side changes, so pins differ between devices.
