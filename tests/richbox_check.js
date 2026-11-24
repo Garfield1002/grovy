@@ -60,8 +60,23 @@ document.addEventListener("DOMContentLoaded",()=>{
  ok("undo to page-set value", el.value==="/cmd ", JSON.stringify(el.value));
  el.value=("line\n").repeat(40); el.style.maxHeight="120px"; el.focus(); el.setSelectionRange(el.value.length,el.value.length); el.scrollTop=0;
  for(let i=0;i<3;i++) el.dispatchEvent(new InputEvent("beforeinput",{inputType:"insertParagraph",cancelable:true,bubbles:true}));
- ok("enter reveals caret", el.scrollTop+el.clientHeight>=el.scrollHeight-30, el.scrollTop+"/"+el.scrollHeight);
+ ok("enter reveals caret", el.scrollTop+el.clientHeight>=el.scrollHeight-2, el.scrollTop+"/"+el.scrollHeight);
  el.style.maxHeight="";
+ // second review
+ const divs=(...ls)=>ls.map(l=>{const d=document.createElement("div"); if(l==="") d.append(document.createElement("br")); else d.textContent=l; return d;});
+ el.replaceChildren(...divs("a","","b")); ok("blank line between divs", el.value==="a\n\nb", JSON.stringify(el.value));
+ el.replaceChildren(...divs("","x")); ok("leading blank div", el.value==="\nx", JSON.stringify(el.value));
+ el.replaceChildren(document.createTextNode("a"), ...divs("","b")); ok("text then divs", el.value==="a\n\nb", JSON.stringify(el.value));
+ const d0=divs("a")[0]; el.replaceChildren(d0, document.createTextNode("b")); ok("text after a div", el.value==="a\nb", JSON.stringify(el.value));
+ el.value="x"; el.focus(); el.dispatchEvent(new CompositionEvent("compositionstart",{bubbles:true})); el.value="";
+ document.execCommand("insertText",false,"**b**"); ok("composing reset by value", !!el.querySelector(".rt-b"), el.innerHTML);
+ el.value=("line\n").repeat(40)+"end"; el.style.maxHeight="120px"; el.focus(); el.setSelectionRange(0,0); el.scrollTop=0;
+ document.execCommand("insertText",false,"Q");
+ el.dispatchEvent(new KeyboardEvent("keydown",{key:"z",ctrlKey:true,bubbles:true,cancelable:true}));
+ ok("undo caret where the change was", el.value.startsWith("line") && el.selectionStart===0 && el.scrollTop<30, el.selectionStart+" "+el.scrollTop);
+ el.style.maxHeight="";
+ const pu=new Event("paste",{cancelable:true,bubbles:true}); Object.defineProperty(pu,"clipboardData",{value:{getData:t=>t==="text/uri-list"?"# c\r\nhttps://a.b/\r\n":""}});
+ el.value=""; el.focus(); el.dispatchEvent(pu); ok("uri-list without comments", el.value==="https://a.b/", JSON.stringify(el.value));
  el.placeholder="Steer Claude…"; ok("placeholder prop", el.dataset.placeholder==="Steer Claude…");
  const bad=R.filter(r=>!r.startsWith("PASS"));
  const v=document.createElement("pre"); v.id="verdict";

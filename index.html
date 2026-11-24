@@ -1454,8 +1454,12 @@ function richBox(el) {
   // A <br> that ends the box or a line a browser added (<div>…<br></div>) is its padding, there so an empty last line
   // shows: no newline of the user's (ours, after a real last newline, is marked data-end).
   // With PT ({node, off, at: -1}, a DOM point), also where that point falls in the text (pt.at): one walk, no clone.
+  // A line a browser added its way (a <div> or <p>, even an empty one) starts on a line of its own after anything
+  // before it, and what follows it does too.
+  const BLOCK = /^(DIV|P)$/;
   const textOf = (root, pt) => {
-    let out = "";
+    let out = "", seen = false, afterBlock = false;
+    const line = () => { if (afterBlock) { out += "\n"; afterBlock = false; } seen = true; };
     const walk = (n, top) => {
       const all = [...n.childNodes];
       let last = all.length - 1;
@@ -1463,13 +1467,20 @@ function richBox(el) {
       all.forEach((c, i) => {
         if (pt && pt.at < 0 && pt.node === n && pt.off === i) pt.at = out.length;
         if (c.nodeType === 3) {
+          if (c.data) line();
           if (pt && pt.at < 0 && pt.node === c) pt.at = out.length + Math.min(pt.off, c.data.length);
           out += c.data;
-        } else if (c.nodeName === "BR")
-          out += c.hasAttribute("data-end") || (i === last && (top || /^(DIV|P)$/.test(n.nodeName))) ? "" : "\n";
-        else if (c.nodeType === 1) {
-          if (/^(DIV|P)$/.test(c.nodeName) && out && !out.endsWith("\n")) out += "\n";   // a line a browser added its way
+        } else if (c.nodeType === 1 && BLOCK.test(c.nodeName)) {
+          if (seen) out += "\n";
+          seen = true; afterBlock = false;
           walk(c, false);
+          afterBlock = true;
+        } else if (c.nodeType === 1 && c.nodeName !== "BR" && c.nodeName !== "IMG") walk(c, false);
+        else {   // a <br>, or something we don't look into: a point on it is just before it
+          if (pt && pt.at < 0 && pt.node === c) pt.at = out.length;
+          if (c.nodeName === "BR" && !c.hasAttribute("data-end") && !(i === last && (top || BLOCK.test(n.nodeName)))) {
+            line(); out += "\n";
+          }
         }
       });
       if (pt && pt.at < 0 && pt.node === n && pt.off >= all.length) pt.at = out.length;
@@ -1530,7 +1541,8 @@ function richBox(el) {
     const s = getSelection();
     if (!s || !s.rangeCount) return;
     const r = s.getRangeAt(0).getBoundingClientRect(), b = el.getBoundingClientRect();
-    if (!r.height) { if (sel()[0] >= read().length) el.scrollTop = el.scrollHeight; return; }
+    if (sel()[0] >= read().length) { el.scrollTop = el.scrollHeight; return; }   // the end (maybe a new empty line)
+    if (!r.height) return;
     const bottom = b.bottom - parseFloat(getComputedStyle(el).paddingBottom || 0);
     if (r.bottom > bottom) el.scrollTop += r.bottom - bottom + 4;
     else if (r.top < b.top) el.scrollTop -= b.top - r.top + 4;
@@ -1555,10 +1567,15 @@ function richBox(el) {
     if (keep) select(keep[0], keep[1]);
   };
   // undo: snapshots of {text, caret}; typing within a second is one step
+  // (each step's caret is where its change began, so undoing goes back there, not to a stale place)
   let undo = [], redo = [], cur = {v: "", s: 0}, lastPush = 0;
   const record = (v, s, merge) => {
     if (v === cur.v) { cur.s = s; return; }
-    if (!(merge && Date.now() - lastPush < 1000)) { undo.push(cur); if (undo.length > 200) undo.shift(); }
+    if (!(merge && Date.now() - lastPush < 1000)) {
+      let p = 0;   // where this change begins: the end of what old and new text share
+      while (p < v.length && p < cur.v.length && v[p] === cur.v[p]) p++;
+      undo.push({v: cur.v, s: p}); if (undo.length > 200) undo.shift();
+    }
     lastPush = Date.now(); redo = []; cur = {v, s};
   };
   const fire = () => el.dispatchEvent(new Event("input", {bubbles: true}));
@@ -1567,7 +1584,7 @@ function richBox(el) {
     record(nv, a + text.length, false);
     render(nv, true); select(a + text.length); fire(); reveal();
   };
-  const restore = st => { render(st.v, true); if (document.activeElement === el) { select(st.s); reveal(); } lastPush = 0; fire(); };
+  const restore = st => { composing = false; render(st.v, true); if (document.activeElement === el) { select(st.s); reveal(); } lastPush = 0; fire(); };
   const step = back => {
     const from = back ? undo : redo, to = back ? redo : undo;
     if (from.length) { to.push(cur); cur = from.pop(); restore(cur); }
@@ -1586,13 +1603,16 @@ function richBox(el) {
     if (k === "z" || (k === "y" && !e.shiftKey)) { e.preventDefault(); step(k === "z" && !e.shiftKey); }
   });
   el.addEventListener("paste", e => {
-    const d = e.clipboardData, t = d && (d.getData("text/plain") || d.getData("text/uri-list"));
+    const d = e.clipboardData,   // a uri-list's lines starting with # are comments
+      t = d && (d.getData("text/plain") || d.getData("text/uri-list").split(/\r?\n/).filter(l => l && !l.startsWith("#")).join("\n"));
     e.preventDefault();
     if (t) replaceSel(t.replace(/\r\n?/g, "\n"));
   });
   let composing = false;   // some keyboards send input events without isComposing in the middle of a word
   el.addEventListener("compositionstart", () => { composing = true; });
-  el.addEventListener("blur", () => { if (composing) { composing = false; render(read()); } });   // no compositionend came
+  el.addEventListener("blur", () => {   // no compositionend came
+    if (composing) { composing = false; const v = read(); render(v); record(v, v.length, false); }
+  });
   el.addEventListener("input", e => {
     if (e.isComposing || composing) return;   // a phone keyboard is building a word: leave its text alone until done
     const v = read();
@@ -1608,7 +1628,7 @@ function richBox(el) {
     get: read,
     // set by the page (a session's draft, a quote, cleared after sending): a fresh start for undo, which must never
     // bring back another session's draft
-    set(v) { v = String(v ?? ""); undo = []; redo = []; cur = {v, s: v.length}; lastPush = 0; render(v, true); if (document.activeElement === el) select(v.length); },
+    set(v) { v = String(v ?? ""); undo = []; redo = []; cur = {v, s: v.length}; lastPush = 0; composing = false; render(v, true); if (document.activeElement === el) select(v.length); },
   });
   Object.defineProperty(el, "placeholder", {
     get: () => el.dataset.placeholder || "",
