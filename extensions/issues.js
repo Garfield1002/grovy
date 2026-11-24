@@ -82,7 +82,8 @@ grovy.extension("issues", grovy => {
         fix.disabled = true; fix.textContent = "Rebasing…";
         try {
           await grovy.api(`/api/issues/${encodeURIComponent(session)}/rebase`, {});
-          finishSheet(session);   // now caught up with the base: the sheet reopens with the Merge button
+          // now caught up with the base: reopen with the Merge button, unless the user left the sheet meanwhile
+          if (fix.isConnected) finishSheet(session);
         } catch (e) {   // couldn't do it on its own (a conflict, usually): hand it to Claude
           grovy.sheet(h("h2", {}, "Finish issue"), what, commits, h("p", {style: "margin:0 0 10px"}, e.message),
             buttons(btn("Ask Claude to rebase", "allow", draft(draftRebase(st.base))),

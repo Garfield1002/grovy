@@ -723,8 +723,10 @@ the `Issues` part of `Store`; the page side is the built-in extension `extension
   grovy** in the worktree (`issues.rebase` → `git rebase`, `POST /api/issues/<name>/rebase` → `Issues.rebase_issue`;
   refused, changing nothing, the same way Finish is — while Claude works, with uncommitted changes, or once the base
   hasn't moved). On a clean rebase the sheet reopens caught up, with the Merge button; a rebase that hits a conflict is
-  aborted (the worktree is left exactly as it was) and the sheet falls back to offering **Ask Claude to rebase** as a
-  draft you send, since only a conflict needs an agent. Where the base branch is checked out (your main checkout,
+  aborted (`git rebase --abort`, which puts the worktree back) and the sheet falls back to offering **Ask Claude to
+  rebase** as a draft you send, since only a conflict needs an agent. A rebase that never starts (say the base ref
+  vanished in a race) leaves the worktree untouched and reports that rather than blaming a conflict, still routing you
+  to Claude. Where the base branch is checked out (your main checkout,
   usually), the merge is `git merge --ff-only` there, which
   updates those files and refuses if your own uncommitted changes are in the way; where it isn't, `git update-ref`
   moves it, only from the commit it was checked against. Then the session is stopped and forgotten, and the worktree
@@ -1229,6 +1231,12 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
 * **Issues merge into the default branch only**, by fast-forward: a branch whose base moved on is rebased onto it
   first, by grovy when that's automatic and by Claude (or you) when the rebase conflicts. An issue's conversation stays
   resumable from ＋ but its folder is gone once it's finished.
+* **Rebase writes the issue's live worktree.** `Rebase onto <base>` runs `git rebase` in the same worktree the
+  session's Claude sits in. It's refused unless Claude is idle with nothing queued, but idle is only checked at the
+  start, not held for the rebase's duration: if a prompt is sent (e.g. from a second device) in that window, Claude
+  could start a turn and write the worktree while git is rewriting it. The window is narrow (you're in the Finish
+  sheet), and git's own `index.lock` usually makes one side fail cleanly rather than corrupt; still, don't drive the
+  session from elsewhere while a rebase runs. Finish itself never had this exposure — it only touches the base ref.
 * **Prompt injection is keystrokes into a TUI.** If you've half-typed something in the terminal input, the
   web prompt is appended to it. grovy can't see that without scraping the screen, which it deliberately doesn't do.
   If a dialog that emits no hook is open (`/model`, `/config`, a rewind menu, the workspace-trust prompt…), the

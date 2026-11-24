@@ -170,7 +170,7 @@ def fast_forward(issue, tip):
     try:
         git(root, "merge-base", "--is-ancestor", old, new)
     except GitError:
-        raise GitError(f"{base} has moved on since this issue started: Claude must rebase first") from None
+        raise GitError(f"{base} has moved on since this issue started: rebase onto it first") from None
     where = None
     cur = None
     for line in git(root, "worktree", "list", "--porcelain").split("\n"):
@@ -187,16 +187,18 @@ def fast_forward(issue, tip):
 
 def rebase(issue):
     """Rebase the issue's branch onto its base, in the branch's own worktree. Returns the branch's new tip. On a
-    conflict (or any rebase that can't finish on its own) the rebase is aborted — restoring the worktree to where it
-    was — and GitError is raised, so the caller can fall back to asking Claude."""
+    conflict the rebase is aborted — restoring the worktree to where it was — and GitError is raised, so the caller
+    can fall back to asking Claude. A rebase that never starts (e.g. the base ref is gone) also raises, leaving the
+    worktree untouched; its message says so rather than blaming a conflict."""
     base, wt = issue["base"], issue["worktree"]
     try:
-        git(wt, "rebase", base)
-    except GitError:
+        git(wt, "rebase", f"refs/heads/{base}")
+    except GitError as e:
         try:
-            git(wt, "rebase", "--abort")
+            git(wt, "rebase", "--abort")   # succeeds iff a rebase was in progress: a real conflict, now undone
         except GitError:
-            pass
+            why = (str(e).splitlines() or [""])[0][:120].strip() or "the rebase wouldn't start"
+            raise GitError(f"couldn't rebase onto {base} ({why}): ask Claude to rebase") from None
         raise GitError(f"the rebase onto {base} hit conflicts grovy can't resolve on its own: ask Claude "
                        f"to rebase") from None
     return git(wt, "rev-parse", "--verify", "HEAD^{commit}").strip()

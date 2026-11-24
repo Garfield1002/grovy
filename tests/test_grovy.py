@@ -3832,8 +3832,14 @@ class TestIssues(StoreCase):
         code, why = self.store.rebase_issue(name)               # base hasn't moved
         self.assertEqual(code, 409)
         self.assertIn("nothing to rebase", why)
-        self.store.ingest(name, ev("UserPromptSubmit", sid="S", prompt="more"))   # Claude working
         self.move_base()
+        with open(os.path.join(issue["worktree"], "f.txt"), "w") as f:
+            f.write("half done\n")                              # uncommitted work in the worktree
+        code, why = self.store.rebase_issue(name)
+        self.assertEqual(code, 409)
+        self.assertIn("uncommitted", why)
+        gitc(issue["worktree"], "commit", "-q", "-am", "wip")
+        self.store.ingest(name, ev("UserPromptSubmit", sid="S", prompt="more"))   # Claude working (busy wins)
         code, why = self.store.rebase_issue(name)
         self.assertEqual(code, 409)
         self.assertIn("still working", why)
