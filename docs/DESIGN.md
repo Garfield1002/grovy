@@ -298,7 +298,8 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
     home) shows it only when it returns true (a throwing or non-true `when` hides it). `section` groups it under a header
     in the session menu ("Conversation", "Session", or a name of its own, in that order then first-seen). Every item also
     appears in the command palette (Ctrl/⌘+K).
-  * `key(combo, run)`: a shortcut.
+  * `key(combo, run, {label})`: a shortcut; `label` names it in *Settings → Keyboard shortcuts* (else it's listed as
+    *Added by an extension*).
     * It needs Ctrl or Alt (F-keys excepted), so it can't take typing.
     * Grovy's own Ctrl+Enter and Alt+↑/↓ are refused, and so are the browser's F5 and F12. Ctrl+K (the command palette)
       is *not* refused: a `grovy.key("Ctrl+K")` is matched before the palette and overrides it.
@@ -580,8 +581,19 @@ emits no hook, so grovy records the interrupt itself and sets the state to `unkn
 palette and **⚙** grovy's own settings (the sidebar's header has the same three on a wide screen; ⋯ is only in a
 session). ＋ opens a short *New* menu — *New session* plus any extension that registers `grovy.menu(…, {where:"new"})`
 (the built-in *New issue* and *New project*); when only one exists it runs straight away, no menu. ⚙ opens *Settings*, one
-sheet gathering *Notifications* (when on), *Theme*, *Extensions* and *Login link*. A right-click on the empty list gives everything at once, grouped (settings not nested), and the
-command palette still reaches each setting by name.
+sheet gathering *Notifications* (when on), *Theme*, *Extensions*, *Keyboard shortcuts* (keyboard only) and *Login link*. A
+right-click on the empty list gives everything at once, grouped (settings not nested), and the command palette still
+reaches each setting by name.
+
+**Button tooltips.** Every static chrome button carries its label as a `title` (the icon buttons especially); the two
+whose label changes (Send, Full screen) set theirs from the handler that sets the label, and Send appends its shortcut
+(`Send (Ctrl+Enter)`), dropped when it is the stop button or there's no keyboard. A one-pass loop at start-up
+(`header/#composer/#viewer/#side button, #sclose`) copies each `aria-label` to a missing `title`.
+
+**Keyboard shortcuts** (*Settings → Keyboard shortcuts*, keyboard only) lists grovy's own (`BUILTIN_SHORTCUTS`:
+*Search commands*, *Send message*, *Previous/Next session*, *Close…*) and, under *From extensions*, every `grovy.key`
+one by its optional `label` (else *Added by an extension*). `comboLabel` writes a stored combo the platform's way —
+`⌘⌥⇧` with no `+` on a Mac, `Ctrl+Alt+Shift` elsewhere, arrows as symbols.
 
 **Command palette.** *Search commands* (⚡ on the session list, ⋯ in a session, or `⌘K` on a Mac / `Ctrl+K` elsewhere) opens a searchable list of everything
 the current ⋯ menus offer — on the home screen the *New* and settings items, in a session that session's items — plus a

@@ -34,10 +34,11 @@
                                         Every item also appears in the command palette (Ctrl/⌘+K)
      grovy.contextMenu(node, items)     right-click items (a mouse only) for a node you drew, e.g. in render:
                                         items() returns [{label, run, sub, danger, disabled}]
-     grovy.key(combo, run)              a shortcut such as "Ctrl+J", "Alt+Shift+N", "Ctrl+?" or "F2" (Cmd counts as
+     grovy.key(combo, run, {label})     a shortcut such as "Ctrl+J", "Alt+Shift+N", "Ctrl+?" or "F2" (Cmd counts as
                                         Ctrl). It needs Ctrl or Alt (F-keys excepted) and can't be one of grovy's own
                                         (Ctrl+Enter sends, Alt+↑/↓ switch session). Binding Ctrl+K overrides the
-                                        command palette it otherwise opens.
+                                        command palette it otherwise opens. label names it in Settings → Keyboard
+                                        shortcuts (optional).
      grovy.on("render", (node, event))  a message was drawn: add to it
      grovy.on("update", state)          the open session changed (a copy of its state)
      grovy.on("route", session)         another session (or the home screen) was opened
@@ -67,7 +68,7 @@ grovy.menu("Continue", () => grovy.send("continue"), {sub: "Send “continue”"
 
 /* Alt+R: put a standard request in the message box (you still review and send it):
 
-grovy.key("Alt+R", () => grovy.draft("Review your last change for bugs before we go on."));
+grovy.key("Alt+R", () => grovy.draft("Review your last change for bugs before we go on."), {label: "Draft a review request"});
 */
 
 

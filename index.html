@@ -259,6 +259,11 @@ header h1, .sess .name, #sheet h2, #side .sh a, .md :is(h1, h2, h3, h4), .wt, .s
 .toggle input { width:22px; height:22px; }
 .toggle.ext { align-items:flex-start; } .toggle.ext input { flex:none; margin-top:1px; }
 .toggle.ext .sub { color:var(--mut); font-size:13px; }
+.kbrow { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:40px;
+  padding:7px 2px; border-bottom:1px solid var(--line); font-size:15px; }
+.kbrow:last-child { border-bottom:0; }
+kbd { flex:none; font:600 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; white-space:nowrap; color:var(--fg);
+  background:var(--code); border:1px solid var(--line); border-radius:6px; padding:3px 7px; }
 .hit { border:1px solid var(--line); background:var(--card); border-radius:12px; padding:10px 12px; margin:0 0 8px;
   width:100%; text-align:left; }
 .hit .w { font-size:12px; color:var(--mut); } .hit .s { overflow:hidden; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; }
@@ -1805,7 +1810,8 @@ function syncSend() {
   const b = $("send");
   b.classList.toggle("stop", mode === "stop"); b.classList.toggle("steer", mode === "steer");
   b.setAttribute("aria-label", mode === "stop" ? "Interrupt Claude" : mode === "steer" ? "Steer: Claude gets this at its next step" : "Send");
-  b.title = b.getAttribute("aria-label");
+  const lbl = b.getAttribute("aria-label");   // the shortcut sends (not stop/interrupt), and only a keyboard has it
+  b.title = mode !== "stop" && finePointer.matches ? lbl + " (" + comboLabel("Ctrl+Enter") + ")" : lbl;
 }
 input.addEventListener("input", syncSend);
 $("send").onclick = () => $("send").classList.contains("stop") ? interrupt() : sendNow();
@@ -2046,6 +2052,23 @@ $("title").onclick = () => { if (view) switcher(); };
 const MENU_ORDER = ["New", "Conversation", "Session", "grovy", "More"];
 const MOD = /Mac|iP(hone|ad|od)/.test(navigator.platform || "") ? "⌘" : "Ctrl+";
 const itemNode = c => ctxEntry(c).node;
+// Show a stored combo ("Ctrl+K", "Alt+ArrowUp") the way this platform writes it: ⌘⌥⇧ with no "+" on a Mac (where
+// Ctrl counts as ⌘ and Alt as Option), Ctrl+Alt+Shift elsewhere. Used by the tooltips and the shortcuts list.
+const KEYSYM = {ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→", Escape: "Esc", Space: "Space"};
+function comboLabel(combo) {
+  const mac = MOD === "⌘";
+  return String(combo).split("+").map(p =>
+    p === "Ctrl" ? (mac ? "⌘" : "Ctrl") : p === "Alt" ? (mac ? "⌥" : "Alt") : p === "Shift" ? (mac ? "⇧" : "Shift")
+    : KEYSYM[p] || p).join(mac ? "" : "+");
+}
+// grovy's own global shortcuts, for ⋯ → Settings → Keyboard shortcuts (extensions' grovy.key ones are added there too).
+const BUILTIN_SHORTCUTS = [
+  {combo: "Ctrl+K", label: "Search commands"},
+  {combo: "Ctrl+Enter", label: "Send message"},
+  {combo: "Alt+ArrowUp", label: "Previous session"},
+  {combo: "Alt+ArrowDown", label: "Next session"},
+  {combo: "Escape", label: "Close a sheet, the page viewer, or full screen"},
+];
 
 // What can be done to a session: the ⋯ menu of the open one, and the right-click menu of any (s: its list entry or
 // the open session's detail). Searching and pages are about the conversation on screen, so only for the open one.
@@ -2093,7 +2116,18 @@ function sessionMenu() {
 const newCmds = () => [{label: "New session", section: "New", run: () => { closeSheet(); newSession(); }},
   ...extCmds("new").map(c => ({...c, section: c.section || "New"}))];
 const settingsCmds = () => [...extCmds("home").map(c => ({...c, section: c.section || "grovy"})),
-  themeCmd(), extensionsCmd(), loginCmd()].filter(Boolean);
+  themeCmd(), extensionsCmd(), shortcutsCmd(), loginCmd()].filter(Boolean);
+// ⋯ → Settings → Keyboard shortcuts: grovy's own, plus any an extension added with grovy.key (its label, else the
+// combo alone). Only worth offering with a keyboard, so it's left off the menu on a touch screen.
+const shortcutsCmd = () => finePointer.matches
+  ? {label: "Keyboard shortcuts", section: "grovy", sub: "All the keys you can press", run: shortcutsSheet} : null;
+function shortcutsSheet() {
+  const row = (combo, label) => h("div", {class: "kbrow"}, h("span", {}, label), h("kbd", {}, comboLabel(combo)));
+  const extRows = ext.keys.map(k => row(k.combo, k.label || "Added by an extension"));
+  openSheet(h("h2", {}, "Keyboard shortcuts"),
+    ...BUILTIN_SHORTCUTS.map(s => row(s.combo, s.label)),
+    ...(extRows.length ? [h("div", {class: "sect"}, "From extensions"), ...extRows] : []));
+}
 // One unified Settings sheet gathers them all, opened by the cog on the home screen (and the sidebar).
 const settingsSheet = () => openSheet(h("h2", {}, "Settings"), ...settingsCmds().map(itemNode));
 const paletteCmd = () => ({label: "Search commands…", section: "grovy", sub: finePointer.matches ? MOD + "K" : "", run: palette});
@@ -2958,8 +2992,8 @@ window.grovy = Object.freeze({
       label: String(x.label), sub: x.sub ? String(x.sub) : null, danger: !!x.danger, disabled: !!x.disabled,
       run: () => runExt("contextMenu " + x.label, fnArg(x.run, "grovy.contextMenu item"))}) : []; };
   },
-  key(combo, run) {   // a keyboard shortcut (see combosOf above)
-    ext.keys.push({combo: normCombo(combo), run: fnArg(run, "grovy.key")});
+  key(combo, run, {label = ""} = {}) {   // a keyboard shortcut (see combosOf above); label names it in the shortcuts list
+    ext.keys.push({combo: normCombo(combo), run: fnArg(run, "grovy.key"), label: String(label)});
   },
   on(name, fn) {   // render(node, event) · update(state) · route(session) · send(text) -> text | false
     if (!ext.on[name]) throw new Error(`grovy.on: unknown event "${name}" (${Object.keys(ext.on).join(", ")})`);
@@ -2976,6 +3010,10 @@ window.grovy = Object.freeze({
 });
 
 // ---------------------------------------------------------------- start-up
+// Every static chrome button (icon buttons especially) gets its label as a hover tooltip. The ones whose label and
+// shortcut change (Send, Full screen) set their own title in the handlers that set the label; this leaves them alone.
+for (const b of document.querySelectorAll("header button, #composer button, #viewer button, #side button, #sclose"))
+  if (b.getAttribute("aria-label") && !b.title) b.title = b.getAttribute("aria-label");
 // Runs once the page is parsed, so after the extensions: what they add is there from the first paint.
 let es = null;
 function connect() {

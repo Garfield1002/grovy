@@ -94,7 +94,8 @@ On a wide screen, your sessions and pages stay in a sidebar beside the conversat
 - **Right-click** a session, a page, a message, a code block or the conversation for what you can do with it.
   Select text in a message for Quote and Copy. Shift+right-click gives the browser's own menu.
 - **Keys:** Ctrl+Enter sends, Alt+↑/↓ switches session, Esc closes, Tab reaches every button. Typing with nothing
-  focused goes to the message box.
+  focused goes to the message box. Hover a button to see what it does and its shortcut; ⋯ → Settings → Keyboard
+  shortcuts lists them all.
 
 ## Commands
 

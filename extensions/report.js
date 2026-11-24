@@ -333,7 +333,7 @@ grovy.extension("report", grovy => {
     if (overlay) { overlay.remove(); overlay = null; }
   }
 
-  grovy.key("Alt+R", start);
+  grovy.key("Alt+R", start, {label: "Report an issue with grovy"});
 
   // Always available, no button: press and hold two fingers for ~half a second, anywhere. (A button might not be
   // reachable in every state; this gesture is, and it leaves what you're doing untouched.)
