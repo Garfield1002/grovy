@@ -29,6 +29,8 @@ away: `grovy attach NAME` puts you in the real session (detach with Ctrl-b d).
   off, you see only the answers. Tap "Worked for …" under a reply to open or close just that one.
 - **Long messages:** once a message outgrows the box, it takes the whole screen; the ⤢ / ⤡ button in its corner
   switches by hand.
+- **Formatting:** type markdown (`**bold**`, `*italic*`, `` `code` ``, `> quote`, lists) and the message box shows it
+  as you type; your messages show it formatted too.
 - **Attachments:** tap the paperclip in the empty message box to send photos or files; Claude gets them as files it
   can open (kept for 7 days). Photos show in your message.
 

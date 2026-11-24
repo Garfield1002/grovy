@@ -26,7 +26,7 @@ body { min-height:100vh; min-height:100dvh; display:flex; flex-direction:column;
 button { font:inherit; color:inherit; cursor:pointer; }
 /* tap targets aren't text: only what you'd copy or quote is selectable (long-pressing a card mustn't start a selection) */
 body { -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
-.u, .a, .err, .perm pre, .diff, .path, .rc, .q .qt, .wg, .link, .hit .s, .kv2 span:last-child, input, textarea, .field {
+.u, .a, .err, .perm pre, .diff, .path, .rc, .q .qt, .wg, .link, .hit .s, .kv2 span:last-child, input, textarea, #input, .field {
   -webkit-user-select:text; user-select:text; -webkit-touch-callout:default; }
 button, .u .st, .wg .lf { -webkit-user-select:none; user-select:none; }
 #quotesel { display:block; width:100%; margin:0 0 8px; min-height:42px; border-radius:12px; border:1px solid var(--busy);
@@ -297,13 +297,19 @@ mark { background:color-mix(in srgb, var(--warn) 35%, transparent); color:inheri
 .srow .run { font-size:12px; }
 #hint:empty { display:none; }
 .cr { display:flex; gap:8px; align-items:flex-end; }
-textarea { flex:1; font:inherit; font-size:16px; padding:11px 14px; border-radius:22px; border:1px solid var(--line);
+textarea, #input { flex:1; font:inherit; font-size:16px; padding:11px 14px; border-radius:22px; border:1px solid var(--line);
   background:var(--card); color:var(--fg); min-height:46px; max-height:40vh; resize:none; outline:none; }
-textarea:focus { border-color:var(--mut); }
+textarea:focus, #input:focus { border-color:var(--mut); }
+/* the message box: markdown shown as you type, the markers kept (richBox) */
+#input { overflow-y:auto; white-space:pre-wrap; overflow-wrap:anywhere; cursor:text; line-height:1.4; }
+#input:empty::before { content:attr(data-placeholder); color:var(--mut); pointer-events:none; }
+#input .rt-mk { color:var(--mut); } #input .rt-b, #input .rt-h { font-weight:700; } #input .rt-i { font-style:italic; }
+#input .rt-s { text-decoration:line-through; } #input .rt-q { color:var(--mut); } #input .rt-l { color:var(--acc); }
+#input :is(.rt-c, .rt-cb) { font:.88em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background:var(--code); border-radius:4px; }
 #send { width:46px; height:46px; border-radius:50%; border:0; background:var(--acc); color:#fff; flex:none;
   display:grid; place-items:center; }
 #send:disabled { opacity:.35; }
-.tbox { position:relative; flex:1; display:flex; min-width:0; } .tbox textarea { padding-right:46px; }
+.tbox { position:relative; flex:1; display:flex; min-width:0; } .tbox #input { padding-right:46px; }
 /* in the text box: the paperclip while it's empty (files go before the words), then a cross to clear it */
 .tbtn { position:absolute; right:3px; bottom:3px; width:40px; height:40px; border:0; border-radius:50%; background:none;
   color:var(--mut); display:grid; place-items:center; padding:0; } .tbtn svg { width:21px; height:21px; }
@@ -319,7 +325,7 @@ textarea:focus { border-color:var(--mut); }
 #composer.full #atts { flex:none; max-height:25%; overflow-y:auto; }   /* many files can't squeeze the text away */
 /* the text runs edge to edge, no frame; its buttons float: ⤡ and ✕ in the top corner, send at the bottom */
 #composer.full .cr { flex:1; min-height:0; align-items:stretch; position:relative; }
-#composer.full textarea { height:auto !important; max-height:none; border:0; border-radius:0; background:none;
+#composer.full #input { height:auto !important; max-height:none; border:0; border-radius:0; background:none;
   padding:2px 2px 72px; }
 #composer.full .tbox { padding-top:44px; }   /* the title row: the text scrolls below it, never under it */
 #composer.full #clear { top:3px; bottom:auto; right:46px; }
@@ -499,7 +505,8 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   <div class="cr">
     <div class="tbox">
       <div id="fhead"></div>
-      <textarea id="input" rows="1" placeholder="Message Claude…" enterkeyhint="enter"></textarea>
+      <div id="input" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message" enterkeyhint="enter"
+        autocapitalize="sentences" spellcheck="true" data-placeholder="Message Claude…"></div>
       <button id="attach" class="tbtn" aria-label="Attach files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
         stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
       <button id="expand" class="tbtn top hidden" aria-label="Full screen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1393,8 +1400,172 @@ function tick() {
 }
 setInterval(tick, 1000);
 
+// ---------------------------------------------------------------- message box
+// Markdown shown as you type, WhatsApp style: the markers stay (dimmed) and the text they wrap is styled. richSegs is
+// pure: its pieces join back to the text exactly, so a caret offset means the same before and after a re-render.
+// Pieces: strings, and {c: class, k: [pieces]} for a span.
+const RICH_INLINE = /(`+)([^`]|[^`].*?[^`])\1(?!`)|\*\*(?!\s)(.+?)(?<!\s)\*\*|__(?!\s)(.+?)(?<!\s)__|\*(?![\s*])((?:\*\*(?!\s).+?\*\*|[^*])+?)(?<!\s)\*(?!\*)|(?<![\w])_(?![\s_])((?:__(?!\s).+?__|[^_])+?)(?<!\s)_(?![\w])|~~(?!\s)(.+?)(?<!\s)~~/g;
+function richInline(t) {
+  const out = [], re = new RegExp(RICH_INLINE);   // its own lastIndex: this recurses
+  let last = 0, m;
+  const wrap = (c, mk, inner, parse) =>
+    out.push({c, k: [{c: "rt-mk", k: [mk]}, ...(parse ? richInline(inner) : [inner]), {c: "rt-mk", k: [mk]}]});
+  while ((m = re.exec(t))) {
+    if (m.index > last) out.push(t.slice(last, m.index));
+    if (m[1]) wrap("rt-c", m[1], m[2], false);
+    else if (m[3] != null) wrap("rt-b", "**", m[3], true);
+    else if (m[4] != null) wrap("rt-b", "__", m[4], true);
+    else if (m[5] != null) wrap("rt-i", "*", m[5], true);
+    else if (m[6] != null) wrap("rt-i", "_", m[6], true);
+    else wrap("rt-s", "~~", m[7], true);
+    last = re.lastIndex;
+  }
+  if (last < t.length) out.push(t.slice(last));
+  return out;
+}
+function richSegs(text) {
+  const out = [];
+  let fence = null, m;
+  String(text).split("\n").forEach((l, i) => {
+    if (i) out.push("\n");
+    if (!l) return;
+    const f = l.match(/^\s*(```+|~~~+)/);
+    if (fence || f) {   // a code block, its fences included
+      out.push({c: "rt-cb", k: [l]});
+      if (!fence) fence = f[1];
+      else if (f && l.trim().startsWith(fence) && !l.trim().slice(fence.length).trim()) fence = null;
+      return;
+    }
+    if ((m = l.match(/^(\s*>\s?)(.*)$/))) out.push({c: "rt-q", k: [{c: "rt-mk", k: [m[1]]}, ...richInline(m[2])]});
+    else if ((m = l.match(/^(#{1,6}\s+)(.*)$/))) out.push({c: "rt-h", k: [{c: "rt-mk", k: [m[1]]}, ...richInline(m[2])]});
+    else if ((m = l.match(/^(\s*(?:[-*+]|\d+[.)])\s+)(.*)$/))) out.push({c: "rt-l", k: [m[1]]}, ...richInline(m[2]));
+    else out.push(...richInline(l));
+  });
+  const clean = ps => ps.filter(p => p !== "").map(p => typeof p === "string" ? p : {c: p.c, k: clean(p.k)});
+  return clean(out);
+}
+// The box: a contenteditable that answers like the textarea it replaced (value, placeholder, setSelectionRange,
+// focus, "input" events), so the composer's code is unchanged. It re-renders only when the styling must change (a
+// marker typed or removed), never while a phone keyboard is composing a word, and keeps the caret where it was.
+// Enter, paste and undo are its own: what a browser would insert there (divs, rich HTML, an undo stack that points
+// at nodes a re-render replaced) isn't text.
+function richBox(el) {
+  try { el.contentEditable = "plaintext-only"; } catch (e) { el.contentEditable = "true"; }   // older browsers
+  const textOf = n => {
+    let s = "";
+    for (const c of n.childNodes) {
+      if (c.nodeType === 3) s += c.data;
+      else if (c.nodeName === "BR") s += c.hasAttribute("data-end") ? "" : "\n";
+      else if (c.nodeType === 1) {
+        if (/^(DIV|P)$/.test(c.nodeName) && s && !s.endsWith("\n")) s += "\n";   // a line a browser added its way
+        s += textOf(c);
+      }
+    }
+    return s;
+  };
+  const read = () => (el.childNodes.length === 1 && el.firstChild.nodeName === "BR") ? "" : textOf(el).replace(/ /g, " ");
+  const sigSegs = ps => ps.map(p => typeof p === "string" ? p : "\u0001" + p.c + "\u0002" + sigSegs(p.k) + "\u0003").join("");
+  const sigDom = n => [...n.childNodes].map(c => c.nodeType === 3 ? c.data
+    : c.nodeName === "SPAN" ? "\u0001" + c.className + "\u0002" + sigDom(c) + "\u0003"
+    : c.nodeName === "BR" && c.hasAttribute("data-end") ? "\u0004" : "\u0005").join("");
+  const build = p => typeof p === "string" ? document.createTextNode(p) : h("span", {class: p.c}, ...p.k.map(build));
+  const offsetOf = (node, off) => {
+    const r = document.createRange(); r.setStart(el, 0); r.setEnd(node, off);
+    const d = document.createElement("div"); d.append(r.cloneContents());
+    return textOf(d).length;
+  };
+  const pointAt = off => {
+    let acc = 0, found = null;
+    const walk = n => {
+      for (const c of n.childNodes) {
+        if (found) return;
+        if (c.nodeType === 3) { if (off <= acc + c.data.length) { found = [c, off - acc]; return; } acc += c.data.length; }
+        else if (c.nodeName === "BR") {
+          if (c.hasAttribute("data-end")) continue;
+          if (off <= acc) { found = [n, [...n.childNodes].indexOf(c)]; return; }
+          acc += 1;
+        } else walk(c);
+      }
+    };
+    walk(el);
+    if (found) return found;
+    const end = el.querySelector("br[data-end]");
+    return [el, end ? [...el.childNodes].indexOf(end) : el.childNodes.length];
+  };
+  const sel = () => {
+    const s = getSelection();
+    if (!s || !s.rangeCount || !el.contains(s.anchorNode) || !el.contains(s.focusNode)) { const n = read().length; return [n, n]; }
+    const a = offsetOf(s.anchorNode, s.anchorOffset), b = offsetOf(s.focusNode, s.focusOffset);
+    return [Math.min(a, b), Math.max(a, b)];
+  };
+  const select = (a, b = a) => {
+    const s = getSelection(); if (!s) return;
+    const r = document.createRange(), [an, ao] = pointAt(a), [bn, bo] = pointAt(b);
+    r.setStart(an, ao); r.setEnd(bn, bo); s.removeAllRanges(); s.addRange(r);
+  };
+  const render = (text, force) => {
+    const segs = richSegs(text), want = sigSegs(segs) + (text.endsWith("\n") ? "\u0004" : "");
+    if (!force && sigDom(el) === want) return;
+    const keep = document.activeElement === el ? sel() : null;
+    // a last empty line needs something after its newline to be shown (and to hold the caret)
+    el.replaceChildren(...segs.map(build), ...(text.endsWith("\n") ? [h("br", {"data-end": ""})] : []));
+    if (keep) select(keep[0], keep[1]);
+  };
+  // undo: snapshots of {text, caret}; typing within a second is one step
+  let undo = [], redo = [], cur = {v: "", s: 0}, lastPush = 0;
+  const record = (v, s, merge) => {
+    if (v === cur.v) { cur.s = s; return; }
+    if (!(merge && Date.now() - lastPush < 1000)) { undo.push(cur); if (undo.length > 200) undo.shift(); }
+    lastPush = Date.now(); redo = []; cur = {v, s};
+  };
+  const fire = () => el.dispatchEvent(new Event("input", {bubbles: true}));
+  const replaceSel = text => {
+    const [a, b] = sel(), v = read(), nv = v.slice(0, a) + text + v.slice(b);
+    record(nv, a + text.length, false);
+    render(nv, true); select(a + text.length); fire();
+  };
+  const restore = st => { render(st.v, true); if (document.activeElement === el) select(st.s); lastPush = 0; fire(); };
+  el.addEventListener("beforeinput", e => {
+    if (e.inputType === "insertParagraph" || e.inputType === "insertLineBreak") { e.preventDefault(); replaceSel("\n"); }
+    else if (e.inputType === "historyUndo") { e.preventDefault(); if (undo.length) { redo.push(cur); cur = undo.pop(); restore(cur); } }
+    else if (e.inputType === "historyRedo") { e.preventDefault(); if (redo.length) { undo.push(cur); cur = redo.pop(); restore(cur); } }
+    else if (/^format/.test(e.inputType)) e.preventDefault();   // Ctrl+B and the like: markdown is typed, not applied
+  });
+  el.addEventListener("paste", e => {
+    const t = e.clipboardData && e.clipboardData.getData("text/plain");
+    e.preventDefault();
+    if (t) replaceSel(t.replace(/\r\n?/g, "\n"));
+  });
+  el.addEventListener("input", e => {
+    if (e.isComposing) return;   // a phone keyboard is building a word: leave its text alone until it's done
+    const v = read();
+    render(v);
+    record(v, sel()[0], true);
+  });
+  el.addEventListener("compositionend", () => { const v = read(); render(v); record(v, sel()[0], true); });
+  el.addEventListener("focus", () => {   // like a textarea: focusing it (not tapping in it) puts the caret at the end
+    const s = getSelection();
+    if (!s || !s.rangeCount || !el.contains(s.anchorNode)) select(read().length);
+  });
+  Object.defineProperty(el, "value", {
+    get: read,
+    // set by the page (a session's draft, a quote, cleared after sending): a fresh start for undo, which must never
+    // bring back another session's draft
+    set(v) { v = String(v ?? ""); undo = []; redo = []; cur = {v, s: v.length}; render(v, true); if (document.activeElement === el) select(v.length); },
+  });
+  Object.defineProperty(el, "placeholder", {
+    get: () => el.dataset.placeholder || "",
+    set(v) { el.dataset.placeholder = v; el.setAttribute("aria-placeholder", v); },
+  });
+  el.setSelectionRange = (a, b) => select(a, b);
+  Object.defineProperty(el, "selectionStart", {get: () => sel()[0]});
+  Object.defineProperty(el, "selectionEnd", {get: () => sel()[1]});
+  el.placeholder = el.dataset.placeholder || "";
+  return el;
+}
+
 // ---------------------------------------------------------------- composer
-const input = $("input");
+const input = richBox($("input"));
 const draftKey = () => "grovy-draft:" + view;
 // A long message gets the whole screen: by itself once it outgrows the box (unless shrunk back for this draft), or
 // with the ⤢ button that shows from a few lines on. It goes back to the small box when sent, cleared or left.
@@ -2155,7 +2326,7 @@ $("ctx").addEventListener("keydown", e => {
 });
 
 // ---------------------------------------------------------------- keyboard
-const FOCUSABLE = 'button:not([disabled]), [href], input:not([type=hidden]), textarea, select, [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([type=hidden]), textarea, [contenteditable], select, [tabindex]:not([tabindex="-1"])';
 const visibleIn = box => [...box.querySelectorAll(FOCUSABLE)].filter(e => e.offsetParent !== null || e === document.activeElement);
 input.addEventListener("keydown", e => {
   if (e.isComposing) return;

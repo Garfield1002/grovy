@@ -5725,6 +5725,34 @@ class TestInlineMarkdown(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestRichBox(unittest.TestCase):
+    """The message box's markdown-as-you-type (index.html richSegs), run in node."""
+    def segs(self, *texts):
+        src = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
+        code = re.search(r"^const RICH_INLINE = .*?^function richBox", src, re.S | re.M).group(0)[:-len("function richBox")]
+        js = code + f"\nconsole.log(JSON.stringify({json.dumps(texts)}.map(richSegs)));"
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_pieces_join_back_to_the_text_exactly(self):
+        """A caret offset must mean the same before and after a re-render: nothing added, nothing dropped."""
+        texts = ["", "plain", "Can you **fix** the `bug`?", "*test **test2** bob*", "> q *i*\n# H\n- a\n1. b",
+                 "```js\ncode **no**\n```\nafter *x*", "a\n\n\nb\n", "``a`b``", "~~s~~ _u_ __b__", "2*3*4 * x *",
+                 "unclosed **bold", "```\nnever closed"]
+        flat = lambda ps: "".join(p if isinstance(p, str) else flat(p["k"]) for p in ps)
+        for t, ps in zip(texts, self.segs(*texts)):
+            self.assertEqual(flat(ps), t)
+
+    def test_markers_stay_and_style_what_they_wrap(self):
+        mk = lambda m: {"c": "rt-mk", "k": [m]}
+        self.assertEqual(self.segs("hi **b** `c`", "```\n**x**\n```", "> *q*"), [
+            ["hi ", {"c": "rt-b", "k": [mk("**"), "b", mk("**")]}, " ", {"c": "rt-c", "k": [mk("`"), "c", mk("`")]}],
+            [{"c": "rt-cb", "k": ["```"]}, "\n", {"c": "rt-cb", "k": ["**x**"]}, "\n", {"c": "rt-cb", "k": ["```"]}],
+            [{"c": "rt-q", "k": [mk("> "), {"c": "rt-i", "k": [mk("*"), "q", mk("*")]}]}]])
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
 class TestLinksExtension(unittest.TestCase):
     """extensions/links.js, run in node on a minimal DOM: what a reply's links become."""
     HARNESS = r"""
