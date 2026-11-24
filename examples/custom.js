@@ -36,7 +36,8 @@
                                         items() returns [{label, run, sub, danger, disabled}]
      grovy.key(combo, run)              a shortcut such as "Ctrl+J", "Alt+Shift+N", "Ctrl+?" or "F2" (Cmd counts as
                                         Ctrl). It needs Ctrl or Alt (F-keys excepted) and can't be one of grovy's own
-                                        (Ctrl+K opens the command palette, Ctrl+Enter sends, Alt+↑/↓ switch session).
+                                        (Ctrl+Enter sends, Alt+↑/↓ switch session). Binding Ctrl+K overrides the
+                                        command palette it otherwise opens.
      grovy.on("render", (node, event))  a message was drawn: add to it
      grovy.on("update", state)          the open session changed (a copy of its state)
      grovy.on("route", session)         another session (or the home screen) was opened

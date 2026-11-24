@@ -189,7 +189,7 @@ those started before keep their `--settings` until ⋯ → Update session. `--no
 | `GROVY_HOME` | `$XDG_CONFIG_HOME/grovy` → `~/.config/grovy` | your own files: `custom.css`/`custom.js`, `themes/`, `instructions.md`, `plugins/`, `peers.json` (`GROVY_CONFIG_DIR` is the older name; `GROVY_HOME` wins). Passed on to sessions started from it |
 | `GROVY_PERMISSION_TIMEOUT` | `600` | seconds a permission waits for the phone (fixed per session at `grovy new`) |
 | `GROVY_CLAUDE` | `claude` | claude executable |
-| `GROVY_PROJECTS_DIR` | `~/dev` | where ⋯ → New project makes projects |
+| `GROVY_PROJECTS_DIR` | `~/dev` | where ＋ → New project makes projects |
 | `GROVY_NOTIFY_CMD` | unset | command run with a short message on stdin (see below) |
 | `GROVY_PUBLIC_URL` | unset | appended to notifications as a link |
 | `GROVY_DEBUG` | unset | log HTTP requests |
@@ -287,7 +287,8 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
     appears in the command palette (Ctrl/⌘+K).
   * `key(combo, run)`: a shortcut.
     * It needs Ctrl or Alt (F-keys excepted), so it can't take typing.
-    * Grovy's own Ctrl+Enter, Ctrl+K (command palette) and Alt+↑/↓ are refused, and so are the browser's F5 and F12.
+    * Grovy's own Ctrl+Enter and Alt+↑/↓ are refused, and so are the browser's F5 and F12. Ctrl+K (the command palette)
+      is *not* refused: a `grovy.key("Ctrl+K")` is matched before the palette and overrides it.
     * With Alt alone (Option on a Mac turns letters into symbols), letters and digits also match by physical key.
     * That fallback doesn't apply with AltGr (Ctrl+Alt), which types characters such as `@` that must stay typeable.
     * Shift is refused with a symbol: name the symbol it types instead.
@@ -534,12 +535,14 @@ settings. ＋ opens a short *New* menu — *New session* plus any extension that
 (the built-in *New issue* and *New project*); when only one exists it runs straight away, no menu. ⋯ opens *Notifications*
 (when on), *Theme*, *Extensions*, *Login link* and *Search commands*. A right-click on the empty list gives both, grouped.
 
-**Command palette.** *Search commands* (⋯, or `Ctrl`/`⌘`+`K`) opens a searchable list of everything the current ⋯ menus
-offer — on the home screen the *New* and settings items, in a session that session's items — plus a jump to any other
-session or published page. Typing filters by a substring first, then a loose subsequence; ↑/↓ move, Enter runs the
-highlighted row, Esc closes. It is one flat surface over the same command descriptors the menus are built from
-(`index.html`, `currentCmds`/`palette`), so an extension's `grovy.menu` items appear in it for free. `Ctrl+K` is reserved,
-so `grovy.key` can't claim it.
+**Command palette.** *Search commands* (⋯, or `⌘K` on a Mac / `Ctrl+K` elsewhere) opens a searchable list of everything
+the current ⋯ menus offer — on the home screen the *New* and settings items, in a session that session's items — plus a
+jump to any other session or published page. Typing filters by a substring first, then a loose subsequence; ↑/↓ move
+(the highlighted *command* is kept across the async session/page fetch, not a row index, so it never jumps under you),
+Enter runs it, Esc closes. It is one flat surface over the same command descriptors the menus are built from
+(`index.html`, `currentCmds`/`palette`; a `where:"both"` item is in two buckets, so `currentCmds` de-duplicates). The
+palette doesn't open over another sheet (it would resolve a pending confirmation), and the hotkey isn't reserved: a
+`grovy.key("Ctrl+K")` is matched first and wins. On a Mac only `⌘K` opens it, so plain `Control+K` still edits text.
 
 **Sessions from the phone.** The **＋** → *New session*:
 * **Folders.** Pick one from a list (never a typed path) of folders where Claude won't stop at the workspace-trust
@@ -1172,7 +1175,7 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
   If a dialog that emits no hook is open (`/model`, `/config`, a rewind menu, the workspace-trust prompt…), the
   keystrokes go to that dialog. grovy only types in hook-confirmed idle states, and every typed prompt must be
   confirmed by `UserPromptSubmit`, but a non-zero window remains. Use the terminal for anything unusual.
-* **Workspace trust.** Claude holds back *all* hooks until a new folder's trust dialog is accepted. ⋯ → New project
+* **Workspace trust.** Claude holds back *all* hooks until a new folder's trust dialog is accepted. ＋ → New project
   answers it for the projects it makes; for any other git repo you haven't opened in Claude before, `grovy attach`
   once and accept it. Until then the session shows `starting`. The phone only offers folders that won't hit the
   dialog. Answering it relies on the dialog's wording: if a Claude Code update changes it, grovy presses nothing and
@@ -1183,7 +1186,7 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
   "needs input in terminal" at best. The page doesn't pretend to handle them.
 * Events emitted while the daemon is down are not replayed.
 * **Peers** (other machines, see "Other machines"):
-  * ⋯ → New issue and ⋯ → New project work on the hub only (an issue session that already exists on a peer can be
+  * ＋ → New issue and ＋ → New project work on the hub only (an issue session that already exists on a peer can be
     finished or discarded from the hub). ⋯ → Extensions, ⋯ → Theme, the login link, `custom.css`/`custom.js` are the hub's.
   * The hub's plugins see peers' sessions only through `notify`; `grovy.on("event")`,
     `grovy.on("state")`, `grovy.sessions()`, `grovy.session()` and `grovy.send()` cover local sessions only. The hub's

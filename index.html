@@ -1992,8 +1992,12 @@ function sessionMenu() {
 }
 // ＋ : things to start (New session, and extensions' where:"new" items). ⋯ : grovy's own settings. Right-click on the
 // home screen gives both, grouped. The command palette gathers whichever apply now, plus jumps to any session or page.
-const newCmds = () => [{label: "New session", section: "New", run: () => { closeSheet(); newSession(); }}, ...extCmds("new")];
-const settingsCmds = () => [...extCmds("home"), themeCmd(), extensionsCmd(), loginCmd()].filter(Boolean);
+// extension items keep their own section if they set one, else fall under the button they live on, so a right-click
+// (which groups by section) keeps New session next to New issue, and the settings together.
+const newCmds = () => [{label: "New session", section: "New", run: () => { closeSheet(); newSession(); }},
+  ...extCmds("new").map(c => ({...c, section: c.section || "New"}))];
+const settingsCmds = () => [...extCmds("home").map(c => ({...c, section: c.section || "grovy"})),
+  themeCmd(), extensionsCmd(), loginCmd()].filter(Boolean);
 const paletteCmd = () => ({label: "Search commands…", section: "grovy", sub: finePointer.matches ? MOD + "K" : "", run: palette});
 const loginCmd = () => ({label: "Login link", section: "grovy", sub: "Sign in on another device", run: loginSheet});
 const homeEntries = () => [...newCmds(), ...settingsCmds(), paletteCmd()];   // right-click on the home screen: everything
@@ -2178,8 +2182,10 @@ function pickList({items, title, sub = () => "", recent = null, search = null, s
 // Command palette (Ctrl/⌘+K, or ⋯ → Search commands): everything the ⋯ menus offer right now, flattened and searched,
 // plus a jump to any session or page. The same actions, reachable by name instead of by hunting through menus.
 function currentCmds() {
-  return view ? [...sessionCmds(view, cur || {}), {label: "All sessions", section: "Go", run: () => { closeSheet(); go("#/"); }}, ...settingsCmds()]
-              : [...newCmds(), ...settingsCmds()];
+  const all = view ? [...sessionCmds(view, cur || {}), {label: "All sessions", section: "Go", run: () => { closeSheet(); go("#/"); }}, ...settingsCmds()]
+                   : [...newCmds(), ...settingsCmds()];
+  const seen = new Set();   // a where:"both" item is in two buckets (session + home): show it once
+  return all.filter(c => { const k = c.label + "\u0000" + (c.section || ""); return seen.has(k) ? false : seen.add(k); });
 }
 function palScore(q, it) {   // null: no match; higher is better. A substring beats a loose subsequence; earlier beats later.
   if (!q) return 0;
@@ -2189,8 +2195,8 @@ function palScore(q, it) {   // null: no match; higher is better. A substring be
   let k = 0; for (let n = 0; n < hay.length && k < q.length; n++) if (hay[n] === q[k]) k++;
   return k === q.length ? 1 : null;
 }
-function cmdRow(it, on) {
-  return h("button", {class: "item cmdrow" + (on ? " on" : ""), onclick: () => { try { it.run(); } catch (e) { showError(e); } }},
+function cmdRow(it, on, pick) {
+  return h("button", {class: "item cmdrow" + (on ? " on" : ""), onclick: () => pick(it)},
     h("div", {style: "flex:1;min-width:0"}, it.label, it.sub ? h("div", {class: "sub"}, it.sub) : null),
     it.section ? h("span", {class: "cmdsec"}, it.section) : null);
 }
@@ -2199,26 +2205,27 @@ function palette() {
   const q = h("input", {class: "field", type: "search", placeholder: "Type a command, or a session to open…",
     enterkeyhint: "go", autocapitalize: "off", autocorrect: "off", spellcheck: "false"});
   const list = h("div", {class: "cmdp"});
-  let items = currentCmds();
-  const run = () => {
+  let items = currentCmds(), hits = [], active = null;   // active is the highlighted descriptor, kept across re-renders
+  const pick = it => { try { it.run(); } catch (e) { showError(e); } };
+  const render = () => {
     const v = q.value.trim().toLowerCase();
-    const hits = items.map(it => [palScore(v, it), it]).filter(x => x[0] != null).sort((a, b) => b[0] - a[0]).map(x => x[1]);
-    list.replaceChildren(...(hits.length ? hits.map((it, i) => cmdRow(it, i === 0)) : [h("div", {class: "sys"}, "No matches.")]));
+    hits = items.map(it => [palScore(v, it), it]).filter(x => x[0] != null).sort((a, b) => b[0] - a[0]).map(x => x[1]);
+    if (!hits.includes(active)) active = hits[0] || null;   // keep the user's pick if it still matches, else the top hit
+    list.replaceChildren(...(hits.length ? hits.map(it => cmdRow(it, it === active, pick)) : [h("div", {class: "sys"}, "No matches.")]));
+    const on = list.querySelector(".cmdrow.on"); if (on) on.scrollIntoView({block: "nearest"});
   };
-  q.oninput = run;
+  q.oninput = () => { active = null; render(); };   // a new query starts from its top hit
   q.addEventListener("keydown", e => {
-    if (e.isComposing) return;
-    const rows = [...list.querySelectorAll(".cmdrow")];
-    if (!rows.length) return;
-    let i = rows.findIndex(r => r.classList.contains("on"));
+    if (e.isComposing || !hits.length) return;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      i = i < 0 ? (e.key === "ArrowDown" ? 0 : rows.length - 1) : (i + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length;
-      rows.forEach((r, k) => r.classList.toggle("on", k === i)); rows[i].scrollIntoView({block: "nearest"});
-    } else if (e.key === "Enter") { e.preventDefault(); rows[i < 0 ? 0 : i].click(); }
+      const i = hits.indexOf(active), j = i < 0 ? (e.key === "ArrowDown" ? 0 : hits.length - 1)
+        : (i + (e.key === "ArrowDown" ? 1 : -1) + hits.length) % hits.length;
+      active = hits[j]; render();
+    } else if (e.key === "Enter" && active) { e.preventDefault(); pick(active); }
   });
   openSheet(h("h2", {}, "Commands"), q, list);
-  run();
+  render();
   setTimeout(() => q.focus(), 50);
   (async () => {   // sessions and pages to jump to, added once fetched (the list stays usable meanwhile)
     let extra = [];
@@ -2228,11 +2235,11 @@ function palette() {
         ...sessions.filter(x => x.name !== view).map(x => ({label: x.name, section: "Go to session",
           sub: base(x.cwd) + " · " + (LABEL[x.state] || x.state), run: () => { closeSheet(); go("#/s/" + x.name); }})),
         ...ps.map(p => ({label: p.title || "page", section: "Open page", sub: "v" + p.version,
-          run: () => { closeSheet(); sidePages[p.id] = sidePages[p.id] || p; openPage(p.id); }})),
+          run: () => { closeSheet(); sidePages[p.id] = p; if (pages[p.id]) pages[p.id] = p; openPage(p.id); }})),
       ];
     } catch (e) { return; }
     if (!list.isConnected) return;   // the palette was closed or replaced while we fetched
-    items = items.concat(extra); run();
+    items = items.concat(extra); render();   // render keeps the highlighted command; it doesn't jump to the new top row
   })();
 }
 
@@ -2580,7 +2587,11 @@ document.addEventListener("keydown", e => {
   if (e.defaultPrevented || e.isComposing) return;
   const combos = combosOf(e), own = ext.keys.find(k => combos.includes(k.combo));   // extensions' shortcuts
   if (own) { e.preventDefault(); if (!e.repeat) runExt("key " + own.combo, own.run, e); return; }
-  if (combos.includes("Ctrl+K")) { e.preventDefault(); if (!e.repeat) palette(); return; }   // the command palette
+  // the command palette: ⌘K on a Mac, Ctrl+K elsewhere, so a Mac's Control+K still edits text (e.g. kill-to-end-of-line).
+  // A grovy.key("Ctrl+K") is caught by the `own` check above and wins, so the palette doesn't reserve the combo.
+  if ((e.key === "k" || e.key === "K") && !e.altKey && !e.shiftKey && (MOD === "⌘" ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) {
+    e.preventDefault(); if (!e.repeat && !sheetOpen()) palette(); return;   // not over an open sheet (don't cancel a dialog)
+  }
   const a = document.activeElement;
   if (e.key === "Escape") {
     if (sheetOpen()) { e.preventDefault(); return closeSheet(); }
@@ -2694,7 +2705,9 @@ function extend(node, e) {   // a message was drawn: extensions may add to it (i
   return node;
 }
 function extCmds(where) {   // command descriptors for each extension grovy.menu item that belongs here right now
-  return ext.menu.filter(m => (m.where === where || m.where === "both") &&
+  // "both" means the session and home menus, never the ＋ New menu (that's for things you start, where:"new").
+  const match = m => m.where === where || (m.where === "both" && where !== "new");
+  return ext.menu.filter(m => match(m) &&
                              (!m.when || runExt("menu " + m.label, m.when, cur ? structuredClone(cur) : null) === true)).map(m =>
     ({label: m.label, sub: m.sub, section: m.section,
       run: () => { closeSheet(); runExt("menu " + m.label, m.run, view); }}));
@@ -2732,7 +2745,7 @@ const KEY_NAMES = {enter: "Enter", esc: "Escape", escape: "Escape", tab: "Tab", 
   arrowup: "ArrowUp", arrowdown: "ArrowDown", arrowleft: "ArrowLeft", arrowright: "ArrowRight", home: "Home", end: "End",
   pageup: "PageUp", pagedown: "PageDown", insert: "Insert"};
 for (let i = 1; i <= 12; i++) KEY_NAMES["f" + i] = "F" + i;
-const RESERVED = new Set(["Ctrl+Enter", "Ctrl+K", "Alt+ArrowUp", "Alt+ArrowDown", "F5", "F12"]);
+const RESERVED = new Set(["Ctrl+Enter", "Alt+ArrowUp", "Alt+ArrowDown", "F5", "F12"]);
 const ALNUM = /^[A-Za-z0-9]$/;
 function comboKey(mods, key) { return [...["Ctrl", "Alt", "Shift"].filter(m => mods.includes(m)), key].join("+"); }
 const keyName = k => k === " " ? "Space" : /^[a-z]$/.test(k) ? k.toUpperCase() : k;   // ASCII only: "ß" stays "ß"

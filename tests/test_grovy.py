@@ -5987,13 +5987,18 @@ window.fetch = async () => { const d = {sessions: [{name: "alpha", cwd: "/home/u
           text: async () => JSON.stringify(d)}; };
 window.EventSource = function () { this.close = () => {}; };
 </script>"""
+    # a where:"new" item (belongs on the ＋ button) and a where:"both" item (session + home menus, not ＋)
+    EXT = """<script>grovy.extension("rtest", g => {
+  g.menu("Startable", () => {}, {where: "new"});
+  g.menu("Dual", () => {}, {where: "both"});
+});</script>"""
 
     def test_palette(self):
         d = tempfile.mkdtemp(dir=TMP)
         page = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
         check = open(os.path.join(ROOT, "tests", "palette_check.js"), encoding="utf-8").read()
         page = page.replace("<head>", "<head>" + self.STUB, 1).replace("</style>", "*{animation:none!important}</style>", 1)
-        page = page.replace("</body>", "<script>" + check + "</script></body>")
+        page = page.replace("</body>", self.EXT + "<script>" + check + "</script></body>")
         html, png = os.path.join(d, "pal.html"), os.path.join(d, "pal.png")
         with open(html, "w", encoding="utf-8") as f:
             f.write(page)
