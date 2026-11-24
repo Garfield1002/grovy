@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import urllib.error
 import urllib.parse
@@ -46,7 +47,7 @@ for _k in ("GROVY_HOME", "CCS_HOME", "GROVY_CONFIG_DIR", "CCS_CONFIG_DIR", "BASH
     os.environ.pop(_k, None)
 import grovy  # noqa: E402
 import grovyd  # noqa: E402
-from grovylib import peers, plugins, claude, cleanup, client, cli, completion, remote, graft, setupflow, tui, update, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, steps, store, tls, tmuxctl, uploads  # noqa: E402
+from grovylib import peers, plugins, claude, cleanup, client, cli, completion, remote, graft, setupflow, tui, update, commands, core, hook, install, issues, live, manage, newproject, oom, pages, perms, projects, prompts, scriptlib, sessions, sidequery, steps, store, tls, tmuxctl, uploads  # noqa: E402
 # Paths fixed when grovy's modules load, from the real home: never let a test reach the real ~/.ssh or systemd units.
 graft.KEY = os.path.join(TMP, "home-ssh", "grovy_tunnel")
 graft.UNIT = os.path.join(TMP, "home-units", "grovy-tunnel.service")
@@ -575,9 +576,122 @@ class TestGoalCommand(StoreCase):
 
     def test_btw_is_still_blocked_from_the_prompt_queue(self):
         self.idle()
-        code, msg = self.store.enqueue("a", "/btw what changed?")
+        code, msg = self.store.enqueue("a", "/btw what changed?")   # the UI routes /btw to ask_side; enqueue still refuses it
         self.assertEqual(code, 400)
         self.assertIn("terminal", msg)
+
+
+class TestSideQuestion(StoreCase):
+    """/btw rebuilt as a side question: answered by a throwaway claude over a copy of the conversation, so the
+    live session and its transcript are never touched (sidequery.py). The runner is faked here."""
+
+    def setUp(self):
+        super().setUp()
+        self.store.side_run = lambda transcript, question: f"[{os.path.basename(transcript)}] re: {question}"
+
+    def with_transcript(self, name="a"):
+        path = os.path.join(self.dir, f"{name}-conv.jsonl")
+        with open(path, "w") as f:
+            f.write('{"type":"user"}\n')
+        self.store.ingest(name, ev("UserPromptSubmit", prompt="hello", transcript_path=path))
+        return path
+
+    def ready(self, qid):
+        for _ in range(300):
+            q = next((x for x in self.store.sidequeries if x["id"] == qid), None)
+            if q and q["status"] != "pending":
+                return q
+            time.sleep(0.01)
+        self.fail("side question never resolved")
+
+    def test_answered_off_the_record(self):
+        self.with_transcript()
+        code, q = self.store.ask_side("a", "what did we change?")
+        self.assertEqual(code, 200)
+        done = self.ready(q["id"])
+        self.assertEqual(done["status"], "done")
+        self.assertIn("re: what did we change?", done["answer"])
+        self.assertEqual(self.store.detail("a")["side"][-1]["id"], q["id"])       # reaches the phone
+        self.assertFalse(any("what did we change?" in json.dumps(r) for r in self.store.events["a"]))  # not logged
+
+    def test_needs_a_conversation_first(self):
+        code, msg = self.store.ask_side("b", "anything?")   # no transcript seen yet
+        self.assertEqual(code, 409)
+        self.assertIn("ask about", msg)
+
+    def test_rejected_after_exit(self):
+        self.with_transcript()
+        self.store.ingest("a", ev("SessionEnd", reason="other"))
+        self.assertEqual(self.store.ask_side("a", "q")[0], 409)
+
+    def test_empty_question(self):
+        self.assertEqual(self.store.ask_side("a", "   ")[0], 400)
+
+    def test_runner_failure_is_surfaced_not_fatal(self):
+        self.with_transcript()
+        def boom(transcript, question):
+            raise RuntimeError("claude unavailable")
+        self.store.side_run = boom
+        _, q = self.store.ask_side("a", "q")
+        done = self.ready(q["id"])
+        self.assertEqual(done["status"], "failed")
+        self.assertEqual(done["error"], "claude unavailable")
+
+    def test_transcript_path_is_tracked_but_hidden_from_the_phone(self):
+        path = self.with_transcript()
+        self.assertEqual(self.store.sessions["a"]["transcript"], path)
+        self.assertNotIn("transcript", self.store.summary("a"))   # the daemon's business, like tx
+
+    def test_copy_rewrites_ids_and_leaves_the_original_untouched(self):
+        src = os.path.join(self.dir, "orig.jsonl")
+        with open(src, "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": "/real/project", "sessionId": "OLD", "x": 1}) + "\n")
+            f.write(json.dumps({"type": "assistant", "sessionId": "OLD"}) + "\n")
+        before = open(src, "rb").read()
+        dst = os.path.join(self.dir, "copy.jsonl")
+        sidequery._copy_transcript(src, "/tmp/throwaway", "NEWID", dst)
+        self.assertEqual(open(src, "rb").read(), before)   # original byte-for-byte unchanged
+        rows = [json.loads(l) for l in open(dst)]
+        self.assertEqual(rows[0]["cwd"], "/tmp/throwaway")
+        self.assertTrue(all(r["sessionId"] == "NEWID" for r in rows))
+
+    def test_run_resumes_a_copy_never_the_original(self):
+        src = os.path.join(self.dir, "live.jsonl")
+        with open(src, "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": "/real", "sessionId": "LIVE"}) + "\n")
+        before = open(src, "rb").read()
+        seen = {}
+
+        def fake_subprocess_run(cmd, cwd, input, capture_output, text, timeout):
+            seen["cmd"], seen["input"] = cmd, input
+            proj = os.path.join(sidequery._projects_root(), cwd.replace("/", "-"))
+            copy = os.path.join(proj, os.listdir(proj)[0])   # the one copied transcript, named by the fresh id
+            seen["copy"] = json.loads(open(copy).readline())
+            seen["resume_id"] = os.path.basename(copy)[:-len(".jsonl")]
+            seen["original"] = open(src, "rb").read()
+            return types.SimpleNamespace(returncode=0, stdout="the answer\n", stderr="")
+
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self.dir}), \
+                mock.patch.object(sidequery.subprocess, "run", fake_subprocess_run):
+            ans = sidequery.run(src, "a question?")
+        self.assertEqual(ans, "the answer")
+        self.assertEqual(seen["original"], before)             # the live transcript was never touched
+        self.assertNotEqual(seen["copy"]["cwd"], "/real")      # the copy points at the throwaway cwd
+        self.assertEqual(seen["cmd"][seen["cmd"].index("--resume") + 1], seen["resume_id"])   # resumes the copy's id
+        self.assertNotIn(src, seen["cmd"])                     # not the original path
+        self.assertEqual(seen["input"], "a question?")         # the question goes on stdin, never argv (no flag injection)
+        self.assertNotIn("a question?", seen["cmd"])
+        self.assertEqual(os.listdir(os.path.join(self.dir, "projects")), [])   # the throwaway copy was cleaned up
+
+    def test_run_surfaces_a_nonzero_exit(self):
+        src = os.path.join(self.dir, "live2.jsonl")
+        open(src, "w").write('{"type":"user"}\n')
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self.dir}), \
+                mock.patch.object(sidequery.subprocess, "run",
+                                  lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr="resume failed\n")):
+            with self.assertRaises(RuntimeError) as cm:
+                sidequery.run(src, "q")
+        self.assertIn("resume failed", str(cm.exception))
 
 
 class TestLifecycle(StoreCase):

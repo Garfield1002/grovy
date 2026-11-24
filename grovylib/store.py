@@ -16,6 +16,8 @@ from .uploads import Attachments
 from .issues import Issues
 from .newproject import NewProjects
 from .steps import Steps
+from . import sidequery
+from .sidequery import SideQueries
 
 
 HISTORY = 600            # events kept in memory per session (a turn's steps count too)
@@ -57,9 +59,10 @@ def _owner(r):
     return r.get("session", r.get("ccs"))
 
 
-class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Attachments, Issues, NewProjects, Steps):
+class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Attachments, Issues, NewProjects,
+            Steps, SideQueries):
     def __init__(self, sdir, tmux_live=tmuxctl.tmux_managed, paste=tmuxctl.paste_prompt, notifier=None,
-                 key=tmuxctl.send_key, lifecycle=None, oom=None):
+                 key=tmuxctl.send_key, lifecycle=None, oom=None, side_run=sidequery.run):
         self.dir = sdir
         self.lock = threading.RLock()
         self.tmux_live = tmux_live
@@ -72,6 +75,8 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
         self.events = {}        # name -> deque of event records
         self.perms = {}         # id -> permission dict (includes threading.Event under "_ev")
         self.prompts = []       # list of prompt dicts, persisted
+        self.side_run = side_run   # how a side question is answered (sidequery.run; a fake in tests)
+        self.sidequeries = []   # side questions {id, session, question, status, answer, error, ...}: in memory only
         self.seen = {}  # payload digest -> time; only a re-delivery within DUP_WINDOW is a duplicate
         self.subscribers = set()
         self.seq = 0
@@ -268,6 +273,9 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
         """One hook event of the session itself (not of a subagent), under the lock."""
         if payload.get("cwd"):
             s["cwd"] = str(payload["cwd"])
+        tp = payload.get("transcript_path")   # the live conversation file; kept so a side question can read it
+        if isinstance(tp, str) and os.path.isabs(tp):   # between turns, after s["tx"] is gone (steps.py)
+            s["transcript"] = tp
         self._steps_follow(s, payload)
         if ev != "PostToolUse":
             data = {k: core.clip(payload[k]) for k in KEEP.get(ev, ()) if k in payload}
@@ -355,7 +363,7 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
             else:
                 self._expire_perms(name, "Claude session ended")
                 self._set(name, "exited", f"conversation ended ({payload.get('reason', '')})")
-                s["goal"] = None
+                s["goal"] = s["transcript"] = None
                 self._task_snapshot(s, [], t)
                 self._steps_end(s)
                 self._fail_queued(name, "Claude exited before it was sent")
@@ -417,6 +425,7 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
     def summary(self, name):
         s = dict(self.sessions[name])
         s.pop("tx", None)   # where the transcript is read: the daemon's business
+        s.pop("transcript", None)   # the conversation's path (for side questions): also the daemon's business
         mine = [p for p in self.prompts if p["session"] == name]
         s["pending_permissions"] = len(self._pending(name))
         s["queued_prompts"] = sum(p["status"] in ("queued", "injected") for p in mine)
@@ -444,5 +453,6 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
                     "permissions": [perms._public(p) for p in self.perms.values()
                                     if p["session"] == name and p["status"] in ("pending", "deciding")],
                     "prompts": [p for p in self.prompts if p["session"] == name][-30:],
+                    "side": self.side_for(name),
                     "pages": {k: {"version": p["version"], "title": p["title"], "share": p.get("share")}
                               for k, p in self.pages.items() if p["session"] == name}}

@@ -958,6 +958,10 @@ class Http(http.server.BaseHTTPRequestHandler):
         if m and core.valid_name(m.group(1)):
             code, res = store.enqueue(m.group(1), body.get("text"), body.get("force") is True)
             return code, (res if code == 200 else {"error": res})
+        m = re.fullmatch(r"/api/sessions/([^/]+)/side", path)   # a side question (grovy's /btw)
+        if m and core.valid_name(m.group(1)):
+            code, res = store.ask_side(m.group(1), body.get("question"))
+            return code, (res if code == 200 else {"error": res})
         m = re.fullmatch(r"/api/permissions/([^/]+)/decision", path)
         if m and core.ID_RE.match(m.group(1)):
             return wrap(*store.decide(m.group(1), body.get("decision"), body.get("answers")))

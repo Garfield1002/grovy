@@ -10,7 +10,9 @@ BUILTIN_COMMANDS = [{"name": "clear", "description": "Start a new conversation (
                     {"name": "compact", "description": "Summarize the conversation to free up context",
                      "source": "built-in"},
                     {"name": "goal", "description": "Set a goal; Claude keeps working until it's met "
-                     "(/goal clear to stop, /goal alone for status)", "source": "built-in"}]
+                     "(/goal clear to stop, /goal alone for status)", "source": "built-in"},
+                    {"name": "btw", "description": "Ask a side question, answered from the conversation without "
+                     "changing it (off the record)", "source": "built-in"}]
 _cmd_cache = {}
 # Claude Code built-ins (and common aliases) that open menus or act outside the conversation.
 # Names are compared lowercased. Skills can't shadow these: the phone must never open a built-in menu.

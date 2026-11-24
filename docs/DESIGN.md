@@ -548,6 +548,23 @@ terminal, via `SessionStart(source=clear)`), when a new `/goal` replaces it, and
 **not** show a goal set in the terminal, nor clear itself when the evaluator meets the goal (that would mean reading the
 `goal_status` attachment from the transcript). `/goal` with no argument is a status view and leaves the banner unchanged.
 
+**Side questions (`/btw`).** Claude Code's `/btw` answers a question about the session from its conversation without
+adding anything to the history — but it's interactive-only and its answer lives in an in-memory terminal overlay that
+reaches neither a hook nor the transcript (verified: `claude -p "/btw …"` prints "not available in this environment"),
+so grovy can't see it. grovy rebuilds it instead (`grovylib/sidequery.py`): it copies the conversation's JSONL to a
+throwaway project dir under a fresh session id (rewriting the `cwd`/`sessionId` fields), runs `claude -p --resume`
+over the *copy* with no tools allowed (`--allowedTools GrovySideNoop`) and an appended "answer from the conversation,
+no tools" system prompt, and reads the answer from that process's stdout; the copy is deleted afterwards. The **live
+session is never resumed, typed into, or changed, and the real transcript is left byte-for-byte alone** (a fresh id
+means the live conversation is never forked). The question/answer are kept **in memory only** (off the record, like
+`/btw`) and shown on the phone as a dashed-border card apart from the thread; they are not written to grovy's event
+log. The page routes a `/btw <question>` to `POST /api/sessions/<name>/side` (`Store.ask_side`) instead of the prompt
+queue; the runner (`Store.side_run`, faked in tests) runs on a worker thread, off the lock, so a 2–120s `claude` call
+never blocks the daemon. It needs the conversation's path, which grovy keeps on the session (`s["transcript"]`, from
+every hook's `transcript_path`; popped from the public view like `s["tx"]`) so a question works between turns, after
+`s["tx"]` is gone. `/btw` is still refused by the prompt queue itself (it's reserved and not in `PHONE_SAFE`); only the
+page's routing reaches the side channel.
+
 **Interrupt.** While a session is `working` with no pending dialog and the message box is empty, the send button
 becomes ■ (stop), which presses Esc (after a confirm); once you type, it becomes a blue steer arrow. Ctrl+Enter only
 ever sends, never stops. Esc

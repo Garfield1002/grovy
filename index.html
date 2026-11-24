@@ -131,6 +131,15 @@ header h1, .sess .name, #sheet h2, #side .sh a, .md :is(h1, h2, h3, h4), .wt, .s
 .agent { border:1px solid var(--line); border-left:3px solid var(--mut); border-radius:10px; padding:8px 12px; margin:14px 0; }
 .agent .ah { font-size:13px; font-weight:650; color:var(--mut); margin-bottom:4px; }
 .agent.collapsed .a { max-height:7.5em; overflow:hidden; -webkit-mask-image:linear-gradient(#000 40%, transparent); }
+/* side question (/btw): off the record, so set apart from the thread with a dashed accent border */
+.side { border:1px dashed color-mix(in srgb, var(--busy) 50%, var(--line)); border-radius:12px; padding:10px 13px;
+  margin:14px 0; background:color-mix(in srgb, var(--busy) 6%, transparent); }
+.side .slbl { font-size:12px; font-weight:700; color:var(--busy); letter-spacing:.02em; }
+.side .sqt { font-weight:600; margin:3px 0 7px; overflow-wrap:anywhere; }
+.side .sbody { overflow-wrap:anywhere; }
+.side .sbody.mut { color:var(--mut); display:flex; align-items:center; gap:8px; }
+.side .sbody.bad { color:var(--bad); }
+.side .snote { font-size:11.5px; color:var(--mut); margin-top:8px; }
 .more { border:0; background:none; color:var(--acc); font-weight:600; padding:6px 0; min-height:36px; }
 .sys { text-align:center; font-size:12.5px; color:var(--mut); margin:10px 0; }
 .sys span { padding:0 8px; }
@@ -1270,6 +1279,17 @@ function promptNode(p) {
   return h("div", {class: "u pending", ctx: () => [...userCtx(p.text), ...(cancel ? [press(cancel, "Cancel sending", null, true)] : [])]}, ...userText(p.text),
     h("span", {class: "st " + cls}, sent(p.created), ...(n ? [ticks(n)] : []), label, p.error && p.status !== "unconfirmed" ? ": " + p.error : "", cancel));
 }
+// A side question (/btw): off the record — answered from the conversation without changing it. Rendered apart from
+// the thread so it's clear it never reached Claude's history.
+function sideNode(q) {
+  const body = q.status === "pending" ? h("div", {class: "sbody mut"}, h("span", {class: "spin"}), "thinking…")
+    : q.status === "failed" ? h("div", {class: "sbody bad"}, "couldn't answer: " + (q.error || "unknown error"))
+    : h("div", {class: "sbody"}, md(q.answer || ""));
+  return h("div", {class: "side"},
+    h("div", {class: "sq"}, h("span", {class: "slbl"}, "💭 Side question"), h("div", {class: "sqt"}, q.question)),
+    body,
+    h("div", {class: "snote"}, "off the record — not in Claude's conversation"));
+}
 function cached(key, make) {
   if (!cache.has(key)) { const n = make(); if (!n) return null; cache.set(key, n); }
   return cache.get(key);
@@ -1321,6 +1341,7 @@ async function renderDetail(name) {
     (p.status !== "cancelled" && p.status !== "failed" || serverNow() - p.updated < 3600));
   const live = p => p.status === "queued" || p.status === "injected";
   for (const p of outgoing.filter(p => !live(p))) items.push([p.created, cached("p" + p.id + p.status, () => promptNode(p))]);
+  for (const q of d.side || []) items.push([q.created, cached("sq" + q.id + q.status, () => sideNode(q))]);
   items.sort((a, b) => a[0] - b[0]);
   const earlier = d.events.length >= 100 && !noMore ? cached("earlier", () => h("button", {class: "earlier", onclick: loadEarlier}, "Load earlier")) : null;
   paint(main, ...(earlier ? [earlier] : []), ...(items.length ? items.map(x => x[1]) : [h("div", {class: "empty"}, "No activity yet.")]),
@@ -1797,6 +1818,8 @@ async function sendNow() {
   if (text == null) return;
   if (files.length && /^[/!]/.test(text.trimStart()))   // checked on what is sent, after the extensions
     return say("Attachments can't go with a / or ! command: send them in a normal message.");
+  const btw = text.trimStart().match(/^\/btw\b([\s\S]*)$/i);   // a side question: answered off the record, not typed
+  if (btw) return askSide(btw[1].trim());
   if (/^\/clear(\s|$)/i.test(text.trimStart())) {   // easy to pick instead of /compact, and it can't be undone
     const r = await ask("Clear the conversation? Claude starts over with an empty context; this can't be undone.\n"
                         + "Summarizing (/compact) keeps a summary instead.", "Clear", {danger: true, alt: "Summarize"});
@@ -1813,6 +1836,22 @@ async function sendNow() {
     atts = []; saveAtts(); drawAtts();
     first = true;   // jump to the bottom to show the outgoing message
   } catch (e) { say("Not sent: " + e.message); }
+  $("send").disabled = false;
+  syncSend();
+  refresh();
+}
+
+// A side question (/btw): answered from the conversation by a throwaway Claude over a copy of it, so the live
+// session and its history are untouched. The answer comes back as an off-the-record card, not a reply.
+async function askSide(question) {
+  if (!view) return;
+  if (!question) return say("Add a question after /btw, e.g. /btw what did we change in auth?");
+  $("send").disabled = true;
+  try {
+    await api(`/api/sessions/${encodeURIComponent(view)}/side`, {question});
+    input.value = ""; try { localStorage.removeItem(draftKey()); } catch (e) {} autosize(); $("picker").replaceChildren();
+    first = true;
+  } catch (e) { say("Not asked: " + e.message); }
   $("send").disabled = false;
   syncSend();
   refresh();

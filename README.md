@@ -17,7 +17,7 @@ page you open on your phone (or any browser) over your home network or VPN. Noth
 - **Approve from anywhere:** the full command or diff, then Allow or Deny. Nothing is approved without you, and the
   terminal's own question stays there. [safety →](docs/safety.md)
 - **Talk to Claude:** queue messages while it works, steer it mid-task, follow its steps live, quote its replies,
-  attach photos and files, run `/` skills. [guide →](docs/guide.md)
+  attach photos and files, run `/` skills, set a `/goal`, ask a `/btw` side question. [guide →](docs/guide.md)
 - **Rich answers:** tables, code, math, charts, checklists, and full HTML pages Claude publishes for you.
 - **Start, resume and stop** sessions in any trusted folder; continue or fork past conversations.
 - **Small fixes on the side:** an issue gets its own git worktree and branch, merged back in one tap.
