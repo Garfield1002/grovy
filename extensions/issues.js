@@ -60,7 +60,8 @@ grovy.extension("issues", grovy => {
     text.focus();
   }, {where: "new", sub: "A quick fix in a worktree of its own"});
 
-  grovy.menu("Finish issue", async session => {
+  const draftRebase = base => `Rebase this branch onto ${base}, run the tests, and fix anything that breaks.`;
+  async function finishSheet(session) {
     let st;
     try { st = await grovy.api("/api/issues/" + encodeURIComponent(session)); } catch (e) { return grovy.say(e.message); }
     const what = h("p", {class: "iss-meta"}, h("b", {}, st.branch), " → ", h("b", {}, st.base), " · ",
@@ -74,9 +75,20 @@ grovy.extension("issues", grovy => {
       fix = btn("Ask Claude to commit", "allow", draft("Commit your changes on this branch (run the tests first)."));
     } else if (!st.ahead) why = "Nothing to merge yet: there are no commits on the issue's branch.";
     else if (st.behind) {
-      why = `${st.base} has moved on since this issue started: Claude must rebase before it can be merged.`;
-      fix = btn("Ask Claude to rebase", "allow", draft(`Rebase this branch onto ${st.base}, run the tests, and fix ` +
-        "anything that breaks."));
+      // grovy rebases it (no Claude). Only a rebase that conflicts falls back to asking Claude.
+      why = `${st.base} has moved on since this issue started (${st.behind} new commit${st.behind === 1 ? "" : "s"}): ` +
+        `${st.branch} is rebased onto it before merging. grovy does this when it's automatic; a conflict needs Claude.`;
+      fix = btn(`Rebase onto ${st.base}`, "allow", async () => {
+        fix.disabled = true; fix.textContent = "Rebasing…";
+        try {
+          await grovy.api(`/api/issues/${encodeURIComponent(session)}/rebase`, {});
+          finishSheet(session);   // now caught up with the base: the sheet reopens with the Merge button
+        } catch (e) {   // couldn't do it on its own (a conflict, usually): hand it to Claude
+          grovy.sheet(h("h2", {}, "Finish issue"), what, commits, h("p", {style: "margin:0 0 10px"}, e.message),
+            buttons(btn("Ask Claude to rebase", "allow", draft(draftRebase(st.base))),
+              discard, btn("Close", "", grovy.closeSheet)));
+        }
+      });
     }
     const discard = btn("Discard", "deny", async () => {
       const sure = await grovy.ask(`Discard ${st.branch}? Its session stops, and its worktree and branch are ` +
@@ -104,5 +116,7 @@ grovy.extension("issues", grovy => {
       h("p", {class: "iss-meta"}, `Fast-forwards ${st.base} to these commits, then stops the session and deletes ` +
         "its worktree and branch. Nothing is pushed."),
       buttons(merge, discard, close));
-  }, {where: "session", section: "Session", when: state => !!(state && state.issue)});
+  }
+  grovy.menu("Finish issue", finishSheet,
+    {where: "session", section: "Session", when: state => !!(state && state.issue)});
 }, {about: "＋ → New issue, ⋯ → Finish issue"});

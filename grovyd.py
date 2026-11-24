@@ -998,10 +998,12 @@ class Http(http.server.BaseHTTPRequestHandler):
             return 200, {"status": "restarting"}
         if path == "/api/report":   # the "report" paint overlay (extensions/report.js): an issue in grovy's own repo
             return _res(*store.report_grovy_issue(body.get("note"), body.get("context"), body.get("ask")))
-        m = re.fullmatch(r"/api/issues/([^/]+)/(finish|discard)", path)
+        m = re.fullmatch(r"/api/issues/([^/]+)/(finish|rebase|discard)", path)
         if m and core.valid_name(m.group(1)):
             if m.group(2) == "finish":
                 return _res(*store.finish_issue(m.group(1), body.get("tip")))
+            if m.group(2) == "rebase":
+                return _res(*store.rebase_issue(m.group(1)))
             return _res(*store.discard_issue(m.group(1)))
         m = re.fullmatch(r"/api/sessions/([^/]+)/rename", path)
         if m and core.valid_name(m.group(1)):

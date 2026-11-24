@@ -718,8 +718,14 @@ the `Issues` part of `Store`; the page side is the built-in extension `extension
   sends the commit the sheet showed (`tip`), and only that is merged: if Claude committed again since, it's refused
   and you look again. Refused,
   changing nothing, while Claude is working or a request is pending, with uncommitted changes in the worktree, with no
-  commits, or when the base branch moved on (the sheet then offers to ask Claude to commit or to rebase, as a draft you
-  send). Where the base branch is checked out (your main checkout, usually), it is `git merge --ff-only` there, which
+  commits (the sheet then offers to ask Claude to commit, as a draft you send), or when the base branch moved on. In
+  that last case the sheet offers **Rebase onto `<base>`**, a rebase of the issue's branch onto the base **done by
+  grovy** in the worktree (`issues.rebase` → `git rebase`, `POST /api/issues/<name>/rebase` → `Issues.rebase_issue`;
+  refused, changing nothing, the same way Finish is — while Claude works, with uncommitted changes, or once the base
+  hasn't moved). On a clean rebase the sheet reopens caught up, with the Merge button; a rebase that hits a conflict is
+  aborted (the worktree is left exactly as it was) and the sheet falls back to offering **Ask Claude to rebase** as a
+  draft you send, since only a conflict needs an agent. Where the base branch is checked out (your main checkout,
+  usually), the merge is `git merge --ff-only` there, which
   updates those files and refuses if your own uncommitted changes are in the way; where it isn't, `git update-ref`
   moves it, only from the commit it was checked against. Then the session is stopped and forgotten, and the worktree
   (`git worktree remove`, which refuses if anything changed since) and the branch (once checked to be in the base branch: `git branch -d` would check the branch your checkout has out) deleted.
@@ -1220,8 +1226,9 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
 
 ## Known limitations
 
-* **Issues merge into the default branch only**, by fast-forward: a branch that must be rebased needs Claude (or you)
-  first. An issue's conversation stays resumable from ＋ but its folder is gone once it's finished.
+* **Issues merge into the default branch only**, by fast-forward: a branch whose base moved on is rebased onto it
+  first, by grovy when that's automatic and by Claude (or you) when the rebase conflicts. An issue's conversation stays
+  resumable from ＋ but its folder is gone once it's finished.
 * **Prompt injection is keystrokes into a TUI.** If you've half-typed something in the terminal input, the
   web prompt is appended to it. grovy can't see that without scraping the screen, which it deliberately doesn't do.
   If a dialog that emits no hook is open (`/model`, `/config`, a rewind menu, the workspace-trust prompt…), the

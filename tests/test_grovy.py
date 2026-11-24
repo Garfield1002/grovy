@@ -3778,6 +3778,67 @@ class TestIssues(StoreCase):
         self.assertEqual(self.killed, [])
         self.assertIn(name, self.store.issues)
 
+    def move_base(self, file="g.txt", text="x\n"):
+        """Add a commit on main (a file the issue's branch doesn't touch, so a rebase is automatic)."""
+        with open(os.path.join(self.repo, file), "w") as f:
+            f.write(text)
+        gitc(self.repo, "add", file)
+        gitc(self.repo, "commit", "-q", "-m", "main moved")
+
+    def test_rebase_is_automatic_when_there_is_no_conflict(self):
+        name, issue = self.start_issue()
+        self.settle(name)
+        self.commit_in(issue["worktree"])                       # branch: f.txt -> "two\n"
+        self.move_base()                                        # main adds g.txt: no conflict
+        self.assertEqual(self.store.issue_status(name)[1]["behind"], 1)
+        code, res = self.store.rebase_issue(name)
+        self.assertEqual(code, 200, res)
+        self.assertIn("rebased", res["message"])
+        st = self.store.issue_status(name)[1]
+        self.assertEqual((st["behind"], st["ahead"]), (0, 1))   # caught up, its own commit kept
+        self.assertEqual(res["tip"], st["tip"])
+        self.assertEqual(self.killed, [])                       # the session is left running
+        self.assertIn(name, self.store.issues)
+        # now that the branch contains main's commit, grovy can fast-forward main to it
+        self.assertEqual(self.finish(name)[0], 200)
+        self.assertEqual(gitc(self.repo, "log", "-1", "--format=%s", "main").strip(), "fix")
+        with open(os.path.join(self.repo, "f.txt")) as f:
+            self.assertEqual(f.read(), "two\n")                 # the branch's change carried through
+
+    def test_rebase_conflict_is_aborted_and_left_for_claude(self):
+        name, issue = self.start_issue()
+        self.settle(name)
+        self.commit_in(issue["worktree"], "branch line\n")      # branch: f.txt -> "branch line\n"
+        tip = self.head(name)
+        with open(os.path.join(self.repo, "f.txt"), "w") as f:
+            f.write("main line\n")                              # same lines on main: conflict
+        gitc(self.repo, "commit", "-q", "-am", "main changed f")
+        moved = self.head("main")
+        code, why = self.store.rebase_issue(name)
+        self.assertEqual(code, 409)
+        self.assertIn("ask Claude", why)
+        self.assertEqual(self.head(name), tip)                  # branch untouched: the rebase was aborted
+        self.assertEqual(self.head("main"), moved)
+        st = self.store.issue_status(name)[1]
+        self.assertEqual((st["behind"], st["dirty"]), (1, []))  # still behind, worktree clean (not mid-rebase)
+        self.assertEqual(self.killed, [])
+        self.assertIn(name, self.store.issues)
+
+    def test_rebase_refusals(self):
+        self.assertEqual(self.store.rebase_issue("nope")[0], 404)
+        name, issue = self.start_issue()
+        self.settle(name)
+        self.commit_in(issue["worktree"])
+        code, why = self.store.rebase_issue(name)               # base hasn't moved
+        self.assertEqual(code, 409)
+        self.assertIn("nothing to rebase", why)
+        self.store.ingest(name, ev("UserPromptSubmit", sid="S", prompt="more"))   # Claude working
+        self.move_base()
+        code, why = self.store.rebase_issue(name)
+        self.assertEqual(code, 409)
+        self.assertIn("still working", why)
+        self.assertEqual(self.head(name), self.store.issue_status(name)[1]["tip"])  # nothing rebased
+
     def test_finish_refused_when_your_changes_are_in_the_way(self):
         name, issue = self.start_issue()
         self.settle(name)

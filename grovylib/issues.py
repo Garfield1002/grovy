@@ -4,7 +4,8 @@
 `<repo>/.claude/worktrees/<name>` (inside the trusted repo, so Claude starts there without its trust dialog: verified
 with Claude Code 2.1.327), and a session there whose first message is what you wrote. ⋯ → Finish issue merges it:
 fast-forward only, done by grovy, never by Claude. Then the session, the worktree and the branch go. If the default
-branch moved on in the meantime, Claude is asked to rebase first. See docs/DESIGN.md, "Issues".
+branch moved on in the meantime, grovy rebases the branch onto it (one tap, no Claude); only a rebase that hits a
+conflict falls back to asking Claude. See docs/DESIGN.md, "Issues".
 
 Imported by the hook (for the SessionStart note), so it stays import-cheap.
 """
@@ -184,6 +185,23 @@ def fast_forward(issue, tip):
     return old, new
 
 
+def rebase(issue):
+    """Rebase the issue's branch onto its base, in the branch's own worktree. Returns the branch's new tip. On a
+    conflict (or any rebase that can't finish on its own) the rebase is aborted — restoring the worktree to where it
+    was — and GitError is raised, so the caller can fall back to asking Claude."""
+    base, wt = issue["base"], issue["worktree"]
+    try:
+        git(wt, "rebase", base)
+    except GitError:
+        try:
+            git(wt, "rebase", "--abort")
+        except GitError:
+            pass
+        raise GitError(f"the rebase onto {base} hit conflicts grovy can't resolve on its own: ask Claude "
+                       f"to rebase") from None
+    return git(wt, "rev-parse", "--verify", "HEAD^{commit}").strip()
+
+
 def context_for(name):
     """What Claude is told at SessionStart in an issue's session (the hook calls this; never raises)."""
     try:
@@ -334,6 +352,30 @@ class Issues:
         msg = f"{issue['base']} moved to {new[:7]} ({st['ahead']} commit{'s' if st['ahead'] > 1 else ''})"
         return 200, {"message": msg + ("; " + "; ".join(notes) if notes else ""), "base": issue["base"],
                      "from": old, "to": new}
+
+    def rebase_issue(self, name):
+        """Rebase the issue's branch onto its base, done by grovy (no Claude) when it's automatic. Refused, changing
+        nothing, while Claude is working, with uncommitted changes in the worktree, or when the base hasn't moved. A
+        rebase that hits a conflict is aborted (worktree unchanged) and 409s with a message to ask Claude."""
+        with self.issue_lock:
+            name, issue = self._issue(name)
+            if not issue:
+                return 404, "not an issue"
+            why = self._busy(name)
+            if why:
+                return 409, why
+            try:
+                st = status(issue)
+                if st.get("error"):
+                    return 409, st["error"]
+                if st["dirty"]:
+                    return 409, "there are uncommitted changes in the issue's worktree: ask Claude to commit them"
+                if not st["behind"]:
+                    return 409, f"{issue['base']} hasn't moved on: there's nothing to rebase"
+                new = rebase(issue)
+            except GitError as e:
+                return 409, str(e)
+        return 200, {"message": f"rebased onto {issue['base']}", "tip": new}
 
     def discard_issue(self, name):
         """Drop the issue: its session, worktree and branch, commits and uncommitted changes included."""
