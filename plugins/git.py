@@ -17,6 +17,7 @@ A plugin of your own named git.py (~/.config/grovy/plugins/) replaces this one.
 import os
 import re
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -156,10 +157,12 @@ def head(cwd):
 
 
 def file_names(names):
-    """Of `names`, the ones that could be a repo-relative file path: not absolute, no `..` segment, non-empty.
+    """Of `names`, the ones that could be a file path (relative to the folder git runs in): not absolute, no `..`
+    segment, no control character (a NUL would make subprocess raise, and newlines don't belong in a name), non-empty.
     (NAME_RE lets through a mid-string `..`, which must never reach a pathspec or a path join.)"""
     return [n for n in dict.fromkeys(names)
-            if isinstance(n, str) and n and not n.startswith("/") and ".." not in n.split("/")]
+            if isinstance(n, str) and n and not n.startswith("/") and ".." not in n.split("/")
+            and not any(c < " " for c in n)]
 
 
 def files_in(cwd, names):
@@ -368,20 +371,40 @@ def setup(grovy):
         path = args.get("path") or ""
         if not isinstance(path, str) or not file_names([path]):
             raise BadRequest("bad path")
-        if not files_in(cwd, [path]):   # tracked or untracked-not-ignored: never an ignored file (a secret) or a path
-            raise NotFound(f"no such file in the repository: {path[:100]}")   # outside the repo
-        # A tracked symlink could still point out of the tree: resolve and require the target to stay inside it.
-        full, root = os.path.realpath(os.path.join(cwd, path)), os.path.realpath(cwd)
-        if full != root and not full.startswith(root + os.sep):
+        if not files_in(cwd, [path]):   # tracked or untracked-not-ignored: never an ignored file (a secret), a path
+            raise NotFound(f"no such file in the repository: {path[:100]}")   # outside the repo, or a directory
+        # files_in gated the NAME; the bytes must come from that same file. A symlink anywhere in the path would
+        # redirect the read to another file (an ignored `.env`, something under `.git/`, or outside the tree), all of
+        # which the gate exists to exclude. So resolve cwd's own links once, join the (relative, `..`-free) path to it,
+        # and require no further resolution: realpath(full) == full means no component of the path is a symlink, and
+        # (since full is base + path) that it stays inside the repository.
+        base = os.path.realpath(cwd)
+        full = os.path.join(base, path)
+        if os.path.realpath(full) != full:
             raise NotFound(f"no such file in the repository: {path[:100]}")
-        if not os.path.isfile(full):   # a directory, a socket, or it went away between the two calls
+        # O_NOFOLLOW (the final component can't be swapped for a symlink between the check and here) and a regular-file
+        # check on the open fd (never a FIFO, device or directory: O_NONBLOCK also keeps the open from blocking on one).
+        try:
+            fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
             raise NotFound(f"no such file in the repository: {path[:100]}")
         try:
-            size = os.path.getsize(full)
-            with open(full, "rb") as f:
-                data = f.read(FILE_MAX + 1)
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise NotFound(f"no such file in the repository: {path[:100]}")
+            size = st.st_size
+            chunks, remaining = [], FILE_MAX + 1   # one os.read can return short even for a regular file: loop
+            while remaining > 0:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
         except OSError as e:
             raise GitError(f"can't read the file: {e}")
+        finally:
+            os.close(fd)
         cut = len(data) > FILE_MAX
         data = data[:FILE_MAX]
         if b"\0" in data:   # binary: don't dump it into the page

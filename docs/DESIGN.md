@@ -607,8 +607,8 @@ The built-in extension `extensions/git.js` uses it:
   here keeps line breaks and a phone would break each line twice. "Ask Claude about it" puts the commit in the message box.
 * Inline `code` in a message whose text is a branch, remote branch, tag or commit hash (7–40 hex digits, not all
   digits) of that repository becomes a link, with a small icon for its type (commit, branch, tag): a commit opens it, a ref opens the graph on it. `code` whose
-  text is a repo-relative path to a file in that repository becomes a link too (a document icon): tapping it opens the
-  file's current contents on disk (`GET /api/x/git/file`), with its size and line count and an "Ask Claude about it"
+  text is a path (relative to the folder Claude works in) to a file in that repository becomes a link too (a document
+  icon): tapping it opens the file's current contents on disk (`GET /api/x/git/file`), with its size and line count and an "Ask Claude about it"
   button; a binary file is named but not shown, and a file over 256 KB is cut short. A ref of the same name wins
   (a branch `b.txt` stays a branch link). Names are looked up in
   batches (`POST /api/x/git/resolve`) after a message is drawn, and remembered per session; a miss is retried after a
@@ -642,11 +642,16 @@ Claude's permission prompts:
 * `--no-optional-locks` keeps `git status` from writing the index while Claude may be committing.
 * A file path from the request is used only after it is confirmed to name a file git knows (tracked, or untracked and
   not ignored — `ls-files --cached --others --exclude-standard`, so an ignored file such as `.env` is never offered),
-  never an absolute path and never one with a `..` segment. It is always a literal path (`GIT_LITERAL_PATHSPECS`),
-  never a glob or `:(magic)` pathspec, and must come back from `ls-files` verbatim. The file is then read from the working tree only if its
-  resolved real path is still inside the repository's real path, so a tracked symlink pointing outside the tree reads
-  nothing. Contents are capped at 256 KB (`FILE_MAX`, cut on bytes, never inside a character); a file with a NUL byte
-  is reported as binary and not read into the page.
+  never an absolute path, never one with a `..` segment or a control character. It is always a literal path
+  (`GIT_LITERAL_PATHSPECS`), never a glob or `:(magic)` pathspec, and must come back from `ls-files` verbatim.
+  `ls-files` gates the *name*, so the read must come from that same file: the path (relative to the folder git runs
+  in, with git's own symlinks already resolved) is read only if no component of it is a symlink (`realpath` leaves it
+  unchanged). A symlink would otherwise redirect the read to the very files the gate excludes — an ignored file such
+  as `.env`, something under `.git/`, or a path outside the tree. The file is opened with `O_NOFOLLOW` (the last
+  component can't be swapped for a symlink after the check) and confirmed a regular file on its fd (never a FIFO,
+  device or directory; `O_NONBLOCK` keeps the open from blocking on one). Contents are capped at 256 KB (`FILE_MAX`,
+  cut on bytes, never inside a character); a file with a NUL byte in that span is reported as binary and not read into
+  the page.
 
 Each git command runs in a process group of its own with a 10s deadline that kills the whole group (a child holding
 the output pipe would otherwise outlive it, and a route could hang for good, holding one of the 8 plugin route

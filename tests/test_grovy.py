@@ -2918,8 +2918,8 @@ class TestGitPlugin(StoreCase):
         # a path from the request is literal: a glob or `:(magic)` pathspec matches no real file, so it is refused
         self.assertEqual(self.call("GET", "file", {"session": "a", "path": "*.txt"})[0], 404)
         self.assertEqual(self.call("GET", "file", {"session": "a", "path": ":(top)b.txt"})[0], 404)
-        for bad in ("/etc/passwd", "b.txt/../bin.dat", "../x", ""):
-            self.assertEqual(self.call("GET", "file", {"session": "a", "path": bad})[0], 400, bad)
+        for bad in ("/etc/passwd", "b.txt/../bin.dat", "../x", "", "a\x00b", "a\nb"):
+            self.assertEqual(self.call("GET", "file", {"session": "a", "path": bad})[0], 400, repr(bad))
         self.assertEqual(self.call("GET", "file", {"session": "b", "path": "x"}), (200, {"repo": False}))
 
     def test_file_symlink_out_of_tree_refused(self):
@@ -2930,6 +2930,22 @@ class TestGitPlugin(StoreCase):
         os.symlink(target, os.path.join(self.repo, "link"))
         self.git("add", "link")
         self.assertEqual(self.call("GET", "file", {"session": "a", "path": "link"})[0], 404)
+
+    def test_file_symlink_to_gated_file_refused(self):
+        """Security review (finding 1): a symlink INSIDE the tree that points at a gated file — an ignored one such as
+        `.env`, or something under `.git/` — must not be read, even though its target stays inside the repository."""
+        with open(os.path.join(self.repo, ".gitignore"), "w") as f:
+            f.write(".env\n")
+        with open(os.path.join(self.repo, ".env"), "w") as f:
+            f.write("SECRET=1")
+        os.symlink(".env", os.path.join(self.repo, "peek_env"))           # untracked, not ignored: ls-files lists it
+        os.symlink(".git/config", os.path.join(self.repo, "peek_git"))
+        self.git("add", "peek_env")                                        # a tracked symlink is attacked the same way
+        # the symlinks are offered by resolve (they are repo entries) but reading through them is refused
+        self.assertIn("peek_env", self.call("POST", "resolve", {"session": "a", "names": ["peek_env"]})[1]["found"])
+        self.assertEqual(self.call("GET", "file", {"session": "a", "path": "peek_env"})[0], 404)
+        self.assertEqual(self.call("GET", "file", {"session": "a", "path": "peek_git"})[0], 404)
+        self.assertEqual(self.call("GET", "file", {"session": "a", "path": ".env"})[0], 404)   # not offered directly
 
     def test_graph(self):
         code, g = self.call("GET", "graph", {"session": "a"})
