@@ -1,4 +1,4 @@
-// Issues: one small fix, in a session of its own. ⋯ → New issue (home screen): pick a project, say what to fix;
+// Issues: one small fix, in a session of its own. ＋ → New issue (home screen): pick a project, say what to fix;
 // grovy makes a branch off the default branch in a git worktree of its own and starts Claude there with your words.
 // ⋯ → Finish issue (in that session): see its commits, then merge them (fast-forward, done by grovy) and close it
 // all (session, worktree, branch), or discard it.
@@ -58,7 +58,7 @@ grovy.extension("issues", grovy => {
       h("div", {class: "lbl"}, "Project"), list, h("div", {class: "lbl"}, "The issue"), text,
       h("label", {class: "toggle"}, ask, "Ask before running tools"), note, h("div", {class: "row"}, start));
     text.focus();
-  }, {where: "home", sub: "A quick fix in a worktree of its own"});
+  }, {where: "new", sub: "A quick fix in a worktree of its own"});
 
   grovy.menu("Finish issue", async session => {
     let st;
@@ -105,4 +105,4 @@ grovy.extension("issues", grovy => {
         "its worktree and branch. Nothing is pushed."),
       buttons(merge, discard, close));
   }, {where: "session", section: "Session", when: state => !!(state && state.issue)});
-}, {about: "⋯ → New issue and Finish issue"});
+}, {about: "＋ → New issue, ⋯ → Finish issue"});

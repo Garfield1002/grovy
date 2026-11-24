@@ -244,6 +244,12 @@ header h1, .sess .name, #sheet h2, #side .sh a, .md :is(h1, h2, h3, h4), .wt, .s
   width:100%; text-align:left; }
 .hit .w { font-size:12px; color:var(--mut); } .hit .s { overflow:hidden; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; }
 mark { background:color-mix(in srgb, var(--warn) 35%, transparent); color:inherit; border-radius:3px; }
+/* command palette (grovy.palette, Ctrl/⌘+K): the ⋯ menus' commands plus jumps, searched */
+.cmdp { display:flex; flex-direction:column; }
+.cmdp .sys { color:var(--mut); font-size:14px; padding:10px 4px; }
+.cmdrow { justify-content:space-between; }
+.cmdrow.on { background:var(--code); }
+.cmdsec { flex:none; font-size:11px; letter-spacing:.05em; text-transform:uppercase; color:var(--mut); margin-left:10px; white-space:nowrap; }
 #title.tap { cursor:pointer; } #title.tap::after { content:" ▾"; font-size:13px; color:var(--mut); }
 .hbtn { border:0; background:none; font-size:22px; line-height:1; min-width:40px; min-height:40px; padding:0 6px; color:var(--fg); }
 .earlier { display:block; margin:6px auto 10px; border:1px solid var(--line); background:var(--card); border-radius:99px;
@@ -1940,9 +1946,17 @@ async function switcher() {   // tap the title: jump to another session
 }
 $("title").onclick = () => { if (view) switcher(); };
 
+// Menus and the command palette draw from one place: command descriptors {label, sub, section, run, danger}. ctxEntry
+// (below) turns a descriptor into a menu button; the palette searches their text. Things you start (New session, and
+// extensions' grovy.menu(…, {where:"new"}) items) sit on the ＋ button; grovy's own settings sit on the ⋯ menu. The
+// order headers are grouped under, across every ⋯ and right-click menu; unlisted sections follow, first-seen.
+const MENU_ORDER = ["New", "Conversation", "Session", "grovy", "More"];
+const MOD = /Mac|iP(hone|ad|od)/.test(navigator.platform || "") ? "⌘" : "Ctrl+";
+const itemNode = c => ctxEntry(c).node;
+
 // What can be done to a session: the ⋯ menu of the open one, and the right-click menu of any (s: its list entry or
 // the open session's detail). Searching and pages are about the conversation on screen, so only for the open one.
-function sessionEntries(name, s) {
+function sessionCmds(name, s) {
   const act = async (verb, ok) => {
     closeSheet();
     try { const r = await api(`/api/sessions/${encodeURIComponent(name)}/${verb}`, {}); if (ok) ok(r); }
@@ -1951,36 +1965,44 @@ function sessionEntries(name, s) {
   };
   const C = "Conversation", S = "Session", open = name === view;   // Login link lives in the home menu only, not here
   return [
-    {section: C, node: open ? null : h("button", {class: "item", onclick: () => { closeSheet(); go("#/s/" + name); }}, "Open")},
-    {section: C, node: open ? h("button", {class: "item", onclick: searchSheet}, "Search this conversation") : null},
-    {section: C, node: open && Object.keys(pages).length ? h("button", {class: "item", onclick: () => pagesSheet(name)}, "Pages",
-      h("div", {class: "sub"}, Object.keys(pages).length + " published by Claude")) : null},
-    {section: S, node: h("button", {class: "item", onclick: () => renameSheet(name)}, "Rename")},
-    {section: S, node: s.state !== "exited" && s.outdated ? h("button", {class: "item", onclick: () => updateSession(name)},
-      "Update session", h("div", {class: "sub"}, "Restart Claude with the latest grovy, same conversation")) : null},
+    !open && {label: "Open", section: C, run: () => { closeSheet(); go("#/s/" + name); }},
+    open && {label: "Search this conversation", section: C, run: searchSheet},
+    open && Object.keys(pages).length && {label: "Pages", section: C,
+      sub: Object.keys(pages).length + " published by Claude", run: () => pagesSheet(name)},
+    {label: "Rename", section: S, run: () => renameSheet(name)},
+    (s.state !== "exited" && s.outdated) && {label: "Update session", section: S,
+      sub: "Restart Claude with the latest grovy, same conversation", run: () => updateSession(name)},
     ...(s.state === "exited"
-      ? [{section: S, node: h("button", {class: "item", onclick: () => act("resume")}, "Resume session")},
-         {section: S, node: h("button", {class: "item danger", onclick: () => { closeSheet(); removeSessions([name]); }},
-           "Remove from list")}]
-      : [{section: S, node: h("button", {class: "item danger", onclick: () => {
+      ? [{label: "Resume session", section: S, run: () => act("resume")},
+         {label: "Remove from list", section: S, danger: true, run: () => { closeSheet(); removeSessions([name]); }}]
+      : [{label: "Stop session", section: S, danger: true, run: () =>
           ask(`Stop session "${name}"? Claude exits; the conversation can be resumed later.`, "Stop", {danger: true})
-            .then(yes => yes && act("kill"));
-        }}, "Stop session")}]),
+            .then(yes => yes && act("kill"))}]),
     // extensions' items act on grovy.session (the open one): on another session's card they'd hit the wrong one
-    ...(open ? extItems("session") : []),
-  ];
+    ...(open ? extCmds("session") : []),
+  ].filter(Boolean);
 }
+// the right-click menu of any session (its entry or detail) and the open one's ⋯ menu both end with the palette
+const sessionEntries = (name, s) => [...sessionCmds(name, s), paletteCmd()];
 function sessionMenu() {
   const s = cur || {}, name = view;
   openSheet(h("h2", {}, name),
-    ...grouped(["Conversation", "Session", "More"], "More", sessionEntries(name, s)),
+    ...grouped(MENU_ORDER, "More", sessionEntries(name, s).map(ctxEntry)),
     h("div", {class: "sub", style: "padding:10px 4px;color:var(--mut);font-size:13px"}, s.cwd || ""));
 }
-const homeEntries = () => [h("button", {class: "item", onclick: () => { closeSheet(); newSession(); }}, "New session"),
-  ...extItems("home").map(e => e.node), themeItem(), extensionsItem(), loginItem()];
-const homeMenu = () => openSheet(h("h2", {}, "grovy"), ...homeEntries());
-const loginItem = () => h("button", {class: "item", onclick: loginSheet}, "Login link",
-  h("div", {class: "sub"}, "Sign in on another device"));
+// ＋ : things to start (New session, and extensions' where:"new" items). ⋯ : grovy's own settings. Right-click on the
+// home screen gives both, grouped. The command palette gathers whichever apply now, plus jumps to any session or page.
+const newCmds = () => [{label: "New session", section: "New", run: () => { closeSheet(); newSession(); }}, ...extCmds("new")];
+const settingsCmds = () => [...extCmds("home"), themeCmd(), extensionsCmd(), loginCmd()].filter(Boolean);
+const paletteCmd = () => ({label: "Search commands…", section: "grovy", sub: finePointer.matches ? MOD + "K" : "", run: palette});
+const loginCmd = () => ({label: "Login link", section: "grovy", sub: "Sign in on another device", run: loginSheet});
+const homeEntries = () => [...newCmds(), ...settingsCmds(), paletteCmd()];   // right-click on the home screen: everything
+const homeMenu = () => openSheet(h("h2", {}, "grovy"), ...[...settingsCmds(), paletteCmd()].map(itemNode));
+function newMenu() {   // one tap when there's a single way to start something, a short menu when there are more
+  const cmds = newCmds();
+  if (cmds.length === 1) return cmds[0].run();
+  openSheet(h("h2", {}, "New"), ...cmds.map(itemNode));
+}
 async function loginSheet() {   // the link `grovy url` prints, for the address this page was opened on
   let tok;
   try { tok = (await api("/api/login-link", {})).token; } catch (e) { closeSheet(); return say(e.message); }
@@ -2000,8 +2022,8 @@ const themeInfo = (() => {
         return {theme: typeof t.theme === "string" ? t.theme : null, themes: Array.isArray(t.themes) ? t.themes.map(String) : []}; }
   catch (e) { return {theme: null, themes: []}; }
 })();
-const themeItem = () => themeInfo.themes.length ? h("button", {class: "item", onclick: themeSheet}, "Theme",
-  h("div", {class: "sub"}, themeInfo.themes.includes(themeInfo.theme) ? themeInfo.theme : "default")) : null;
+const themeCmd = () => themeInfo.themes.length ? {label: "Theme", section: "grovy",
+  sub: themeInfo.themes.includes(themeInfo.theme) ? themeInfo.theme : "default", run: themeSheet} : null;
 function themeSheet() {
   const cur = themeInfo.themes.includes(themeInfo.theme) ? themeInfo.theme : null;
   const pick = async name => {
@@ -2015,8 +2037,7 @@ function themeSheet() {
     h("p", {class: "sub", style: "color:var(--mut);font-size:13px"},
       "For every device. Add your own as ~/.config/grovy/themes/NAME.css (see docs/customize.md)."));
 }
-const extensionsItem = () => h("button", {class: "item", onclick: extensionsSheet}, "Extensions",
-  h("div", {class: "sub"}, "Turn parts of grovy on or off"));
+const extensionsCmd = () => ({label: "Extensions", section: "grovy", sub: "Turn parts of grovy on or off", run: extensionsSheet});
 function extensionsSheet() {   // the switches save at once (for every device); they apply when the page reloads
   const reload = h("button", {class: "btn allow hidden", onclick: () => location.reload()}, "Reload to apply");
   const pending = () => reload.classList.toggle("hidden",
@@ -2154,6 +2175,67 @@ function pickList({items, title, sub = () => "", recent = null, search = null, s
   return h("div", {class: "picklist"}, items_.length > 1 ? bar : null, list);
 }
 
+// Command palette (Ctrl/⌘+K, or ⋯ → Search commands): everything the ⋯ menus offer right now, flattened and searched,
+// plus a jump to any session or page. The same actions, reachable by name instead of by hunting through menus.
+function currentCmds() {
+  return view ? [...sessionCmds(view, cur || {}), {label: "All sessions", section: "Go", run: () => { closeSheet(); go("#/"); }}, ...settingsCmds()]
+              : [...newCmds(), ...settingsCmds()];
+}
+function palScore(q, it) {   // null: no match; higher is better. A substring beats a loose subsequence; earlier beats later.
+  if (!q) return 0;
+  const hay = (it.label + " " + (it.section || "") + " " + (it.sub || "")).toLowerCase();
+  const i = hay.indexOf(q);
+  if (i >= 0) return 1000 - i;
+  let k = 0; for (let n = 0; n < hay.length && k < q.length; n++) if (hay[n] === q[k]) k++;
+  return k === q.length ? 1 : null;
+}
+function cmdRow(it, on) {
+  return h("button", {class: "item cmdrow" + (on ? " on" : ""), onclick: () => { try { it.run(); } catch (e) { showError(e); } }},
+    h("div", {style: "flex:1;min-width:0"}, it.label, it.sub ? h("div", {class: "sub"}, it.sub) : null),
+    it.section ? h("span", {class: "cmdsec"}, it.section) : null);
+}
+function palette() {
+  if (document.querySelector("#sheet .cmdp")) return;   // already open (Ctrl+K again, or its own menu item)
+  const q = h("input", {class: "field", type: "search", placeholder: "Type a command, or a session to open…",
+    enterkeyhint: "go", autocapitalize: "off", autocorrect: "off", spellcheck: "false"});
+  const list = h("div", {class: "cmdp"});
+  let items = currentCmds();
+  const run = () => {
+    const v = q.value.trim().toLowerCase();
+    const hits = items.map(it => [palScore(v, it), it]).filter(x => x[0] != null).sort((a, b) => b[0] - a[0]).map(x => x[1]);
+    list.replaceChildren(...(hits.length ? hits.map((it, i) => cmdRow(it, i === 0)) : [h("div", {class: "sys"}, "No matches.")]));
+  };
+  q.oninput = run;
+  q.addEventListener("keydown", e => {
+    if (e.isComposing) return;
+    const rows = [...list.querySelectorAll(".cmdrow")];
+    if (!rows.length) return;
+    let i = rows.findIndex(r => r.classList.contains("on"));
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      i = i < 0 ? (e.key === "ArrowDown" ? 0 : rows.length - 1) : (i + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length;
+      rows.forEach((r, k) => r.classList.toggle("on", k === i)); rows[i].scrollIntoView({block: "nearest"});
+    } else if (e.key === "Enter") { e.preventDefault(); rows[i < 0 ? 0 : i].click(); }
+  });
+  openSheet(h("h2", {}, "Commands"), q, list);
+  run();
+  setTimeout(() => q.focus(), 50);
+  (async () => {   // sessions and pages to jump to, added once fetched (the list stays usable meanwhile)
+    let extra = [];
+    try {
+      const [{sessions}, {pages: ps}] = await Promise.all([api("/api/sessions"), api("/api/pages")]);
+      extra = [
+        ...sessions.filter(x => x.name !== view).map(x => ({label: x.name, section: "Go to session",
+          sub: base(x.cwd) + " · " + (LABEL[x.state] || x.state), run: () => { closeSheet(); go("#/s/" + x.name); }})),
+        ...ps.map(p => ({label: p.title || "page", section: "Open page", sub: "v" + p.version,
+          run: () => { closeSheet(); sidePages[p.id] = sidePages[p.id] || p; openPage(p.id); }})),
+      ];
+    } catch (e) { return; }
+    if (!list.isConnected) return;   // the palette was closed or replaced while we fetched
+    items = items.concat(extra); run();
+  })();
+}
+
 async function newSession(state = {}) {
   let folders = [], taken = new Set(), machines = [], host = "";
   const machine = state.machine || null;   // null: this machine; else a peer's name (its sessions are "pc:NAME")
@@ -2251,7 +2333,7 @@ async function newSession(state = {}) {
       msg, h("div", {class: "row"}, ...actions));
   }
 }
-$("add").onclick = newSession;
+$("add").onclick = newMenu;
 
 // ---------------------------------------------------------------- pages
 function pageCard(id, title, sub, deletable = false, known = pages) {   // known: the pages it may be one of
@@ -2361,7 +2443,7 @@ function markSide() {   // highlight the open session at once, before the next f
   }
 }
 wide.addEventListener("change", () => { refresh(); refreshSide(true); });
-$("sadd").onclick = newSession;
+$("sadd").onclick = newMenu;
 $("smenu").onclick = homeMenu;
 async function stepSession(d) {   // Alt+↑/↓: the previous/next session, in the list's order
   let list = sideList;
@@ -2400,7 +2482,7 @@ function openCtx(x, y, title, entries) {
   if (!list.length) return false;
   const c = $("ctx"), named = list.some(e => e.section);
   c.replaceChildren(...(title ? [h("div", {class: "ct"}, title)] : []),
-    ...(named ? grouped(["Conversation", "Session", "More"], "More", list) : list.map(e => e.node)));
+    ...(named ? grouped(MENU_ORDER, "More", list) : list.map(e => e.node)));
   for (const b of c.querySelectorAll("button")) b.setAttribute("role", "menuitem");
   c.classList.remove("hidden");
   const r = c.getBoundingClientRect();
@@ -2498,6 +2580,7 @@ document.addEventListener("keydown", e => {
   if (e.defaultPrevented || e.isComposing) return;
   const combos = combosOf(e), own = ext.keys.find(k => combos.includes(k.combo));   // extensions' shortcuts
   if (own) { e.preventDefault(); if (!e.repeat) runExt("key " + own.combo, own.run, e); return; }
+  if (combos.includes("Ctrl+K")) { e.preventDefault(); if (!e.repeat) palette(); return; }   // the command palette
   const a = document.activeElement;
   if (e.key === "Escape") {
     if (sheetOpen()) { e.preventDefault(); return closeSheet(); }
@@ -2610,12 +2693,11 @@ function extend(node, e) {   // a message was drawn: extensions may add to it (i
   if (node && ext.on.render.length) { const copy = structuredClone(e); for (const fn of ext.on.render) runExt("render", fn, node, copy); }
   return node;
 }
-function extItems(where) {   // {section, node} for each extension ⋯ item that belongs here right now
+function extCmds(where) {   // command descriptors for each extension grovy.menu item that belongs here right now
   return ext.menu.filter(m => (m.where === where || m.where === "both") &&
                              (!m.when || runExt("menu " + m.label, m.when, cur ? structuredClone(cur) : null) === true)).map(m =>
-    ({section: m.section, node:
-      h("button", {class: "item", onclick: () => { closeSheet(); runExt("menu " + m.label, m.run, view); }}, m.label,
-        m.sub ? h("div", {class: "sub"}, m.sub) : null)}));
+    ({label: m.label, sub: m.sub, section: m.section,
+      run: () => { closeSheet(); runExt("menu " + m.label, m.run, view); }}));
 }
 // render {section, node} entries grouped under headers: the named sections first in order, then any others as they
 // appear; a section with no items (after dropping null nodes) shows nothing. def is the section for items that name none.
@@ -2650,7 +2732,7 @@ const KEY_NAMES = {enter: "Enter", esc: "Escape", escape: "Escape", tab: "Tab", 
   arrowup: "ArrowUp", arrowdown: "ArrowDown", arrowleft: "ArrowLeft", arrowright: "ArrowRight", home: "Home", end: "End",
   pageup: "PageUp", pagedown: "PageDown", insert: "Insert"};
 for (let i = 1; i <= 12; i++) KEY_NAMES["f" + i] = "F" + i;
-const RESERVED = new Set(["Ctrl+Enter", "Alt+ArrowUp", "Alt+ArrowDown", "F5", "F12"]);
+const RESERVED = new Set(["Ctrl+Enter", "Ctrl+K", "Alt+ArrowUp", "Alt+ArrowDown", "F5", "F12"]);
 const ALNUM = /^[A-Za-z0-9]$/;
 function comboKey(mods, key) { return [...["Ctrl", "Alt", "Shift"].filter(m => mods.includes(m)), key].join("+"); }
 const keyName = k => k === " " ? "Space" : /^[a-z]$/.test(k) ? k.toUpperCase() : k;   // ASCII only: "ß" stays "ß"
@@ -2728,15 +2810,16 @@ window.grovy = Object.freeze({
     WIDGETS[type] = (spec, live) => render(spec, live);
     if (booted) { cache.clear(); refresh(); }   // registered later on: redraw the messages that use it
   },
-  // a ⋯ menu item; where: "session", "home" or "both"; when(state): shown only when it returns true (state: the open
-  // session's, or null on the home screen); section: a header to group it under in the session menu ("Conversation",
-  // "Session", or any name of your own; the home menu is a flat list and ignores it)
+  // a menu item; where: "session" (default, the open session's ⋯ menu), "home" (grovy's settings ⋯ menu), "new" (the
+  // ＋ button, for things to start) or "both" (session + home); when(state): shown only when it returns true (state:
+  // the open session's, or null on the home screen); section: a header to group it under in the session menu
+  // ("Conversation", "Session", or any name of your own). Every item also turns up in the command palette (Ctrl/⌘+K).
   math(render) {   // draws the math in replies: render(tex, display) returns a node, or throws (the TeX then shows as written)
     MATH = fnArg(render, "grovy.math");
     if (booted) { cache.clear(); refresh(); }
   },
   menu(label, run, {where = "session", sub = "", section = "", when = null} = {}) {
-    if (!["session", "home", "both"].includes(where)) throw new Error(`grovy.menu: where must be "session", "home" or "both"`);
+    if (!["session", "home", "new", "both"].includes(where)) throw new Error(`grovy.menu: where must be "session", "home", "new" or "both"`);
     ext.menu.push({label: String(label), run: fnArg(run, "grovy.menu"), where, sub: String(sub), section: String(section),
                    when: when == null ? null : fnArg(when, "grovy.menu when")});
   },

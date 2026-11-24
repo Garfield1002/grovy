@@ -5974,6 +5974,62 @@ window.EventSource = function () { this.close = () => {}; };
         self.assertTrue(g > 200 and r < 60, f"checks failed (pixel {r},{g},{b}): open {html} in a browser to see which")
 
 
+@unittest.skipUnless(shutil.which("firefox"), "firefox not installed")
+class TestPaletteBrowser(unittest.TestCase):
+    """The command palette (tests/palette_check.js) in a real browser: Ctrl+K opens it, typing filters the commands,
+    the keyboard moves and runs them. The menu reorganization that added it put New session/issue/project on the ＋
+    button and grovy's settings on ⋯; this guards the shared command descriptors the palette draws from."""
+    STUB = """<script>
+window.fetch = async () => { const d = {sessions: [{name: "alpha", cwd: "/home/u/proj", state: "idle"}],
+    now: Date.now() / 1000, peers: [], machines: [], pages: [{id: "p1", title: "Notes", version: 1, updated: 0}],
+    events: [], commands: []};
+  return {ok: true, status: 200, headers: new Headers({"content-type": "application/json"}), json: async () => d,
+          text: async () => JSON.stringify(d)}; };
+window.EventSource = function () { this.close = () => {}; };
+</script>"""
+
+    def test_palette(self):
+        d = tempfile.mkdtemp(dir=TMP)
+        page = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
+        check = open(os.path.join(ROOT, "tests", "palette_check.js"), encoding="utf-8").read()
+        page = page.replace("<head>", "<head>" + self.STUB, 1).replace("</style>", "*{animation:none!important}</style>", 1)
+        page = page.replace("</body>", "<script>" + check + "</script></body>")
+        html, png = os.path.join(d, "pal.html"), os.path.join(d, "pal.png")
+        with open(html, "w", encoding="utf-8") as f:
+            f.write(page)
+        os.makedirs(os.path.join(d, "profile"))
+        subprocess.run(["firefox", "--headless", "--no-remote", "--profile", os.path.join(d, "profile"),
+                        "--window-size=390,844", "--screenshot", png, "file://" + html],
+                       capture_output=True, timeout=120)
+        self.assertTrue(os.path.exists(png), "firefox made no screenshot")
+        r, g, b = _png_first_pixel(png)
+        self.assertTrue(g > 200 and r < 60, f"checks failed (pixel {r},{g},{b}): open {html} in a browser to see which")
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestPaletteScore(unittest.TestCase):
+    """index.html's palScore(), run in node: a substring match beats a loose subsequence, an earlier hit beats a
+    later one, no match is null, and an empty query matches everything (keeps the menu order)."""
+    def score(self, q, label, section="", sub=""):
+        src = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
+        fn = re.search(r"^function palScore\(.*?^\}", src, re.S | re.M).group(0)
+        body = "const it={label:%s,section:%s,sub:%s}; console.log(JSON.stringify(palScore(%s, it)));" % (
+            json.dumps(label), json.dumps(section), json.dumps(sub), json.dumps(q))
+        out = subprocess.run(["node", "-e", fn + "\n" + body], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_ranking(self):
+        self.assertEqual(self.score("", "New session"), 0)                 # empty query: everything matches, order kept
+        self.assertIsNone(self.score("zzz", "New session"))                # no match at all
+        sub = self.score("nss", "New session")                            # n-e-w s-e-s... subsequence only
+        self.assertEqual(sub, 1)
+        self.assertGreater(self.score("new", "New session"), sub)          # a real substring beats a subsequence
+        self.assertGreater(self.score("new", "a new session"), 0)
+        self.assertGreater(self.score("new", "New session"), self.score("new", "a new session"))  # earlier is better
+        self.assertGreater(self.score("grovy", "Theme", "grovy"), 0)       # the section counts toward a match too
+
+
 @unittest.skipUnless(shutil.which("node"), "node not installed")
 class TestLinksExtension(unittest.TestCase):
     """extensions/links.js, run in node on a minimal DOM: what a reply's links become."""

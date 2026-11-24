@@ -1,4 +1,4 @@
-// New project: ⋯ → New project (home screen) makes a blank git repository, or clones one, in the projects folder
+// New project: ＋ → New project (home screen) makes a blank git repository, or clones one, in the projects folder
 // (~/dev), and starts a session in it. A new repository is a trust boundary of its own, so Claude asks whether to
 // trust it: grovy answers yes for you, at once for a blank one, and for a clone only after you've seen what in it
 // Claude would load (its own settings can run commands).
@@ -79,7 +79,7 @@ grovy.extension("projects", grovy => {
     grovy.sheet(h("h2", {}, "New project"), kinds, urlBox, name, where,
       text, h("label", {class: "toggle"}, ask, "Ask before running tools"), note, h("div", {class: "row"}, go));
     name.focus();
-  }, {where: "home", sub: "A blank repository, or a clone"});
+  }, {where: "new", sub: "A blank repository, or a clone"});
 
   // A clone is only trusted once you've seen what Claude would load from it; closing this sheet deletes the clone.
   function review(made, words, asking) {
@@ -124,4 +124,4 @@ grovy.extension("projects", grovy => {
       if (!decided) discard();
     }, 500);
   }
-}, {about: "⋯ → New project"});
+}, {about: "＋ → New project"});

@@ -280,12 +280,14 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   * `draft(text)`, and `send(text)`: the Send button's request, never forced, through the send hooks.
   * `widget(type, render)`: adds or replaces a widget renderer.
   * `math(render)`: draws the math in replies (`render(tex, display)` returns a node or throws); replaces the built-in.
-  * `menu(label, run, {where, when, section})`: a ⋯ item; `when(state)` (the open session's state, null at home) shows it
-    only when it returns true (a throwing or non-true `when` hides it). `section` groups it under a header in the
-    session menu ("Conversation", "Session", or a name of its own, in that order then first-seen; the home menu is flat).
+  * `menu(label, run, {where, when, section})`: a menu item; `where` is "session" (default, the open session's ⋯ menu),
+    "home" (grovy's settings ⋯ menu), "new" (the ＋ button) or "both". `when(state)` (the open session's state, null at
+    home) shows it only when it returns true (a throwing or non-true `when` hides it). `section` groups it under a header
+    in the session menu ("Conversation", "Session", or a name of its own, in that order then first-seen). Every item also
+    appears in the command palette (Ctrl/⌘+K).
   * `key(combo, run)`: a shortcut.
     * It needs Ctrl or Alt (F-keys excepted), so it can't take typing.
-    * Grovy's own Ctrl+Enter and Alt+↑/↓ are refused, and so are the browser's F5 and F12.
+    * Grovy's own Ctrl+Enter, Ctrl+K (command palette) and Alt+↑/↓ are refused, and so are the browser's F5 and F12.
     * With Alt alone (Option on a Mac turns letters into symbols), letters and digits also match by physical key.
     * That fallback doesn't apply with AltGr (Ctrl+Alt), which types characters such as `@` that must stay typeable.
     * Shift is refused with a symbol: name the symbol it types instead.
@@ -527,7 +529,19 @@ becomes ■ (stop), which presses Esc (after a confirm); once you type, it becom
 ever sends, never stops. Esc
 emits no hook, so grovy records the interrupt itself and sets the state to `unknown`. The next send asks "type anyway?".
 
-**Sessions from the phone.** The **＋** on the session list opens *New session*:
+**The header buttons.** On the session list, **＋** holds the ways to start something and **⋯** holds grovy's own
+settings. ＋ opens a short *New* menu — *New session* plus any extension that registers `grovy.menu(…, {where:"new"})`
+(the built-in *New issue* and *New project*); when only one exists it runs straight away, no menu. ⋯ opens *Notifications*
+(when on), *Theme*, *Extensions*, *Login link* and *Search commands*. A right-click on the empty list gives both, grouped.
+
+**Command palette.** *Search commands* (⋯, or `Ctrl`/`⌘`+`K`) opens a searchable list of everything the current ⋯ menus
+offer — on the home screen the *New* and settings items, in a session that session's items — plus a jump to any other
+session or published page. Typing filters by a substring first, then a loose subsequence; ↑/↓ move, Enter runs the
+highlighted row, Esc closes. It is one flat surface over the same command descriptors the menus are built from
+(`index.html`, `currentCmds`/`palette`), so an extension's `grovy.menu` items appear in it for free. `Ctrl+K` is reserved,
+so `grovy.key` can't claim it.
+
+**Sessions from the phone.** The **＋** → *New session*:
 * **Folders.** Pick one from a list (never a typed path) of folders where Claude won't stop at the workspace-trust
   dialog, which would hold back every hook. Verified rule (Claude Code 2.1.325): a plain folder inherits trust from a
   trusted ancestor in `~/.claude.json`. A **git repo is its own boundary**: it needs to have been trusted itself
@@ -549,7 +563,8 @@ emits no hook, so grovy records the interrupt itself and sets the state to `unkn
   Claude has published any, and extensions such as *Git*) and *Session* (*Rename*, *Update session*, *Stop session*
   — or *Resume session* and *Remove from list* once it has ended; ended sessions also get a *Remove* button in the
   list — and *Finish issue* for an issue). Items from `grovy.menu` fall under their `section`, or a trailing *More*
-  if they name none. *Login link* is on the session-list menu only. Tapping the title switches between sessions. *Load earlier* pages back through the event log. Yes / No /
+  if they name none, and ends with *Search commands* (the command palette). *Login link* is on the session-list menu
+  only. Tapping the title switches between sessions. *Load earlier* pages back through the event log. Yes / No /
   Go ahead chips appear when Claude's last reply ends with a question; they fill the message box. Typing hides
   them but keeps their space until you send, so the conversation doesn't jump.
 * **Update session** (⋯ menu, shown only when the session is out of date) restarts Claude with the latest grovy and
@@ -640,7 +655,7 @@ the `Issues` part of `Store`; the page side is the built-in extension `extension
   session, keeping each session's sorted order (`orderSessions` in `index.html`, matching a session's `cwd` against the
   `root` each issue's summary now carries). Several issues of one project stack under it; an issue whose root project
   has no session of its own falls to the end, still indented.
-* ⋯ → New issue (home screen) lists the trusted projects that are git repositories (a main checkout, not a linked
+* ＋ → New issue (home screen) lists the trusted projects that are git repositories (a main checkout, not a linked
   worktree), each with its default branch: origin's HEAD if it has one locally, else `main`, else `master`. Always that
   branch, whatever is checked out: an issue is a fix for the main line. The list is the same `grovy.picker` as New
   session's folders (search box plus a Recent ⇄ A–Z sort, Recent being each project's `project_mtime`), so a long
@@ -680,7 +695,7 @@ the `Issues` part of `Store`; the page side is the built-in extension `extension
   graft it is refused with a clear message (filing on the trunk's grovy from a graft isn't wired up yet, so it never
   quietly files on the graft's own copy — the one that isn't merged or deployed).
 
-**New projects.** ⋯ → New project (home screen) makes a project and starts a session in it (`grovylib/newproject.py`,
+**New projects.** ＋ → New project (home screen) makes a project and starts a session in it (`grovylib/newproject.py`,
 the `NewProjects` part of `Store`; the page side is `extensions/projects.js`).
 * Always in the projects folder, `GROVY_PROJECTS_DIR` (default `~/dev`): `<dir>/<name>`, made only if nothing is there.
   Names: letters, digits, `.`, `-`, `_`, starting with a letter or digit (max 64). The session is named after the
@@ -730,8 +745,8 @@ the `NewProjects` part of `Store`; the page side is `extensions/projects.js`).
 by the same `listNodes()`/`sessCard()` as the phone's home screen (worktree nesting, peer warnings, pages), made
 compact by CSS, refreshed on any session's event at most every 400ms and only fetched while it's shown. `#/` shows
 "Pick a session" on the right. Sheets (menus, dialogs) are centred dialogs there, with a ✕ (`#sclose`), rows that
-highlight on hover, and their body scrolling under the ✕; the phone keeps the bottom sheet. The sidebar header has ＋ and a ⋯ with grovy's own menu (what the phone's home ⋯
-has, plus New session). There is no header row: the pill and the session's ⋯ float at the top right
+highlight on hover, and their body scrolling under the ✕; the phone keeps the bottom sheet. The sidebar header has the
+same ＋ (New…) and ⋯ (settings) as the phone's home screen. There is no header row: the pill and the session's ⋯ float at the top right
 (over the margin beside the conversation; on a window just over 1000px they can overlap a message's corner). The grove
 backdrop stays, fainter, behind every route. Right-click (a mouse only: the event's `pointerType`, or `pointer: fine`
 when it has none) does what ⋯ menus and an item's own small buttons do on the phone (`#ctx`). Any node can carry items

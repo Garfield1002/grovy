@@ -26,14 +26,17 @@
                                         ~/.config/grovy/instructions.md (added to every session's instructions).
      grovy.math(render)                 draw the LaTeX in replies yourself: render(tex, display) returns a node,
                                         or throws (the TeX then shows as written)
-     grovy.menu(label, run, {where})    an item in the ⋯ menu: where "session" (default), "home" or "both"; add
-                                        when: state => true/false to show it only sometimes (state: the open
-                                        session's, null on the home screen); add section: "Conversation" | "Session"
-                                        | your own name to group it under a header in the session menu
+     grovy.menu(label, run, {where})    a menu item: where "session" (default, the open session's ⋯ menu), "home"
+                                        (grovy's settings ⋯ menu), "new" (the ＋ button, for things to start) or
+                                        "both"; add when: state => true/false to show it only sometimes (state: the
+                                        open session's, null on the home screen); add section: "Conversation" |
+                                        "Session" | your own name to group it under a header in the session menu.
+                                        Every item also appears in the command palette (Ctrl/⌘+K)
      grovy.contextMenu(node, items)     right-click items (a mouse only) for a node you drew, e.g. in render:
                                         items() returns [{label, run, sub, danger, disabled}]
-     grovy.key(combo, run)              a shortcut such as "Ctrl+K", "Alt+Shift+N", "Ctrl+?" or "F2" (Cmd counts as
-                                        Ctrl). It needs Ctrl or Alt (F-keys excepted) and can't be one of grovy's own.
+     grovy.key(combo, run)              a shortcut such as "Ctrl+J", "Alt+Shift+N", "Ctrl+?" or "F2" (Cmd counts as
+                                        Ctrl). It needs Ctrl or Alt (F-keys excepted) and can't be one of grovy's own
+                                        (Ctrl+K opens the command palette, Ctrl+Enter sends, Alt+↑/↓ switch session).
      grovy.on("render", (node, event))  a message was drawn: add to it
      grovy.on("update", state)          the open session changed (a copy of its state)
      grovy.on("route", session)         another session (or the home screen) was opened
