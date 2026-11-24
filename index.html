@@ -2909,11 +2909,13 @@ function combosOf(e) {
   if (phys && e.altKey && !e.metaKey && !altGr && !ALNUM.test(e.key)) out.push(comboKey(mods(e.shiftKey), phys[1]));
   return out;
 }
-function normCombo(c) {
+// display: just canonicalise for comboLabel (grovy.tip), skipping the rules a real binding must pass — a shown key
+// may be one grovy keeps (Ctrl+Enter) or a bare one (Esc), neither of which grovy.key would accept.
+function normCombo(c, {display = false, who = "grovy.key"} = {}) {
   const s = String(c).trim(), plus = s.endsWith("++");
   const parts = (plus ? s.slice(0, -2) : s).split("+").map(p => p.trim());
   const raw = plus ? "+" : parts.pop();
-  const bad = why => new Error(`grovy.key: "${c}" ${why} (e.g. "Ctrl+K", "Alt+Shift+N", "Ctrl+/", "F2")`);
+  const bad = why => new Error(`${who}: "${c}" ${why} (e.g. "Ctrl+K", "Alt+Shift+N", "Ctrl+/", "F2")`);
   if (parts.some(p => !p)) throw bad("isn't a key combination");
   const mods = parts.map(p => ({ctrl: "Ctrl", control: "Ctrl", cmd: "Ctrl", command: "Ctrl", meta: "Ctrl", alt: "Alt",
                                 option: "Alt", opt: "Alt", shift: "Shift"})[p.toLowerCase()]);
@@ -2923,8 +2925,10 @@ function normCombo(c) {
   if (mods.includes("Shift") && !shiftCounts(key))   // Shift changes the symbol itself
     throw bad(`uses Shift with a symbol: name the symbol it types instead (e.g. "Ctrl+?" rather than "Ctrl+Shift+/")`);
   const combo = comboKey(mods, key);
-  if (!/^F\d+$/.test(key) && !mods.includes("Ctrl") && !mods.includes("Alt")) throw bad("needs Ctrl or Alt");
-  if (RESERVED.has(combo)) throw bad("is kept for grovy or the browser");
+  if (!display) {
+    if (!/^F\d+$/.test(key) && !mods.includes("Ctrl") && !mods.includes("Alt")) throw bad("needs Ctrl or Alt");
+    if (RESERVED.has(combo)) throw bad("is kept for grovy or the browser");
+  }
   return combo;
 }
 const fnArg = (fn, what) => { if (typeof fn !== "function") throw new Error(what + " needs a function"); return fn; };
@@ -2994,6 +2998,17 @@ window.grovy = Object.freeze({
   },
   key(combo, run, {label = ""} = {}) {   // a keyboard shortcut (see combosOf above); label names it in the shortcuts list
     ext.keys.push({combo: normCombo(combo), run: fnArg(run, "grovy.key"), label: String(label)});
+  },
+  // a button's hover tooltip (and accessible name): tip(node, "Attach files") or, with a key, tip(node, "Send",
+  // {combo: "Ctrl+Enter"}) -> "Send (Ctrl+Enter)" (the key only with a keyboard; combo written as for grovy.key).
+  // Use it on buttons you build so they read like grovy's own; returns the node. grovy's static buttons get one for free.
+  tip(node, label, {combo = ""} = {}) {
+    if (!(node instanceof Element)) throw new Error("grovy.tip: node must be an element");
+    const text = String(label);
+    node.setAttribute("aria-label", text);
+    const key = combo ? comboLabel(normCombo(combo, {display: true, who: "grovy.tip"})) : "";
+    node.title = key && finePointer.matches ? `${text} (${key})` : text;
+    return node;
   },
   on(name, fn) {   // render(node, event) · update(state) · route(session) · send(text) -> text | false
     if (!ext.on[name]) throw new Error(`grovy.on: unknown event "${name}" (${Object.keys(ext.on).join(", ")})`);

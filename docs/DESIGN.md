@@ -306,6 +306,10 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
     * With Alt alone (Option on a Mac turns letters into symbols), letters and digits also match by physical key.
     * That fallback doesn't apply with AltGr (Ctrl+Alt), which types characters such as `@` that must stay typeable.
     * Shift is refused with a symbol: name the symbol it types instead.
+  * `tip(node, label, {combo})`: a button's hover `title` and `aria-label`; with `combo` (written as for `key`, but a
+    reserved or bare one is allowed since nothing is bound) the title also shows the key — `Send (Ctrl+Enter)` — and only
+    with a keyboard. Returns the node. `normCombo(c, {display:true})` skips the binding rules for this. Internal buttons
+    don't call it: the static ones get a title from the start-up loop, and Send renders its own from `comboLabel`.
   * `on(event, fn)`:
     * `render`: a message node was built and may be changed (the event is a copy).
     * `update`: a copy of the open session's state.
@@ -588,7 +592,8 @@ reaches each setting by name.
 **Button tooltips.** Every static chrome button carries its label as a `title` (the icon buttons especially); the two
 whose label changes (Send, Full screen) set theirs from the handler that sets the label, and Send appends its shortcut
 (`Send (Ctrl+Enter)`), dropped when it is the stop button or there's no keyboard. A one-pass loop at start-up
-(`header/#composer/#viewer/#side button, #sclose`) copies each `aria-label` to a missing `title`.
+(`header/#composer/#viewer/#side button, #sclose`) copies each `aria-label` to a missing `title`. Buttons an extension
+builds get the same with `grovy.tip(node, label, {combo})` (above), the one API for the label-and-key convention.
 
 **Keyboard shortcuts** (*Settings → Keyboard shortcuts*, keyboard only) lists grovy's own (`BUILTIN_SHORTCUTS`:
 *Search commands*, *Send message*, *Previous/Next session*, *Close…*) and, under *From extensions*, every `grovy.key`

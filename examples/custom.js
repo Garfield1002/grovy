@@ -34,6 +34,9 @@
                                         Every item also appears in the command palette (Ctrl/⌘+K)
      grovy.contextMenu(node, items)     right-click items (a mouse only) for a node you drew, e.g. in render:
                                         items() returns [{label, run, sub, danger, disabled}]
+     grovy.tip(node, label, {combo})    a button's hover tooltip and accessible name; with a combo (written as for
+                                        grovy.key) the tooltip shows it too, "Send (Ctrl+Enter)", on a keyboard.
+                                        Returns the node, so wrap a button you build. grovy's own buttons get one free.
      grovy.key(combo, run, {label})     a shortcut such as "Ctrl+J", "Alt+Shift+N", "Ctrl+?" or "F2" (Cmd counts as
                                         Ctrl). It needs Ctrl or Alt (F-keys excepted) and can't be one of grovy's own
                                         (Ctrl+Enter sends, Alt+↑/↓ switch session). Binding Ctrl+K overrides the
