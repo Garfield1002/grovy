@@ -27,7 +27,7 @@
      grovy.math(render)                 draw the LaTeX in replies yourself: render(tex, display) returns a node,
                                         or throws (the TeX then shows as written)
      grovy.menu(label, run, {where})    a menu item: where "session" (default, the open session's ⋯ menu), "home"
-                                        (grovy's settings ⋯ menu), "new" (the ＋ button, for things to start) or
+                                        (grovy's ⋯ → Settings sheet), "new" (the ＋ button, for things to start) or
                                         "both"; add when: state => true/false to show it only sometimes (state: the
                                         open session's, null on the home screen); add section: "Conversation" |
                                         "Session" | your own name to group it under a header in the session menu.

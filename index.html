@@ -2003,10 +2003,13 @@ const newCmds = () => [{label: "New session", section: "New", run: () => { close
   ...extCmds("new").map(c => ({...c, section: c.section || "New"}))];
 const settingsCmds = () => [...extCmds("home").map(c => ({...c, section: c.section || "grovy"})),
   themeCmd(), extensionsCmd(), loginCmd()].filter(Boolean);
+// One unified Settings sheet gathers them all, so the ⋯ menu stays short: ⋯ → Settings → the one you want.
+const settingsSheet = () => openSheet(h("h2", {}, "Settings"), ...settingsCmds().map(itemNode));
+const settingsCmd = () => ({label: "Settings", section: "grovy", sub: "Theme, extensions, and more", run: settingsSheet});
 const paletteCmd = () => ({label: "Search commands…", section: "grovy", sub: finePointer.matches ? MOD + "K" : "", run: palette});
 const loginCmd = () => ({label: "Login link", section: "grovy", sub: "Sign in on another device", run: loginSheet});
-const homeEntries = () => [...newCmds(), ...settingsCmds(), paletteCmd()];   // right-click on the home screen: everything
-const homeMenu = () => openSheet(h("h2", {}, "grovy"), ...[...settingsCmds(), paletteCmd()].map(itemNode));
+const homeEntries = () => [...newCmds(), ...settingsCmds(), paletteCmd()];   // right-click on the home screen: everything, grouped
+const homeMenu = () => openSheet(h("h2", {}, "grovy"), ...[settingsCmd(), paletteCmd()].map(itemNode));
 function newMenu() {   // one tap when there's a single way to start something, a short menu when there are more
   const cmds = newCmds();
   if (cmds.length === 1) return cmds[0].run();

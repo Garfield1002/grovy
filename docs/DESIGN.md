@@ -17,7 +17,7 @@ claude ──hooks──► grovy hook NAME ──unix socket──► grovyd �
 | `index.html` | the whole UI (vanilla JS, no innerHTML); a map of its parts opens its script |
 | `sw.js` | the service worker, served at `/sw.js`: shows push notifications and opens their session; caches nothing |
 | `plugins/` | built-in daemon plugins (`git.py`, `push.py`), written against the plugin `Api` like a user's own |
-| `themes/` | built-in themes for ⋯ → Theme (`nature.css`), CSS like a user's own (see "Making it yours") |
+| `themes/` | built-in themes for ⋯ → Settings → Theme (`nature.css`), CSS like a user's own (see "Making it yours") |
 | `tests/test_grovy.py`, `tests/test_peers.py` | unit + tmux integration tests (`python3 -m unittest discover -s tests`) |
 | `examples/` | systemd unit, Telegram notify script, the generated hook config |
 | `assets/` | icon sizes and the home-screen backdrop, from [grove](https://github.com/Garfield1002/grove), served without the token from an allowlist (`ASSETS` in `grovyd.py`); `logo.png` is only for the README, not served |
@@ -250,7 +250,7 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   alone) and `widgets.js` (the widget types, see "Widgets"). Each registers with `grovy.extension(name, setup, {about})`; the setups run at start-up,
   after `custom.js`, so `grovy.disable(name)` there turns one off (or replace it: disable it and copy it under another
   name).
-* **⋯ → Extensions** (home menu, `index.html`) lists every named extension with its `about` line and a switch. A switch
+* **⋯ → Settings → Extensions** (home menu, `index.html`) lists every named extension with its `about` line and a switch. A switch
   saves at once through `POST /api/extensions {name, on}` into `extensions-off.json` in the state dir (one list for
   every device; names must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`, at most 200, and anything else in the file is
   ignored). `load_index()` puts the list in a `<meta name="grovy-off">` tag, and the page skips those extensions at
@@ -258,7 +258,7 @@ the repo, so updates never conflict with it. `grovy setup` installs commented te
   It applies on reload only ("Reload to apply" shows while the switches differ from what's running), since an
   extension can't be undone live. One turned off in `custom.js` shows as such and can't be switched on here. Turning
   off an extension whose daemon plugin stays on (git, push) only hides its page side.
-* **Themes** (⋯ → Theme, home menu) are CSS files: built-in ones in `themes/` in the grovy folder (`nature.css`), the
+* **Themes** (⋯ → Settings → Theme, home menu) are CSS files: built-in ones in `themes/` in the grovy folder (`nature.css`), the
   user's in `~/.config/grovy/themes/NAME.css` (NAME `[a-z0-9][a-z0-9_-]{0,31}`; one with a built-in's name replaces
   it, unless it can't be used, e.g. a dangling link or a refused file: then the built-in shows; an empty file is used,
   so it blanks the built-in). `POST /api/theme {theme}` (a listed name, or `null` for the default look) saves the choice to `theme.json` in
@@ -532,8 +532,10 @@ emits no hook, so grovy records the interrupt itself and sets the state to `unkn
 
 **The header buttons.** On the session list, **＋** holds the ways to start something and **⋯** holds grovy's own
 settings. ＋ opens a short *New* menu — *New session* plus any extension that registers `grovy.menu(…, {where:"new"})`
-(the built-in *New issue* and *New project*); when only one exists it runs straight away, no menu. ⋯ opens *Notifications*
-(when on), *Theme*, *Extensions*, *Login link* and *Search commands*. A right-click on the empty list gives both, grouped.
+(the built-in *New issue* and *New project*); when only one exists it runs straight away, no menu. ⋯ opens *Settings*
+and *Search commands*; *Settings* is one sheet gathering *Notifications* (when on), *Theme*, *Extensions* and *Login link*,
+so the menu stays short. A right-click on the empty list gives everything at once, grouped (settings not nested), and the
+command palette still reaches each setting by name.
 
 **Command palette.** *Search commands* (⋯, or `⌘K` on a Mac / `Ctrl+K` elsewhere) opens a searchable list of everything
 the current ⋯ menus offer — on the home screen the *New* and settings items, in a session that session's items — plus a
@@ -1191,7 +1193,7 @@ the machine short, oomd killed the Claude sessions, one after another, with ever
 * Events emitted while the daemon is down are not replayed.
 * **Peers** (other machines, see "Other machines"):
   * ＋ → New issue and ＋ → New project work on the hub only (an issue session that already exists on a peer can be
-    finished or discarded from the hub). ⋯ → Extensions, ⋯ → Theme, the login link, `custom.css`/`custom.js` are the hub's.
+    finished or discarded from the hub). ⋯ → Settings (Extensions, Theme, the login link), `custom.css`/`custom.js` are the hub's.
   * The hub's plugins see peers' sessions only through `notify`; `grovy.on("event")`,
     `grovy.on("state")`, `grovy.sessions()`, `grovy.session()` and `grovy.send()` cover local sessions only. The hub's
     `grovy` command (`ls`, `attach`, `logs`, `kill`, ...) is local too: the terminal of a peer's session is on the peer.
