@@ -27,7 +27,7 @@ from collections import deque
 from html import escape as html_escape
 from urllib.parse import urlsplit, parse_qs, quote, unquote
 
-from grovylib import claude, client, commands, core, newproject, notify, oom, pages, peers, plugins, projects, terminal, tls, tmuxctl
+from grovylib import claude, client, commands, core, newproject, notify, oom, pages, peers, plugins, projects, terminal, tls, tmuxctl, update
 from grovylib.store import Store
 
 
@@ -720,6 +720,8 @@ class Http(http.server.BaseHTTPRequestHandler):
                                                  for p in store.lifecycle.trusted_projects()]})
         if path == "/api/projects/new":   # where ⋯ → New project makes them
             return self._send(200, {"dir": newproject.projects_dir()})
+        if path == "/api/update":   # is grovy up to date? (extensions/update.js) — from the daily cached check, no network
+            return self._send(200, update.update_status())
         if path == "/api/issues/projects":
             return self._send(*_res(*store.issue_projects(), key="projects"))
         m = re.fullmatch(r"/api/issues/([^/]+)", path)
@@ -975,6 +977,9 @@ class Http(http.server.BaseHTTPRequestHandler):
             return set_extension(body.get("name"), body.get("on"))
         if path == "/api/theme":   # ⚙ → Theme
             return set_theme(body.get("theme"))
+        if path == "/api/update":   # "Check now" in the Settings sheet: ask GitHub right away, then report
+            update.check_for_update(force=True)
+            return 200, update.update_status()
         if path == "/api/projects/new":
             return _res(*store.new_project(body.get("kind"), body.get("name"), body.get("url")))
         if path == "/api/projects/start":
@@ -1294,6 +1299,10 @@ def serve(bind, port):
                 httpd.reload_tls()
             except Exception as e:
                 print(f"grovyd: HTTPS certificate reload error: {e}", file=sys.stderr)
+            try:
+                update.check_for_update()   # ask GitHub for the newest tag, at most once a day (opt-out: GROVY_UPDATE_CHECK=off)
+            except Exception as e:
+                print(f"grovyd: update check error: {e}", file=sys.stderr)
 
     threading.Thread(target=loop, daemon=True).start()
 

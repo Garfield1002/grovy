@@ -174,6 +174,17 @@ daemon started by hand in a tmux pane (the pane whose process is the daemon's pi
 command), and the `grovy-tunnel` service; then waits for the daemon to answer. Claude sessions are never touched;
 those started before keep their `--settings` until ⋯ → Update session. `--no-restart` updates the code only.
 
+**Update check** (`grovylib/update.py`, `extensions/update.js`). Separate from `grovy update` (which fast-forwards the
+git upstream), this is a passive "is there a newer *release*?" check against GitHub's tagged versions. The daemon's
+reconcile loop calls `check_for_update()`, which asks `https://api.github.com/repos/<repo>/tags` at most once a day
+(generic `User-Agent: grovy`, nothing about the user sent), picks the newest semver tag, and caches it in
+`$STATE/update.json`; a network error is kept there with the last good tag so a flaky connection never clears what was
+known. The current version is `git describe --tags` of the grovy folder (so a non-tagged or non-git checkout compares
+nothing). `GET /api/update` returns the cached comparison (never touches the network); `POST /api/update` is the
+Settings sheet's **Check now** (forces a fetch). The phone shows it under ⚙ Settings as "Update available" (a newer tag
+exists) or "Check for updates". Opt out entirely with `GROVY_UPDATE_CHECK=off` (no request is ever made, and the
+Settings entry disappears); point it at a fork's tags with `GROVY_UPDATE_REPO=owner/repo`.
+
 ## Configuration (environment variables)
 
 | var | default | |
@@ -197,6 +208,8 @@ those started before keep their `--settings` until ⋯ → Update session. `--no
 | `GROVY_OOM_AVOID` | `1` | `0` = don't move sessions out of systemd-oomd's way (see "Out of memory") |
 | `GROVY_PLUGINS` | `1` | `0` = load no plugins: neither `~/.config/grovy/plugins/` nor the built-in ones (see "Making it yours") |
 | `GROVY_SUBAGENT_HOOKS` | `0` | `1` = forward every hook of subagents (normally only permission requests, notifications, start/stop and tool calls, which feed the background list) |
+| `GROVY_UPDATE_CHECK` | `on` | `off` = never ask GitHub whether grovy is up to date (see "Update check") |
+| `GROVY_UPDATE_REPO` | `Garfield1002/grovy` | `owner/repo` whose tags the update check compares against |
 
 ## Notifications (Telegram or anything else)
 

@@ -7,12 +7,119 @@ from. Restarting never touches Claude sessions: the `grovy` (and `grovy-tunnel`)
 hand in a tmux pane (respawned with its own command line). Sessions started before keep their hooks settings until
 ⋯ → Update session (grovy shows it when they're out of date).
 """
+import json
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
+import urllib.request
 
 from . import client, core, terminal, tui
+
+
+# ---------------------------------------------------------------- "is grovy up to date?" (GitHub tagged releases)
+# A passive check, separate from `grovy update` (which fast-forwards the git upstream): the daemon asks GitHub at most
+# once a day for the newest tag of grovy's repo, caches it, and the phone's Settings sheet shows it (extensions/update.js).
+# Opt out with GROVY_UPDATE_CHECK=off; check another repo's tags with GROVY_UPDATE_REPO=owner/repo.
+DEFAULT_REPO = "Garfield1002/grovy"       # grovy's own GitHub repo
+CHECK_EVERY = 24 * 3600                    # at most one GitHub request a day
+_SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
+_REPO_RE = re.compile(r"[A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*")   # owner/repo; each part starts alnum, so no "..", no
+#                                                                   extra path segments or query — can't reshape the URL
+
+
+def check_enabled():
+    """Whether the daily GitHub version check runs (GROVY_UPDATE_CHECK, on by default)."""
+    return core.env("UPDATE_CHECK", "on").strip().lower() not in ("0", "off", "no", "false")
+
+
+def check_repo():
+    """The owner/repo whose tags to compare against, or None if it is set to something that isn't one."""
+    repo = (core.env("UPDATE_REPO") or DEFAULT_REPO).strip().strip("/")
+    return repo if _REPO_RE.fullmatch(repo) else None
+
+
+def _semver(tag):
+    m = _SEMVER.match((tag or "").strip())
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def current_version():
+    """The newest tag reachable from HEAD (e.g. "v1.9.2"), or None if this isn't a git checkout with tags."""
+    try:
+        return git("describe", "--tags", "--abbrev=0") or None
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return None
+
+
+def fetch_latest(repo, timeout=10):
+    """The newest semver tag name among owner/repo's 100 most recent tags on GitHub, or None if none are semver.
+    Raises on a network error. Only the public tags API is called; the User-Agent is generic so nothing about the
+    user is sent."""
+    url = f"https://api.github.com/repos/{repo}/tags?per_page=100"
+    req = urllib.request.Request(url, headers={"User-Agent": "grovy", "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:   # noqa: S310 (hard-coded https host)
+        data = json.load(r)
+    best, name = None, None
+    for t in data if isinstance(data, list) else []:
+        v = _semver(t.get("name") if isinstance(t, dict) else None)
+        if v and (best is None or v > best):
+            best, name = v, t["name"]
+    return name
+
+
+def _cache_path():
+    return os.path.join(core.state_dir(), "update.json")
+
+
+_WRITE = threading.Lock()   # the reconcile loop and a "Check now" POST both write update.json; serialize those writes
+
+
+def _save(rec):
+    with _WRITE:   # core.atomic_write_json's temp file is per process, not per thread: don't let two writers collide
+        core.atomic_write_json(_cache_path(), rec)
+
+
+def check_for_update(force=False):
+    """The daemon's daily check: fetch the newest tag and cache it. Never raises; any failure is kept in the cache
+    so the UI can say the check failed. Does nothing (and leaves no cache) when the check is opted out. The fetch
+    runs on the caller's thread (so the once-a-day fetch can hold the reconcile loop for up to the timeout) but
+    outside the write lock, so it never blocks a concurrent "Check now"."""
+    if not check_enabled():
+        return
+    repo = check_repo()
+    if not repo:
+        return _save({"error": "GROVY_UPDATE_REPO isn't an owner/repo", "checked": core.now()})
+    old = core.read_json(_cache_path(), {})
+    seen = old.get("checked") if isinstance(old.get("checked"), (int, float)) else None   # ignore a corrupt cache
+    fresh = old.get("repo") == repo and seen and core.now() - seen < CHECK_EVERY
+    if fresh and not force:
+        return
+    rec = {"repo": repo, "checked": core.now(), "latest": old.get("latest") if old.get("repo") == repo else None}
+    try:
+        rec["latest"] = fetch_latest(repo)
+    except Exception as e:   # noqa: BLE001 — a passive check must never raise into the loop or the "Check now" POST;
+        rec["error"] = f"{type(e).__name__}: {e}"[:200]   # http errors aren't all OSError (http.client.HTTPException)
+    _save(rec)
+
+
+def update_status():
+    """What the phone's Settings sheet and `GET /api/update` show: the current version, the newest tag seen, and
+    whether a newer one exists. Computed from the daemon's cached check, so it never touches the network."""
+    if not check_enabled():
+        return {"enabled": False}
+    repo = check_repo()
+    cur, cached = current_version(), core.read_json(_cache_path(), {})
+    latest = cached.get("latest") if cached.get("repo") == repo else None
+    cv, lv = _semver(cur), _semver(latest)
+    behind = bool(cv and lv and lv > cv)
+    url = f"https://github.com/{repo}/releases/tag/{latest}" if (repo and latest) \
+        else (f"https://github.com/{repo}/tags" if repo else None)
+    error = "GROVY_UPDATE_REPO isn't an owner/repo" if not repo else (cached.get("error") if latest is None else None)
+    return {"enabled": True, "repo": repo, "current": cur, "latest": latest, "behind": behind,
+            "checked": cached.get("checked"), "error": error, "url": url}
 
 
 def git(*args, timeout=60, check=True):

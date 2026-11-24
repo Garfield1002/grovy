@@ -19,6 +19,9 @@ away: `grovy attach NAME` puts you in the real session (detach with Ctrl-b d).
   the message box to see each one, how long it has run and what it is doing.
 - **Updating a session:** after `grovy update`, ⋯ → Update session gives a running session the newest grovy
   (Claude restarts and resumes the same conversation). Some features below need it on older sessions.
+- **Up to date?** grovy checks GitHub once a day for a newer release and shows it under ⚙ ("Update available", or
+  "Check for updates" to look now). To update, run `grovy update`. Turn the check off with `GROVY_UPDATE_CHECK=off`,
+  or point it at your own fork with `GROVY_UPDATE_REPO=owner/repo`.
 
 ## Talking to Claude
 
