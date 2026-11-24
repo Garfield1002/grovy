@@ -291,6 +291,8 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
             s["claude_session_id"] = sid
             s["last_error"] = None
             src = payload.get("source")
+            if src in ("startup", "clear"):
+                s["goal"] = None   # a fresh conversation, or /clear (even typed in the terminal), has no goal
             ours = False
             for p in self.prompts:  # /clear and /compact emit no UserPromptSubmit; this is their receipt
                 if p["session"] == name and p["status"] == "injected" and p.get("command") == src \
@@ -353,6 +355,7 @@ class Store(Tasks, Permissions, Prompts, SessionLifecycle, Pages, LiveCards, Att
             else:
                 self._expire_perms(name, "Claude session ended")
                 self._set(name, "exited", f"conversation ended ({payload.get('reason', '')})")
+                s["goal"] = None
                 self._task_snapshot(s, [], t)
                 self._steps_end(s)
                 self._fail_queued(name, "Claude exited before it was sent")

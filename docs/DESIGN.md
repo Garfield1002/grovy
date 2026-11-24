@@ -529,7 +529,8 @@ treated as a command, and only phone-safe ones are
 accepted:
 * skills and custom commands from `PROJECT/.claude/{skills,commands}` and `~/.claude/{skills,commands}`
 * claude.ai-synced skills, as `anthropic-skills:NAME` (not yet verified by typing one)
-* `/clear` and `/compact`
+* `/clear`, `/compact` and `/goal` (the phone-safe built-ins, `commands.PHONE_SAFE`: they're reserved so a skill
+  can't shadow them, but unlike menu-openers they produce a conversational effect that works when typed)
 
 Anything else (`/model`, `/config`, `/resume`, …) opens a terminal menu or prints only to the terminal, so it's
 refused with a pointer to `grovy attach`. Skill names that would shadow a built-in or alias (compared case-insensitively)
@@ -537,6 +538,15 @@ are ignored. A message starting with `!` (bash mode) is refused as well. Command
 Enter can't pick a neighbour. Skills confirm through `UserPromptSubmit`; `/clear` and `/compact` emit none and confirm
 through `SessionStart(source=clear|compact)`. Typing `/` in the composer opens a picker of the allowed commands. `/clear`
 asks for confirmation first (it sits next to `/compact` in the picker, and can't be undone).
+
+**Goals.** `/goal <condition>` sets a goal and Claude keeps taking turns toward it; it fires `UserPromptSubmit` like
+an ordinary prompt, so grovy delivers and confirms it the same way (the activity reads "setting a goal"). When grovy
+delivers a `/goal <condition>` it remembers the condition on the session (`Store._apply_goal`, exposed as `session.goal`),
+and a banner under the header shows it with a **Clear** button (which sends `/goal clear`). The banner is phone-side and
+best-effort: it clears on `/goal clear` (or `stop`/`off`/`reset`/`none`/`cancel`), on `/clear` (even typed in the
+terminal, via `SessionStart(source=clear)`), when a new `/goal` replaces it, and when the session ends — but it does
+**not** show a goal set in the terminal, nor clear itself when the evaluator meets the goal (that would mean reading the
+`goal_status` attachment from the transcript). `/goal` with no argument is a status view and leaves the banner unchanged.
 
 **Interrupt.** While a session is `working` with no pending dialog and the message box is empty, the send button
 becomes ■ (stop), which presses Esc (after a confirm); once you type, it becomes a blue steer arrow. Ctrl+Enter only

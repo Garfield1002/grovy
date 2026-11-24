@@ -2,7 +2,7 @@
 
 
 DELIVERY_ACTIVITY = {None: "sending prompt from web", "compact": "compacting conversation",
-                     "clear": "clearing conversation"}
+                     "clear": "clearing conversation", "goal": "setting a goal"}
 COMMAND_TIMEOUT = 600    # /clear, /compact: their receipt is SessionStart, sent only once they finish
 
 INPUT_STATES = ("idle", "error")  # states in which we will type into the session

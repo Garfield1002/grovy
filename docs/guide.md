@@ -29,6 +29,8 @@ away: `grovy attach NAME` puts you in the real session (detach with Ctrl-b d).
 - **Chat:** Claude's replies, rendered properly (tables, code, lists), plus what's happening now.
 - **Messages:** type to Claude; messages wait in a queue while Claude is busy. `/` lists the skills and commands
   that work from the phone.
+- **Goals:** send `/goal <what you want>` and Claude keeps working until it's done. A banner under the header shows
+  the goal, with a Clear button (or send `/goal clear`).
 - **Steering:** a message you send while Claude is working reaches it at its next step, so you can correct course
   without waiting or interrupting (the button turns blue). With the box empty, the same button is ■ to stop Claude.
 - **Quote and copy:** each reply has Copy and Quote buttons; or select part of it and tap Quote selection. Tap a

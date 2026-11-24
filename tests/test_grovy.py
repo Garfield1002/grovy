@@ -519,6 +519,67 @@ class TestCommands(StoreCase):
         self.assertEqual(self.store.prompts[-1]["status"], "submitted")
 
 
+class TestGoalCommand(StoreCase):
+    """/goal is a conversational built-in that fires UserPromptSubmit, so the phone may send it; grovy tracks
+    the goal it set so the UI can show a banner (Store._apply_goal)."""
+
+    def idle(self, n="a"):
+        self.store.ingest(n, ev("SessionStart", source="startup"))
+
+    def test_goal_is_offered_and_phone_safe(self):
+        names = [c["name"] for c in commands.commands_for(None)]
+        self.assertIn("goal", names)
+        self.assertIn("goal", commands.PHONE_SAFE)
+        self.assertIn("goal", commands.RESERVED_COMMANDS)  # a skill named "goal" must not shadow it
+
+    def test_goal_is_sendable_and_tracked(self):
+        self.idle()
+        self.assertEqual(self.store.enqueue("a", "/goal make the tests pass")[0], 200)
+        self.wait_pasted(1)
+        self.assertEqual(self.pasted[-1], ("a", "/goal make the tests pass"))
+        self.assertEqual(self.store.sessions["a"]["goal"], "make the tests pass")
+        self.assertEqual(self.store.summary("a")["goal"], "make the tests pass")   # reaches the phone
+
+    def test_goal_clear_via_phone_removes_it(self):
+        self.idle()
+        self.store.sessions["a"]["goal"] = "old goal"
+        self.assertEqual(self.store.enqueue("a", "/goal clear")[0], 200)
+        self.wait_pasted(1)
+        self.assertIsNone(self.store.sessions["a"]["goal"])
+
+    def test_apply_goal_parsing(self):
+        s = self.store.sessions["a"]
+        self.store._apply_goal("a", {"command": "goal", "text": "/goal ship it"})
+        self.assertEqual(s["goal"], "ship it")
+        for word in ("clear", "stop", "off", "reset", "none", "cancel", "CLEAR"):
+            s["goal"] = "x"
+            self.store._apply_goal("a", {"command": "goal", "text": f"/goal {word}"})
+            self.assertIsNone(s["goal"], word)
+        s["goal"] = "keep"
+        self.store._apply_goal("a", {"command": "goal", "text": "/goal"})   # status view: no change
+        self.assertEqual(s["goal"], "keep")
+        self.store._apply_goal("a", {"command": "clear", "text": "/clear"})   # /clear removes the goal
+        self.assertIsNone(s["goal"])
+        s["goal"] = "keep"
+        self.store._apply_goal("a", {"command": None, "text": "hello"})   # an ordinary prompt leaves it alone
+        self.assertEqual(s["goal"], "keep")
+
+    def test_terminal_clear_and_exit_drop_the_goal(self):
+        self.idle()
+        self.store.sessions["a"]["goal"] = "running goal"
+        self.store.ingest("a", ev("SessionStart", sid="S2", source="clear"))   # /clear typed in the terminal
+        self.assertIsNone(self.store.sessions["a"]["goal"])
+        self.store.sessions["a"]["goal"] = "running goal"
+        self.store.ingest("a", ev("SessionEnd", reason="other"))
+        self.assertIsNone(self.store.sessions["a"]["goal"])
+
+    def test_btw_is_still_blocked_from_the_prompt_queue(self):
+        self.idle()
+        code, msg = self.store.enqueue("a", "/btw what changed?")
+        self.assertEqual(code, 400)
+        self.assertIn("terminal", msg)
+
+
 class TestLifecycle(StoreCase):
     def test_trusted_projects(self):
         home = tempfile.mkdtemp(dir=TMP)

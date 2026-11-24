@@ -51,6 +51,15 @@ header h1 { flex:1 1 auto; min-width:min(4.5em, 34vw); }
 #live { font-size:12px; font-weight:600; color:var(--warn); white-space:nowrap; flex:none; }
 #live.on { display:none; }
 
+/* active-goal banner: shows the goal grovy set from the phone (/goal), with a button to clear it */
+#goalbar { position:sticky; top:calc(46px + env(safe-area-inset-top)); z-index:4; display:flex; align-items:center;
+  gap:8px; padding:7px 14px; font-size:13px; color:var(--busy); border-bottom:1px solid var(--line);
+  background:color-mix(in srgb, var(--busy) 14%, var(--bg)); }
+#goalbar .gt { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+#goalbar .gx { flex:none; border:1px solid color-mix(in srgb, var(--busy) 40%, transparent); background:none;
+  color:var(--busy); font-weight:650; font-size:12px; padding:4px 10px; border-radius:99px; }
+body.home #goalbar { display:none !important; }
+
 /* state dots */
 .dot { width:10px; height:10px; border-radius:50%; flex:none; background:var(--faint); }
 .dot.idle { background:var(--ok); } .dot.error { background:var(--bad); }
@@ -426,6 +435,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   body.home #live { margin-left:auto; }
   #steps[data-level="all"] { background:var(--code); }
   main { padding-top:12px; }
+  #goalbar { top:0; }
   #err { left:312px; }
   /* the grove stays, faint, in the margin beside every conversation */
   #backdrop { display:block; }
@@ -505,6 +515,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   <button id="gear" class="hbtn hidden" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
   <button id="menu" class="hbtn hidden" aria-label="Menu">⋯</button>
 </header>
+<div id="goalbar" class="hidden"></div>
 <nav id="side" aria-label="Sessions"><div class="sh"><a href="#/" aria-label="All sessions and pages"><span class="logo" aria-hidden="true"></span>grovy</a>
   <button id="sadd" class="hbtn" aria-label="New session" title="New"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button id="sfind" class="hbtn" aria-label="Run a command" title="Run a command (Ctrl/⌘+K)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/></svg></button><button id="sgear" class="hbtn" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button></div><div id="slist"></div></nav>
 <div id="backdrop" aria-hidden="true"></div>
@@ -1280,6 +1291,7 @@ async function renderDetail(name) {
   $("pdot").className = "dot " + s.state + (stalled ? " stalled" : "");
   $("ptext").replaceChildren(LABEL[s.state] || s.state, ...(bgn ? [" · ", runMark(bgn)] : []));
   renderTasks(s, bgn);
+  renderGoal(s);
 
   pages = d.pages || {};
   syncViewer();
@@ -1443,6 +1455,21 @@ function renderTasks(s, n) {
       t.last ? h("div", {}, "last: ", h("b", {}, String(t.last.tool)), t.last.arg ? " " + t.last.arg : "",
         t.active ? " · " + (ago(t.active) === "now" ? "just now" : ago(t.active) + " ago") : "") : null].filter(Boolean))))) : null;
   $("bg").replaceChildren(head, ...(rows ? [rows] : []));
+}
+// Active-goal banner. grovy only knows the goal it set from the phone (see Store._apply_goal), so a goal set in
+// the terminal, or one the evaluator finishes, isn't reflected here; Clear sends /goal clear.
+function renderGoal(s) {
+  const g = s && s.state !== "exited" ? s.goal : null, bar = $("goalbar");
+  bar.classList.toggle("hidden", !g);
+  if (!g) return bar.replaceChildren();
+  bar.replaceChildren(h("span", {class: "gt", title: g}, "🎯 " + g),
+    h("button", {class: "gx", title: "Clear this goal", onclick: clearGoal}, "Clear"));
+}
+async function clearGoal() {
+  if (!view) return;
+  try { await api(`/api/sessions/${encodeURIComponent(view)}/prompts`, {text: "/goal clear"}); }
+  catch (e) { say("Not cleared: " + e.message); }
+  refresh();
 }
 function tick() {
   for (const [x, since] of taskClocks) x.textContent = dur(serverNow() - since);

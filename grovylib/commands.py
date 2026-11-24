@@ -8,16 +8,22 @@ from . import core
 CMD_RE = re.compile(r"/([A-Za-z0-9][\w:.-]*)(?:\s|$)")
 BUILTIN_COMMANDS = [{"name": "clear", "description": "Start a new conversation (clears context)", "source": "built-in"},
                     {"name": "compact", "description": "Summarize the conversation to free up context",
-                     "source": "built-in"}]
+                     "source": "built-in"},
+                    {"name": "goal", "description": "Set a goal; Claude keeps working until it's met "
+                     "(/goal clear to stop, /goal alone for status)", "source": "built-in"}]
 _cmd_cache = {}
 # Claude Code built-ins (and common aliases) that open menus or act outside the conversation.
 # Names are compared lowercased. Skills can't shadow these: the phone must never open a built-in menu.
 RESERVED_COMMANDS = set("""add-dir agents allowed-tools approved-tools bashes btw bug chrome clear compact config
-context continue copy cost doctor effort exit export extra-usage fast feedback fork help hooks ide init
+context continue copy cost doctor effort exit export extra-usage fast feedback fork goal help hooks ide init
 install-github-app install-slack-app keybindings login logout mcp memory migrate-installer model new
 output-style permissions plan plugin plugins pr-comments privacy-settings quit release-notes reload-plugins
 remote-env rename reset resume review rewind sandbox security-review settings skills stats status statusline
 tasks teleport terminal-setup theme todos upgrade usage vim""".split())
+
+# Built-ins the phone is allowed to send even though they're reserved (reserved so a skill can't shadow them,
+# but these produce a conversational effect that works when typed from the phone, unlike menu-openers like /model).
+PHONE_SAFE = {"clear", "compact", "goal"}
 
 
 def _frontmatter(path):

@@ -9,6 +9,8 @@ MAX_PROMPT = 100_000     # chars accepted for a browser prompt
 
 FORCE_STALE = 60  # a "working" session silent this long may be force-typed into, if the user confirms
 
+GOAL_CLEAR_WORDS = {"clear", "stop", "off", "reset", "none", "cancel"}  # /goal <one of these> removes the goal
+
 STEER_MAX = 8000          # chars handed to Claude in one PostToolUse (longer messages wait for the turn's end)
 STEER_INTRO = ("The user sent {what} from their phone (grovy) while you were working. {it} the user's own "
                "words, exactly as if they had typed {them} into the terminal; take {them} into account now:\n\n")
@@ -33,10 +35,10 @@ class Prompts:
             if lead.startswith("/"):
                 m = commands.CMD_RE.match(lead)
                 command = m.group(1) if m else None
-                if not command or command.lower() in commands.RESERVED_COMMANDS - {"clear", "compact"} or \
+                if not command or command.lower() in commands.RESERVED_COMMANDS - commands.PHONE_SAFE or \
                         command not in {c["name"] for c in commands.commands_for(self.sessions[name].get("cwd"))}:
                     return 400, (f"{lead.split()[0]} can't be run from the phone (only skills, custom commands, "
-                                 f"/clear and /compact). Use the terminal: grovy attach {name}.")
+                                 f"/clear, /compact and /goal). Use the terminal: grovy attach {name}.")
             p = {"id": uuid.uuid4().hex, "session": name, "text": text, "status": "queued", "force": force is True,
                  "command": command, "created": core.now(), "updated": core.now(), "error": None}
             self.prompts.append(p)
@@ -152,6 +154,7 @@ class Prompts:
             # Persist "injected" BEFORE typing: a crash after this point can never cause a second send.
             p["status"], p["updated"] = "injected", core.now()
             self._set(name, "working", states.DELIVERY_ACTIVITY.get(p.get("command"), states.DELIVERY_ACTIVITY[None]))
+            self._apply_goal(name, p)
             self._save_prompts()
             self._save_state()
         self.publish(name)
@@ -189,6 +192,22 @@ class Prompts:
                     self._set(p["session"], "unknown", f"prompt delivery failed: {err}")
             self._save_prompts()
         self.publish(p["session"])
+
+    def _apply_goal(self, name, p):
+        """Track the goal the phone shows: delivering /goal <condition> sets it; /goal clear (and the other
+        clear words), or /clear, removes it. Phone-side and best-effort: a goal set or finished in the terminal
+        isn't reflected, and the evaluator meeting it doesn't clear this. Call under the lock."""
+        cmd = p.get("command")
+        if cmd == "clear":
+            self.sessions[name]["goal"] = None
+            return
+        if cmd != "goal":
+            return
+        m = commands.CMD_RE.match(p["text"].lstrip())
+        arg = p["text"].lstrip()[m.end():].strip() if m else ""
+        if not arg:
+            return  # "/goal" alone shows status; it doesn't change the goal
+        self.sessions[name]["goal"] = None if arg.lower() in GOAL_CLEAR_WORDS else arg
 
     def _forceable(self, s):
         """unknown, or working but silent (e.g. turn interrupted with Esc: Claude emits no hook)."""
