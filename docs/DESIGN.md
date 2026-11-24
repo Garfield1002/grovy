@@ -586,7 +586,8 @@ and reloads.
     Claude Code's own `~/.claude/sessions/<pid>.json` (undocumented; best effort, checked against `/proc` start
     times).
 * **Session page.** The ⋯ menu is grouped under headers: *Conversation* (*Search this conversation*, *Pages* when
-  Claude has published any, and extensions such as *Git*) and *Session* (*Rename*, *Update session*, *Stop session*
+  Claude has published any, and extensions such as *Git*) and *Session* (*Pin session* / *Unpin session*, *Rename*,
+  *Update session*, *Stop session*
   — or *Resume session* and *Remove from list* once it has ended; ended sessions also get a *Remove* button in the
   list — and *Finish issue* for an issue). Items from `grovy.menu` fall under their `section`, or a trailing *More*
   if they name none, and ends with *Search commands* (the command palette). *Login link* is on the session-list menu
@@ -698,6 +699,11 @@ the `Issues` part of `Store`; the page side is the built-in extension `extension
   session, keeping each session's sorted order (`orderSessions` in `index.html`, matching a session's `cwd` against the
   `root` each issue's summary now carries). Several issues of one project stack under it; an issue whose root project
   has no session of its own falls to the end, still indented.
+* **Pinning a session** (⋯ → *Pin session*, *Unpin session* once pinned) floats it to the top of the list, marked
+  with a 📌. A project and its indented issues move as one block keeping their order, so pinning any session in a block
+  raises the whole block (pin a nested issue and its project comes up with it). Pins are a per-device view preference,
+  kept by name in `localStorage` (`grovy-pins:sessions`); a name no longer in the list is ignored, *Remove from list*
+  drops it, and *Rename* carries it to the new name. Nothing server-side changes, so pins differ between devices.
 * ＋ → New issue (home screen) lists the trusted projects that are git repositories (a main checkout, not a linked
   worktree), each with its default branch: origin's HEAD if it has one locally, else `main`, else `master`. Always that
   branch, whatever is checked out: an issue is a fix for the main line. The list is the same `grovy.picker` as New
@@ -817,7 +823,7 @@ when it has none) does what ⋯ menus and an item's own small buttons do on the 
 each enclosing one's below a divider (a code block's Copy code, then its reply's Copy, Quote, Show tool calls). Items
 that mirror a button go through `press(button)`, which clicks that button, so its checks hold (Allow on a card too large
 to show stays disabled), and on a permission card the first, focused item is a Copy, so Enter in the menu never
-approves. Carriers: session cards (Open, Rename, Update, Resume, Stop, Remove), page cards (Open, new tab, its session,
+approves. Carriers: session cards (Open, Pin/Unpin, Rename, Update, Resume, Stop, Remove), page cards (Open, new tab, its session,
 Delete), replies, your messages (Copy, Quote; Cancel while queued), subagent reports, code blocks, attachments, tool
 lines in "Worked for", permission cards (Copy, Deny, Allow once), folders in New session (Start here, Copy path). The
 conversation's background gives the open session's ⋯ items, the rest of the sidebar or an empty right side grovy's.

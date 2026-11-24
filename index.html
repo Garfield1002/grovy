@@ -69,6 +69,7 @@ main { flex:1; width:100%; max-width:760px; margin:0 auto; padding:6px 14px 12px
 .sess .top { display:flex; gap:8px; align-items:center; }   /* pills stay centred on the name, whatever its font */
 .sess .name { font-weight:650; font-size:17px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .sess .when { font-size:13px; color:var(--mut); flex:none; }
+.sess .pin { font-size:12px; flex:none; opacity:.85; }
 .sess .sub { font-size:13px; color:var(--mut); }
 .sess .prev { font-size:15px; margin-top:2px; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2;
   -webkit-box-orient:vertical; overflow-wrap:anywhere; }
@@ -813,21 +814,32 @@ function md(src, opts = {}) {   // opts.widgets === false: ```widget stays code 
 }
 
 // ---------------------------------------------------------------- session list
+// Sessions the user pinned to the top of the list. Kept per device by name (⋯ → Pin session toggles it); a name no
+// longer in the list is simply ignored, so a stopped-then-forgotten session leaves nothing behind.
+function pinnedSessions() { try { return new Set(JSON.parse(localStorage.getItem("grovy-pins:sessions") || "[]")); } catch (e) { return new Set(); } }
+function setPinnedSessions(set) { try { localStorage.setItem("grovy-pins:sessions", JSON.stringify([...set])); } catch (e) {} }
+function isSessionPinned(name) { return pinnedSessions().has(name); }
+function toggleSessionPin(name) { const p = pinnedSessions(); if (!p.delete(name)) p.add(name); setPinnedSessions(p); }
+
 // An issue's session lives in a git worktree of a project; show it indented, right below that project's own
 // session (keeping each session's sorted order). A worktree whose root project has no session falls to the end.
+// Pinned sessions float to the top: a project and its indented issues move as one block, keeping their order, so
+// a block rises whenever any session in it is pinned.
 function orderSessions(sessions) {
   const kids = {};   // root path -> its worktree sessions
   const at = (s, path) => (s.machine || "") + "\0" + path;   // the same folder on two machines isn't one project
   for (const s of sessions) if (s.issue) (kids[at(s, s.issue.root)] ||= []).push(s);
-  const out = [];
+  const blocks = [];   // each block: a top-level session's [s, false], then its issue sessions' [k, true]
   for (const s of sessions) {
     if (s.issue) continue;                             // placed under its root below, not at top level
-    out.push([s, false]);
-    for (const k of kids[at(s, s.cwd)] || []) out.push([k, true]);
+    const block = [[s, false]];
+    for (const k of kids[at(s, s.cwd)] || []) block.push([k, true]);
     delete kids[at(s, s.cwd)];
+    blocks.push(block);
   }
-  for (const r in kids) for (const k of kids[r]) out.push([k, true]);   // root project has no session of its own
-  return out;
+  for (const r in kids) for (const k of kids[r]) blocks.push([[k, true]]);   // root project has no session of its own
+  const pins = pinnedSessions(), hot = b => b.some(([s]) => pins.has(s.name));
+  return [...blocks.filter(hot), ...blocks.filter(b => !hot(b))].flat();   // pinned blocks first, order kept otherwise
 }
 
 function sessCard(s, nested) {
@@ -838,6 +850,7 @@ function sessCard(s, nested) {
     h("span", {class: dotClass(s)}),
     h("div", {class: "body"},
       h("div", {class: "top"}, h("span", {class: "name"}, ...nameNode(s.name)),
+        isSessionPinned(s.name) ? h("span", {class: "pin", title: "Pinned"}, "📌") : null,
         s.pending_permissions ? h("span", {class: "badge"}, s.pending_permissions + " waiting") : null,
         h("span", {class: "when"}, ago(s.last_event))),
       h("div", {class: "sub"}, base(s.cwd), " · ", LABEL[s.state] || s.state,
@@ -890,6 +903,7 @@ async function removeSessions(names) {
   for (const n of names) {
     try { await api(`/api/sessions/${encodeURIComponent(n)}/forget`, {}); } catch (e) { say(n + ": " + e.message); }
   }
+  const p = pinnedSessions(); if (names.some(n => p.delete(n))) setPinnedSessions(p);   // drop pins for removed sessions
   if (view && names.includes(view)) go("#/"); else refresh();
 }
 
@@ -1979,6 +1993,9 @@ function sessionCmds(name, s) {
     open && {label: "Search this conversation", section: C, run: searchSheet},
     open && Object.keys(pages).length && {label: "Pages", section: C,
       sub: Object.keys(pages).length + " published by Claude", run: () => pagesSheet(name)},
+    {label: isSessionPinned(name) ? "Unpin session" : "Pin session", section: S,
+      sub: isSessionPinned(name) ? "" : "Keep it at the top of the list",
+      run: () => { toggleSessionPin(name); closeSheet(); refresh(); refreshSide(true); }},
     {label: "Rename", section: S, run: () => renameSheet(name)},
     (s.state !== "exited" && s.outdated) && {label: "Update session", section: S,
       sub: "Restart Claude with the latest grovy, same conversation", run: () => updateSession(name)},
@@ -2116,6 +2133,7 @@ function renameSheet(old) {
         if (d) { localStorage.setItem("grovy-draft:" + nw, d); localStorage.removeItem("grovy-draft:" + old); }
         const at = localStorage.getItem("grovy-att:" + old);
         if (at) { localStorage.setItem("grovy-att:" + nw, at); localStorage.removeItem("grovy-att:" + old); }
+        if (isSessionPinned(old)) { toggleSessionPin(old); toggleSessionPin(nw); }   // keep the pin on the new name
       } catch (e) {}
       closeSheet();
       go("#/s/" + nw);

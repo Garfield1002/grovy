@@ -11,8 +11,8 @@ away: `grovy attach NAME` puts you in the real session (detach with Ctrl-b d).
 - **The list:** every session with live status (working, idle, needs you), context used, and the last activity.
 - **Start, resume, rename, stop:** ＋ starts something — a session in any trusted folder (or continue or fork a past
   conversation there), a quick issue, or a new project. The folder list has a search box and a Recent ⇄ A–Z sort, so
-  it stays quick with many projects. ⚙ holds grovy's own settings. ⋯ on a session renames or stops it; an ended
-  session can be resumed later.
+  it stays quick with many projects. ⚙ holds grovy's own settings. ⋯ on a session pins it to the top of the list
+  (📌), renames or stops it; an ended session can be resumed later.
 - **Command palette:** ⚡ on the session list (⋯ → Search commands in a session), or `Ctrl`/`⌘`+`K` on a keyboard,
   opens one searchable list of everything you can do here plus a jump to any session or page — start typing and press Enter.
   *Restart grovy* there reloads grovy's daemon (after you change grovy itself); your sessions keep running.
