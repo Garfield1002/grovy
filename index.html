@@ -2056,8 +2056,9 @@ const itemNode = c => ctxEntry(c).node;
 // Ctrl counts as ⌘ and Alt as Option), Ctrl+Alt+Shift elsewhere. Used by the tooltips and the shortcuts list.
 const KEYSYM = {ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→", Escape: "Esc", Space: "Space"};
 function comboLabel(combo) {
-  const mac = MOD === "⌘";
-  return String(combo).split("+").map(p =>
+  const mac = MOD === "⌘", s = String(combo);
+  const parts = s.endsWith("++") ? [...s.slice(0, -2).split("+"), "+"] : s.split("+");   // "Ctrl++" is the + key
+  return parts.map(p =>
     p === "Ctrl" ? (mac ? "⌘" : "Ctrl") : p === "Alt" ? (mac ? "⌥" : "Alt") : p === "Shift" ? (mac ? "⇧" : "Shift")
     : KEYSYM[p] || p).join(mac ? "" : "+");
 }
@@ -2124,8 +2125,9 @@ const shortcutsCmd = () => finePointer.matches
 function shortcutsSheet() {
   const row = (combo, label) => h("div", {class: "kbrow"}, h("span", {}, label), h("kbd", {}, comboLabel(combo)));
   const extRows = ext.keys.map(k => row(k.combo, k.label || "Added by an extension"));
+  const bound = new Set(ext.keys.map(k => k.combo));   // an extension that rebound a built-in combo (only Ctrl+K can be) wins, so drop ours
   openSheet(h("h2", {}, "Keyboard shortcuts"),
-    ...BUILTIN_SHORTCUTS.map(s => row(s.combo, s.label)),
+    ...BUILTIN_SHORTCUTS.filter(s => !bound.has(s.combo)).map(s => row(s.combo, s.label)),
     ...(extRows.length ? [h("div", {class: "sect"}, "From extensions"), ...extRows] : []));
 }
 // One unified Settings sheet gathers them all, opened by the cog on the home screen (and the sidebar).
@@ -3025,8 +3027,9 @@ window.grovy = Object.freeze({
 });
 
 // ---------------------------------------------------------------- start-up
-// Every static chrome button (icon buttons especially) gets its label as a hover tooltip. The ones whose label and
-// shortcut change (Send, Full screen) set their own title in the handlers that set the label; this leaves them alone.
+// Every static chrome button (icon buttons especially) gets its label as a hover tooltip. Send has no aria-label until
+// syncSend runs, so it's skipped here and gets its title — with the shortcut — there; Full screen takes its starting
+// title here and keeps it in sync in setFull.
 for (const b of document.querySelectorAll("header button, #composer button, #viewer button, #side button, #sclose"))
   if (b.getAttribute("aria-label") && !b.title) b.title = b.getAttribute("aria-label");
 // Runs once the page is parsed, so after the extensions: what they add is there from the first paint.
