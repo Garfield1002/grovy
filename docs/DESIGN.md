@@ -477,10 +477,12 @@ Longer prompts take the literal bracketed-paste path, with control characters st
   and `SessionEnd` end it. `tx` lives in `state.json`, so a daemon restart mid-turn resumes where it was. It is
   removed from what the browser is sent. Verified (Claude Code 2.1.325): the answer's own text block reaches the file
   ~100ms *after* the `Stop` hook, so it's dropped with the ended `tx`. That's harmless, since `Stop` carries it. `detail`/`history` limits don't count steps, and `HISTORY` is 600 to make room.
-  UI: steps belong to the next `Stop` (or `StopFailure`), else to the live turn. The header's ☰ button sets the
-  default (`localStorage` `grovy-steps`, per device, off by default). "Worked for …" overrides it for one turn until
-  the next view change or toggle. Trailing text steps that the final answer contains are hidden, as repeats.
-  Widgets aren't drawn in steps. In final-only mode, the typing indicator shows the first line of the latest text step.
+  UI: steps belong to the next `Stop` (or `StopFailure`), else to the live turn. The header's ☰ button cycles the
+  default output-detail level (`localStorage` `grovy-steps`, per device): `none` (answers only, the default),
+  `text` (Claude's text steps but not the tool-call steps) or `all` (both). The legacy value `"1"` reads as `all`.
+  "Worked for …" overrides the level for one turn — fully open (`all`) or closed (`none`) — until the next view
+  change or toggle. Trailing text steps that the final answer contains are hidden, as repeats. Widgets aren't drawn
+  in steps. When the level is `none`, the typing indicator shows the first line of the latest text step.
   Claude Code has it; for `/compact` the UI says "compacting…"); blue ✓✓ on the chat bubble (`UserPromptSubmit`
   or `Steered`: Claude read it). `typed` is only set after a send that wasn't aborted. Bubbles show the time the user sent the message: `UserPromptSubmit` and `Steered` events from a grovy prompt carry `sent` (its `created`), since the event's own `ts` is when Claude read it; prompts typed in the terminal fall back to `ts`.
 * Typing re-checks between chunks and before Enter. If Claude starts something on its own meanwhile (a background

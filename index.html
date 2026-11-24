@@ -169,7 +169,8 @@ header h1, .sess .name, #sheet h2, #side .sh a, .md :is(h1, h2, h3, h4), .wt, .s
 .stp.t { font:12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .stp.t b { font-weight:650; color:var(--fg); }
 #steps { display:flex; align-items:center; justify-content:center; color:var(--mut); }
-#steps[aria-pressed="true"] { color:var(--fg); background:var(--code); border-radius:10px; }
+#steps[data-level="text"] { color:var(--fg); }
+#steps[data-level="all"] { color:var(--fg); background:var(--code); border-radius:10px; }
 @keyframes fadein { from { opacity:0; transform:translateY(3px) } to { opacity:1; transform:none } }
 .elapsed { font-size:13px; color:var(--mut); font-variant-numeric:tabular-nums; }
 
@@ -405,7 +406,7 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   #live, #menu, #steps { margin-top:6px; background:var(--card); border:1px solid var(--line); border-radius:99px; }
   #live { padding:3px 10px; } #menu, #steps { min-height:32px; min-width:36px; font-size:18px; }
   body.home #live { margin-left:auto; }
-  #steps[aria-pressed="true"] { background:var(--code); }
+  #steps[data-level="all"] { background:var(--code); }
   main { padding-top:12px; }
   #err { left:312px; }
   /* the grove stays, faint, in the margin beside every conversation */
@@ -478,8 +479,8 @@ textarea:focus-visible, input:focus-visible { outline:none; }
   <button id="add" class="hbtn" aria-label="New session">＋</button>
   <span id="pill" class="pill hidden"><span id="pdot" class="dot"></span><span id="ptext"></span></span>
   <span id="live" title="live updates disconnected">offline</span>
-  <button id="steps" class="hbtn hidden" aria-pressed="false" aria-label="Show Claude's steps, not only its answers"
-    title="Show Claude's steps, not only its answers"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+  <button id="steps" class="hbtn hidden" aria-pressed="false" aria-label="Output detail (tap to change)"
+    title="Output detail (tap to change)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
     stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg></button>
   <button id="menu" class="hbtn hidden" aria-label="Menu">⋯</button>
 </header>
@@ -966,7 +967,7 @@ function workedNode(d, turn) {   // "Worked for 2m 10s · 14 tools ›" in the r
   const n = d.tool_count || 0, tools = Array.isArray(d.tools) ? d.tools : [];
   const text = (timed ? "Worked for " + dur(d.worked) : "Steps") + (n ? ` · ${n} tool${n > 1 ? "s" : ""}` : "");
   if (turn) return {label: h("button", {class: "wkb more-t", "data-turn": turn, "aria-expanded": "false",
-    onclick: () => { turnOpen.set(turn, !stepsShown(turn)); showSteps(); }}, text), list: null};
+    onclick: () => { turnOpen.set(turn, turnLevel(turn) === "none" ? "all" : "none"); showSteps(); }}, text), list: null};
   if (!tools.length) return {label: h("span", {class: "wkb"}, text), list: null};
   const list = h("ol", {class: "wkl hidden"}, ...tools.map(x => h("li", {ctx: () => [{label: "Copy", sub: `${x.tool || ""} ${x.arg || ""}`.trim(),
       run: () => copyQuiet(`${x.tool || ""} ${x.arg || ""}`.trim())}]}, h("b", {}, String(x.tool || "")), x.arg ? " " + x.arg : "")),
@@ -1291,7 +1292,7 @@ async function renderDetail(name) {
   const liveTurn = turns.find(x => x.key === "live"), said = busy && liveTurn && [...liveTurn.steps].reverse().find(x => x.d.kind === "text");
   const line = said ? (String(said.d.text).split("\n").find(l => l.trim()) || "").replace(/[*_`#>]+/g, "").trim() : "";
   $("says").textContent = line;
-  $("says").classList.toggle("hidden", !line || showAll);
+  $("says").classList.toggle("hidden", !line || level !== "none");
   tick();
 
   const hint = $("hint");
@@ -1329,31 +1330,40 @@ async function renderDetail(name) {
   if (ext.on.update.length) emit("update", structuredClone(s));
 }
 let older = [], noMore = false, firstId = 0;
-// Steps (Step events: Claude's text between tool calls, and the calls). The header button sets the default for every
-// session (kept on this device); "Worked for …" opens or closes one turn. A turn's last text step repeats its answer.
-let showAll = (() => { try { return localStorage.getItem("grovy-steps") === "1"; } catch (e) { return false; } })();
+// Steps (Step events: Claude's text between tool calls, and the calls). Output detail has three levels: "none"
+// (answers only), "text" (what Claude writes between the calls, but not the calls) and "all" (writing and calls).
+// The header button cycles the default for every session (kept on this device); "Worked for …" opens one turn fully
+// or closes it, overriding the default for that turn. A turn's last text step repeats its answer, so it's hidden.
+const LEVELS = ["none", "text", "all"];
+const LVL_LABEL = {none: "answers only", text: "Claude's words, not tool calls", all: "words and tool calls"};
+let level = (() => { try { const v = localStorage.getItem("grovy-steps"); return v === "1" ? "all" : LEVELS.includes(v) ? v : "none"; } catch (e) { return "none"; } })();
 let turns = [];                // [{key, steps: [{n, d}], final, stop}], from the last render
-const turnOpen = new Map();    // turn key -> shown, where it differs from the default
-const stepsShown = key => turnOpen.has(key) ? turnOpen.get(key) : showAll;
+const turnOpen = new Map();    // turn key -> "none"/"all", overriding the default level for that turn
+const turnLevel = key => turnOpen.has(key) ? turnOpen.get(key) : level;
+const visible = (d, lvl) => lvl === "all" || (lvl === "text" && d.kind === "text");
 function showSteps() {
-  $("steps").setAttribute("aria-pressed", String(showAll));
+  const sb = $("steps");
+  sb.dataset.level = level;
+  sb.setAttribute("aria-pressed", String(level !== "none"));
+  const lbl = "Output detail: " + LVL_LABEL[level] + " (tap to change)";
+  sb.setAttribute("aria-label", lbl); sb.setAttribute("title", lbl);
   for (const t of turns) {
-    const on = stepsShown(t.key), fin = squashText(t.final || "");
+    const lvl = turnLevel(t.key), fin = squashText(t.final || "");
     let dup = new Set();
     for (let i = t.steps.length - 1; i >= 0 && fin && t.steps[i].d.kind === "text"; i--) {
       if (!fin.includes(squashText(t.steps[i].d.text))) break;
       dup.add(t.steps[i]);
     }
-    for (const x of t.steps) x.n.classList.toggle("hidden", !on || dup.has(x));
+    for (const x of t.steps) x.n.classList.toggle("hidden", dup.has(x) || !visible(x.d, lvl));
     const btn = t.stop && cache.get("e" + t.stop + "S") || cache.get("e" + t.stop + "LS");
     const b = btn && btn.querySelector("button.wkb[data-turn]");
-    if (b) b.setAttribute("aria-expanded", String(on));
+    if (b) b.setAttribute("aria-expanded", String(lvl !== "none"));
   }
-  if (cur) $("says").classList.toggle("hidden", showAll || !$("says").textContent);
+  if (cur) $("says").classList.toggle("hidden", level !== "none" || !$("says").textContent);
 }
 $("steps").onclick = () => {
-  showAll = !showAll; turnOpen.clear();
-  try { localStorage.setItem("grovy-steps", showAll ? "1" : "0"); } catch (e) {}
+  level = LEVELS[(LEVELS.indexOf(level) + 1) % LEVELS.length]; turnOpen.clear();
+  try { localStorage.setItem("grovy-steps", level); } catch (e) {}
   showSteps();
 };
 async function loadEarlier() {
