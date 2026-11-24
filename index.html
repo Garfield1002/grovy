@@ -1748,9 +1748,12 @@ async function sendNow() {
   if (text == null) return;
   if (files.length && /^[/!]/.test(text.trimStart()))   // checked on what is sent, after the extensions
     return say("Attachments can't go with a / or ! command: send them in a normal message.");
-  if (/^\/clear(\s|$)/i.test(text.trimStart()) &&   // easy to pick instead of /compact, and it can't be undone
-      !await ask("Clear the conversation? Claude starts over with an empty context; this can't be undone.\n"
-                 + "(/compact keeps a summary instead.)", "Clear", {danger: true})) return;
+  if (/^\/clear(\s|$)/i.test(text.trimStart())) {   // easy to pick instead of /compact, and it can't be undone
+    const r = await ask("Clear the conversation? Claude starts over with an empty context; this can't be undone.\n"
+                        + "Summarizing (/compact) keeps a summary instead.", "Clear", {danger: true, alt: "Summarize"});
+    if (!r) return;
+    if (r === "alt") text = "/compact";
+  }
   const force = !!(cur && cur.can_force) &&
     await ask("Claude's state is uncertain. Type this into the terminal anyway?\nOr queue it until Claude reports idle.",
               "Type anyway", {cancel: "Queue it"});
@@ -1921,11 +1924,13 @@ function closeSheet() { const was = sheetOpen(); $("sheet").classList.add("hidde
   if (sheetDone) { const d = sheetDone; sheetDone = null; d(false); }
   if (was && sheetReturn && sheetReturn.isConnected && sheetReturn !== document.body) sheetReturn.focus({preventScroll: true});
   sheetReturn = null; }
-function ask(msg, ok, {danger = false, cancel = "Cancel"} = {}) {
+// Resolves true for ok, "alt" for the optional third button (alt: its label), and false when dismissed.
+function ask(msg, ok, {danger = false, cancel = "Cancel", alt = null} = {}) {
   return new Promise(res => {
     openSheet(h("p", {style: "margin:4px 0 16px;white-space:pre-line"}, msg),
       h("div", {style: "display:flex;gap:10px"},
         h("button", {class: "btn", onclick: closeSheet}, cancel),
+        ...(alt ? [h("button", {class: "btn", onclick: () => { sheetDone = null; closeSheet(); res("alt"); }}, alt)] : []),
         h("button", {class: "btn " + (danger ? "deny" : "allow"), onclick: () => { sheetDone = null; closeSheet(); res(true); }}, ok)));
     sheetDone = res;
   });
