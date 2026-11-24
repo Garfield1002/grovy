@@ -46,6 +46,9 @@ button.gref { cursor:pointer; background:none; }
   white-space:pre; margin:6px 0 0; }
 .gc-diff .a { color:var(--ok); } .gc-diff .d { color:var(--bad); } .gc-diff .h { color:var(--busy); }
 .gc-diff .f { color:var(--fg); font-weight:700; }
+.gc-fmeta { font-size:13px; color:var(--mut); margin:4px 0 10px; display:flex; flex-wrap:wrap; gap:4px 8px; align-items:center; }
+.gc-file { font:12px/1.45 ui-monospace,monospace; background:var(--code); border-radius:8px; padding:8px; overflow-x:auto;
+  white-space:pre; margin:6px 0 0; tab-size:4; }
 .gg-note { color:var(--mut); font-size:13px; margin:10px 0; }`);
 
   // ---- data
@@ -113,6 +116,7 @@ button.gref { cursor:pointer; background:none; }
     branch: [["circle", {cx: 5, cy: 3.5, r: 1.8}], ["circle", {cx: 5, cy: 12.5, r: 1.8}], ["circle", {cx: 11, cy: 5, r: 1.8}],
       ["path", {d: "M5 5.3v5.4M11 6.8c0 3-6 2-6 3.9"}]],
     tag: [["path", {d: "M2 2.5v5l6.5 6.5 5-5L7 2.5z"}], ["circle", {cx: 5, cy: 5.5, r: 1}]],
+    file: [["path", {d: "M4 1.5h5l3 3v10H4z"}], ["path", {d: "M9 1.5v3h3"}]],   // a document with a folded corner
   };
   ICONS.remote = ICONS.branch;
   function icon(kind) {
@@ -139,10 +143,13 @@ button.gref { cursor:pointer; background:none; }
     c.replaceChildren(h("span", {class: "gstart"}, icon(info.kind), text.slice(0, 4)), text.slice(4));
     c.setAttribute("role", "link");
     c.setAttribute("tabindex", "0");
-    c.title = info.kind === "commit" ? "Commit " + short(info.hash) : `${info.kind === "tag" ? "Tag" : "Branch"} ${name}`;
+    c.title = info.kind === "commit" ? "Commit " + short(info.hash) : info.kind === "file" ? "File " + name
+      : `${info.kind === "tag" ? "Tag" : "Branch"} ${name}`;
     const open = e => {
       e.preventDefault(); e.stopPropagation();
-      if (info.kind === "commit") showCommit(session, info.hash); else showGraph(session, info.ref);
+      if (info.kind === "commit") showCommit(session, info.hash);
+      else if (info.kind === "file") showFile(session, info.path);
+      else showGraph(session, info.ref);
     };
     c.addEventListener("click", open);
     c.addEventListener("keydown", e => { if (e.key === "Enter") open(e); });
@@ -335,4 +342,29 @@ button.gref { cursor:pointer; background:none; }
       h("button", {class: "chip", style: "margin-top:12px", onclick: () => { grovy.closeSheet(); grovy.draft(`Commit ${short(c.h)} (${c.s}): `); }},
         "Ask Claude about it"));
   }
-}, {about: "⋯ → Git, and links to branches and commits in replies"});
+
+  // ---- one file (its current contents on disk, in the folder Claude works in)
+  const bytes = n => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB"
+    : (n / 1048576).toFixed(1) + " MB";
+  async function showFile(session, path) {
+    if (!session) return;
+    const title = () => h("h2", {style: "overflow-wrap:anywhere"}, path);
+    const loading = h("p", {class: "gg-note"}, "Loading…");
+    grovy.sheet(title(), loading);
+    let d;
+    try { d = await call(`file?session=${enc(session)}&path=${enc(path)}`); }
+    catch (e) { return loading.isConnected && grovy.sheet(title(), h("p", {class: "gg-note"}, e.message)); }
+    if (grovy.session !== session || !loading.isConnected) return;
+    if (!d.repo) return grovy.sheet(title(), h("p", {class: "gg-note"}, noRepo(d)));
+    const n = d.binary || !d.text ? 0 : d.text.split("\n").length - (d.text.endsWith("\n") ? 1 : 0);
+    const meta = h("div", {class: "gc-fmeta"}, h("span", {}, bytes(d.size)),
+      d.binary ? h("span", {}, "binary") : h("span", {}, n === 1 ? "1 line" : n + " lines"),
+      d.truncated ? h("span", {}, "shown up to here (too long)") : null);
+    const body = d.binary ? h("p", {class: "gg-note"}, "A binary file — not shown.")
+      : d.text === "" ? h("p", {class: "gg-note"}, "Empty file.")
+      : h("pre", {class: "gc-file"}, d.text);
+    grovy.sheet(title(), meta, body,
+      h("button", {class: "chip", style: "margin-top:12px", onclick: () => { grovy.closeSheet(); grovy.draft(`In \`${path}\`: `); }},
+        "Ask Claude about it"));
+  }
+}, {about: "⋯ → Git, and links to branches, commits and files in replies"});

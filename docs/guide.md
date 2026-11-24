@@ -67,7 +67,8 @@ normal question in the terminal is still there.
 - **New projects:** ＋ → New project makes a blank repository or clones one into `~/dev` and starts Claude in it.
   For a clone, you see first which of its files Claude would load (some can run commands) and say whether to trust it.
 - **Git:** ⋯ → Git shows the session's repository as a graph of branches and commits; tap a commit for its files
-  and diff. Branch names and commit hashes in Claude's replies are links to them.
+  and diff. Branch names and commit hashes in Claude's replies are links to them, and a file path Claude mentions is
+  a link too — tap it to read that file's current contents.
 - **Links and colours:** web links in replies stand out, long addresses are shortened to their site, and colour
   codes such as `#3e5482` show a dot of the colour.
 

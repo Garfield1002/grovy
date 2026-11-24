@@ -2874,6 +2874,63 @@ class TestGitPlugin(StoreCase):
         self.assertEqual(self.call("POST", "resolve", {"session": "zz", "names": []})[0], 404)
         self.assertEqual(self.call("POST", "resolve", {"session": "a", "names": "main"})[0], 400)
 
+    def test_resolve_files(self):
+        # the working tree on main has b.txt and bin.dat (a.txt was renamed to b.txt on feature/x, then merged)
+        os.mkdir(os.path.join(self.repo, "sub"))
+        with open(os.path.join(self.repo, "sub", "c.txt"), "w") as f:   # untracked, not ignored: still a file
+            f.write("c")
+        with open(os.path.join(self.repo, ".gitignore"), "w") as f:
+            f.write("secret.txt\n")
+        with open(os.path.join(self.repo, "secret.txt"), "w") as f:     # ignored: must not be offered
+            f.write("shhh")
+        names = ["b.txt", "bin.dat", "sub/c.txt", "a.txt", "sub", "secret.txt", "b.txt/../bin.dat", "gone.txt"]
+        f = self.call("POST", "resolve", {"session": "a", "names": names})[1]["found"]
+        self.assertEqual(f["b.txt"], {"kind": "file", "path": "b.txt"})
+        self.assertEqual(f["bin.dat"], {"kind": "file", "path": "bin.dat"})
+        self.assertEqual(f["sub/c.txt"], {"kind": "file", "path": "sub/c.txt"})
+        self.assertNotIn("a.txt", f)               # renamed away: no longer in the tree
+        self.assertNotIn("sub", f)                 # a directory, not a file
+        self.assertNotIn("secret.txt", f)          # ignored
+        self.assertNotIn("b.txt/../bin.dat", f)    # a `..` segment is never a file path
+        self.assertNotIn("gone.txt", f)
+        # a ref of the same name wins over a file of that name
+        self.git("branch", "b.txt")
+        f2 = self.call("POST", "resolve", {"session": "a", "names": ["b.txt"]})[1]["found"]
+        self.assertEqual(f2["b.txt"]["kind"], "branch")
+
+    def test_file(self):
+        code, d = self.call("GET", "file", {"session": "a", "path": "b.txt"})
+        self.assertEqual(code, 200)
+        self.assertEqual((d["repo"], d["text"], d["truncated"], d["size"]), (True, "one\ntwo\n", False, 8))
+        self.assertNotIn("binary", d)
+        self.assertEqual(self.call("GET", "file", {"session": "a", "path": "bin.dat"})[1],
+                         {"repo": True, "path": "bin.dat", "binary": True, "size": 3})
+        with mock.patch.dict(sys.modules["grovy_plugin_git"].__dict__, FILE_MAX=3):
+            d = self.call("GET", "file", {"session": "a", "path": "b.txt"})[1]
+        self.assertEqual((d["text"], d["truncated"]), ("one", True))
+        # absent, directory, ignored, and bad paths
+        with open(os.path.join(self.repo, ".gitignore"), "w") as f:
+            f.write("secret.txt\n")
+        with open(os.path.join(self.repo, "secret.txt"), "w") as f:
+            f.write("shhh")
+        self.assertEqual(self.call("GET", "file", {"session": "a", "path": "gone.txt"})[0], 404)
+        self.assertEqual(self.call("GET", "file", {"session": "a", "path": "secret.txt"})[0], 404)
+        # a path from the request is literal: a glob or `:(magic)` pathspec matches no real file, so it is refused
+        self.assertEqual(self.call("GET", "file", {"session": "a", "path": "*.txt"})[0], 404)
+        self.assertEqual(self.call("GET", "file", {"session": "a", "path": ":(top)b.txt"})[0], 404)
+        for bad in ("/etc/passwd", "b.txt/../bin.dat", "../x", ""):
+            self.assertEqual(self.call("GET", "file", {"session": "a", "path": bad})[0], 400, bad)
+        self.assertEqual(self.call("GET", "file", {"session": "b", "path": "x"}), (200, {"repo": False}))
+
+    def test_file_symlink_out_of_tree_refused(self):
+        """Security: a tracked symlink pointing outside the work tree must not read the target."""
+        target = os.path.join(TMP, f"outside-{id(self)}.txt")
+        with open(target, "w") as f:
+            f.write("secret outside the repo")
+        os.symlink(target, os.path.join(self.repo, "link"))
+        self.git("add", "link")
+        self.assertEqual(self.call("GET", "file", {"session": "a", "path": "link"})[0], 404)
+
     def test_graph(self):
         code, g = self.call("GET", "graph", {"session": "a"})
         self.assertEqual(code, 200)

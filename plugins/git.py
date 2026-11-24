@@ -2,9 +2,10 @@
 (the ⋯ → Git graph, and branch names and commit hashes in Claude's replies turned into links).
 
 Routes (behind grovy's login, called with grovy.api() from the page):
-    POST /api/x/git/resolve  {session, names: [..]}  -> which names are branches, tags or commits of that session's repo
+    POST /api/x/git/resolve  {session, names: [..]}  -> which names are branches, tags, commits or files of that repo
     GET  /api/x/git/graph?session=S[&ref=R][&limit=N] -> recent commits with parents and refs, HEAD, upstream, changes
     GET  /api/x/git/commit?session=S&hash=H          -> one commit: message, author, files changed, its diff (capped)
+    GET  /api/x/git/file?session=S&path=P            -> the current contents of a file in that repo (capped)
 
 Safety (docs/DESIGN.md, "Git", has the reasons): git only runs in the folder Claude last reported working in, never a
 path from the request, with argument arrays. A ref from the request is used only if it is one of the repo's own ref
@@ -31,6 +32,7 @@ MIN_GIT = (2, 44)
 TIMEOUT = 10                  # seconds per git command
 OUT_MAX = 4 * 1024 * 1024     # bytes read from one git command
 DIFF_MAX = 200 * 1024         # characters of diff sent to the page
+FILE_MAX = 256 * 1024         # bytes of a file's contents sent to the page
 FILES_MAX = 300               # files listed for one commit
 NAMES_MAX = 200               # names in one resolve request
 LIMIT_MAX = 400               # commits in one graph
@@ -63,9 +65,11 @@ class Unknown(LookupError):
 def _env():
     """The daemon's environment without GIT_* (a stray GIT_DIR would point every command at another repository).
     GIT_NO_LAZY_FETCH: in a partial clone, a missing object must not start a fetch (network, and the remote's
-    uploadpack / sshCommand settings run)."""
+    uploadpack / sshCommand settings run). GIT_LITERAL_PATHSPECS: a path from the request (file lookups) is a literal
+    path, never a glob or `:(magic)` pathspec."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1", LC_ALL="C")
+    env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1", GIT_LITERAL_PATHSPECS="1",
+               LC_ALL="C")
     return env
 
 
@@ -149,6 +153,28 @@ def head(cwd):
     h = git(cwd, "rev-parse", "--verify", "--quiet", "HEAD", ok=(0, 1)).strip() or None
     b = git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD", ok=(0, 1)).strip() or None
     return h, b
+
+
+def file_names(names):
+    """Of `names`, the ones that could be a repo-relative file path: not absolute, no `..` segment, non-empty.
+    (NAME_RE lets through a mid-string `..`, which must never reach a pathspec or a path join.)"""
+    return [n for n in dict.fromkeys(names)
+            if isinstance(n, str) and n and not n.startswith("/") and ".." not in n.split("/")]
+
+
+def files_in(cwd, names):
+    """Of `names`, those that name a regular file in the repo (tracked, or untracked and not ignored), as a set.
+    Directories, ignored files and absent paths are left out. One `ls-files` for the whole batch; a name counts only
+    if it comes back verbatim (a directory lists its contents, never itself, so it never does). Paths are relative to
+    cwd on both sides (the folder Claude works in), so a name Claude wrote relative to its cwd matches."""
+    want = file_names(names)
+    if not want:
+        return set()
+    # -z: NUL-separated, unquoted (no core.quotePath). `--` keeps the names as pathspecs, never options; they start
+    # with an alphanumeric (NAME_RE), so none is pathspec magic. --exclude-standard drops ignored files (secrets).
+    out = git(cwd, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *want)
+    have = {p for p in out.split("\0") if p}
+    return {n for n in want if n in have}
 
 
 def commits_of(cwd, hexes):
@@ -331,7 +357,39 @@ def setup(grovy):
         hexes = [n for n in names if n not in found and HEX_RE.fullmatch(n) and re.search("[a-f]", n)]
         for n, full in commits_of(cwd, hexes).items():
             found[n] = {"kind": "commit", "hash": full}
+        # Anything left that names a file in the repo (a ref of the same name wins: it was found above).
+        for n in files_in(cwd, [n for n in names if n not in found]):
+            found[n] = {"kind": "file", "path": n}
         return {"found": found}
+
+    @grovy.route("GET", "file")
+    @answer
+    def file(cwd, args):
+        path = args.get("path") or ""
+        if not isinstance(path, str) or not file_names([path]):
+            raise BadRequest("bad path")
+        if not files_in(cwd, [path]):   # tracked or untracked-not-ignored: never an ignored file (a secret) or a path
+            raise NotFound(f"no such file in the repository: {path[:100]}")   # outside the repo
+        # A tracked symlink could still point out of the tree: resolve and require the target to stay inside it.
+        full, root = os.path.realpath(os.path.join(cwd, path)), os.path.realpath(cwd)
+        if full != root and not full.startswith(root + os.sep):
+            raise NotFound(f"no such file in the repository: {path[:100]}")
+        if not os.path.isfile(full):   # a directory, a socket, or it went away between the two calls
+            raise NotFound(f"no such file in the repository: {path[:100]}")
+        try:
+            size = os.path.getsize(full)
+            with open(full, "rb") as f:
+                data = f.read(FILE_MAX + 1)
+        except OSError as e:
+            raise GitError(f"can't read the file: {e}")
+        cut = len(data) > FILE_MAX
+        data = data[:FILE_MAX]
+        if b"\0" in data:   # binary: don't dump it into the page
+            return {"path": path, "binary": True, "size": size}
+        text = data.decode("utf-8", "replace")
+        if cut:
+            text = text.rstrip("�")   # don't end on half a character
+        return {"path": path, "text": text, "truncated": cut, "size": size}
 
     @grovy.route("GET", "graph")
     @lambda fn: answer(fn, heavy=True)
