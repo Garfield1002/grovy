@@ -553,8 +553,14 @@ adding anything to the history — but it's interactive-only and its answer live
 reaches neither a hook nor the transcript (verified: `claude -p "/btw …"` prints "not available in this environment"),
 so grovy can't see it. grovy rebuilds it instead (`grovylib/sidequery.py`): it copies the conversation's JSONL to a
 throwaway project dir under a fresh session id (rewriting the `cwd`/`sessionId` fields), runs `claude -p --resume`
-over the *copy* with no tools allowed (`--allowedTools GrovySideNoop`) and an appended "answer from the conversation,
-no tools" system prompt, and reads the answer from that process's stdout; the copy is deleted afterwards. The **live
+over the *copy* and reads the answer from that process's stdout; the copy is deleted afterwards. The throwaway runs
+with **no tools**: because it loads no `--settings`, the user's own `~/.claude/settings.json` `permissions.allow` is
+still read and `--allowedTools` only *adds* to it, so grovy denies the built-in tools outright (`--disallowedTools`;
+deny beats allow) and disables MCP servers (`--strict-mcp-config`), on top of the empty cwd and an "answer from the
+conversation, no tools" system prompt — a prompt-injected transcript can't run an allowed tool off the record. The
+throwaway's project dir is named the way Claude Code names one, mapping **every** non-alphanumeric of the cwd to `-`
+(not just `/`; `tempfile` names contain `_`), so `--resume` finds the copy. One side question runs per session at a
+time, and a conversation over 25 MB is refused (the copy doubles it in memory). The **live
 session is never resumed, typed into, or changed, and the real transcript is left byte-for-byte alone** (a fresh id
 means the live conversation is never forked). The question/answer are kept **in memory only** (off the record, like
 `/btw`) and shown on the phone as a dashed-border card apart from the thread; they are not written to grovy's event

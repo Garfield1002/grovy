@@ -125,7 +125,7 @@ class SessionLifecycle:
                     self.events[new] = q
                 if old in self.live:
                     self.live[new] = self.live.pop(old)
-                for p in self.prompts + list(self.perms.values()) + list(self.pages.values()):
+                for p in self.prompts + self.sidequeries + list(self.perms.values()) + list(self.pages.values()):
                     if p["session"] == old:
                         p["session"] = new
                 self._save_pages()

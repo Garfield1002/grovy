@@ -663,9 +663,11 @@ class TestSideQuestion(StoreCase):
         seen = {}
 
         def fake_subprocess_run(cmd, cwd, input, capture_output, text, timeout):
-            seen["cmd"], seen["input"] = cmd, input
-            proj = os.path.join(sidequery._projects_root(), cwd.replace("/", "-"))
+            seen["cmd"], seen["input"], seen["cwd"] = cmd, input, cwd
+            root = sidequery._projects_root()
+            proj = os.path.join(root, next(d for d in os.listdir(root) if "grovy-side-" in d))   # found, not recomputed
             copy = os.path.join(proj, os.listdir(proj)[0])   # the one copied transcript, named by the fresh id
+            seen["proj"] = proj
             seen["copy"] = json.loads(open(copy).readline())
             seen["resume_id"] = os.path.basename(copy)[:-len(".jsonl")]
             seen["original"] = open(src, "rb").read()
@@ -681,7 +683,19 @@ class TestSideQuestion(StoreCase):
         self.assertNotIn(src, seen["cmd"])                     # not the original path
         self.assertEqual(seen["input"], "a question?")         # the question goes on stdin, never argv (no flag injection)
         self.assertNotIn("a question?", seen["cmd"])
-        self.assertEqual(os.listdir(os.path.join(self.dir, "projects")), [])   # the throwaway copy was cleaned up
+        # the copy lives where claude --resume will actually look: every non-alphanumeric of the cwd mapped to "-"
+        self.assertEqual(seen["proj"], os.path.join(self.dir, "projects", re.sub(r"[^A-Za-z0-9]", "-", seen["cwd"])))
+        self.assertIn("--strict-mcp-config", seen["cmd"])       # MCP disabled
+        self.assertIn("Bash", seen["cmd"])                      # built-in tools denied (deny beats the user's allow)
+        self.assertFalse(os.path.exists(seen["proj"]))          # the throwaway copy was cleaned up
+
+    def test_project_dir_encoding_matches_claude(self):
+        # regression: a plain .replace("/","-") leaves "_"/"." in place, but tempfile dirs contain "_" and
+        # claude maps every non-alphanumeric to "-", so --resume would look in the wrong dir ~1 time in 5.
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self.dir}):
+            got = sidequery._project_dir("/tmp/grovy-side-1oqc9tb_/a.b")
+        self.assertTrue(got.startswith(os.path.join(self.dir, "projects") + os.sep))
+        self.assertTrue(got.endswith("grovy-side-1oqc9tb--a-b"), got)   # "_" and "." both became "-"
 
     def test_run_surfaces_a_nonzero_exit(self):
         src = os.path.join(self.dir, "live2.jsonl")
@@ -692,6 +706,33 @@ class TestSideQuestion(StoreCase):
             with self.assertRaises(RuntimeError) as cm:
                 sidequery.run(src, "q")
         self.assertIn("resume failed", str(cm.exception))
+
+    def test_one_side_question_at_a_time(self):
+        self.with_transcript()
+        gate = threading.Event()
+        self.store.side_run = lambda t, q: (gate.wait(2), "done")[1]
+        _, q1 = self.store.ask_side("a", "first")
+        code, msg = self.store.ask_side("a", "second")   # one claude per session at a time
+        self.assertEqual(code, 409)
+        self.assertIn("already running", msg)
+        gate.set()
+        self.ready(q1["id"])
+
+    def test_too_large_conversation_refused(self):
+        self.with_transcript()
+        with mock.patch.object(sidequery, "MAX_TRANSCRIPT", 1):
+            code, msg = self.store.ask_side("a", "q")
+        self.assertEqual(code, 413)
+        self.assertIn("too large", msg)
+
+    def test_rename_moves_side_questions(self):
+        self.with_transcript()
+        _, q = self.store.ask_side("a", "what changed?")
+        self.ready(q["id"])
+        self.store.lifecycle = types.SimpleNamespace(rename=lambda old, new: None)
+        self.assertEqual(self.store.rename("a", "jean")[0], 200)
+        self.assertEqual([x["id"] for x in self.store.side_for("jean")], [q["id"]])   # follows the rename
+        self.assertEqual(self.store.side_for("a"), [])
 
 
 class TestLifecycle(StoreCase):

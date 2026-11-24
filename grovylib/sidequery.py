@@ -17,18 +17,31 @@ import tempfile
 import threading
 import uuid
 
-from . import claude, core
+from . import claude, core, projects
 
 SYSTEM = "Answer only from the conversation so far. Do not use any tools. Be concise."
 TIMEOUT = 120          # seconds for the throwaway claude to answer
 MAX_QUESTION = 4000    # characters accepted (like /goal's condition)
 MAX_ANSWER = 20000     # characters kept from the answer
+MAX_TRANSCRIPT = 25 << 20   # bytes: a conversation larger than this is refused (copy doubles it in memory)
 KEEP = 20              # side questions kept per session (in memory only)
+
+# A side answer must reach no tool — but the user's own ~/.claude/settings.json `permissions.allow` is still read by
+# the throwaway claude (we pass no --settings), and --allowedTools only adds to it. So deny the built-in tools
+# outright (deny beats allow) and disable MCP servers (--strict-mcp-config with no --mcp-config). A prompt-injected
+# transcript then can't run an allowed tool off the record. (--allowedTools names a tool that doesn't exist, so in
+# default mode nothing else is pre-approved either.)
+DENY_TOOLS = "Bash Edit Write Read NotebookEdit WebFetch WebSearch Glob Grep Task BashOutput KillBash KillShell".split()
 
 
 def _projects_root():
-    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    return os.path.join(cfg, "projects")
+    return os.path.join(projects.claude_home(), "projects")
+
+
+def _project_dir(cwd):
+    """Where Claude Code keeps a cwd's conversations. Every non-alphanumeric of the real path becomes '-'
+    (a plain .replace('/', '-') is wrong — tempfile names contain '_'); shared with projects._project_dir."""
+    return projects._project_dir(cwd)
 
 
 def _copy_transcript(src, cwd, sid, dst):
@@ -61,15 +74,16 @@ def run(transcript, question, timeout=TIMEOUT):
         raise RuntimeError("no conversation to ask about yet")
     base = os.path.realpath(tempfile.mkdtemp(prefix="grovy-side-"))   # throwaway cwd (realpath: matches what claude sees)
     sid = str(uuid.uuid4())   # a fresh session id, so the live session is never resumed or forked
-    proj = os.path.join(_projects_root(), base.replace("/", "-"))
+    proj = _project_dir(base)
     try:
         os.makedirs(proj, exist_ok=True)
         try:
             _copy_transcript(transcript, base, sid, os.path.join(proj, sid + ".jsonl"))
         except OSError as e:
             raise RuntimeError(f"couldn't read the conversation: {e}")
-        cmd = [claude.claude_cmd(), "-p", "--resume", sid,
-               "--allowedTools", "GrovySideNoop",   # a tool that does not exist: no real tool is ever allowed
+        cmd = [claude.claude_cmd(), "-p", "--resume", sid, "--strict-mcp-config",
+               "--allowedTools", "GrovySideNoop",   # a tool that does not exist: nothing is pre-approved
+               "--disallowedTools", *DENY_TOOLS,    # deny the built-ins outright (deny beats the user's allow list)
                "--append-system-prompt", SYSTEM]
         try:
             # The question goes on stdin, never argv, so a question starting with "-" (e.g. "--help",
@@ -99,9 +113,9 @@ class SideQueries:
     def ask_side(self, name, question):
         if not isinstance(question, str) or not question.strip():
             return 400, "empty question"
+        question = question.strip()
         if len(question) > MAX_QUESTION:
             return 413, "question too long"
-        question = question.strip()
         with self.lock:
             s = self.sessions.get(name)
             if not s:
@@ -110,6 +124,13 @@ class SideQueries:
                 return 409, "the session has exited"
             transcript = s.get("transcript")
             if not transcript:
+                return 409, "nothing to ask about yet — wait for Claude's first reply"
+            if any(q["session"] == name and q["status"] == "pending" for q in self.sidequeries):
+                return 409, "a side question is already running — wait for it to answer"   # one claude at a time
+            try:
+                if os.path.getsize(transcript) > MAX_TRANSCRIPT:
+                    return 413, "this conversation is too large for a side question"
+            except OSError:
                 return 409, "nothing to ask about yet — wait for Claude's first reply"
             q = {"id": uuid.uuid4().hex, "session": name, "question": question, "status": "pending",
                  "answer": None, "error": None, "created": core.now(), "updated": core.now()}
