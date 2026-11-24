@@ -2194,9 +2194,23 @@ function pickList({items, title, sub = () => "", recent = null, search = null, s
 
 // Command palette (Ctrl/⌘+K, the search icon on the home screen, or ⋯ → Search commands in a session): everything the ⋯ menus offer right now, flattened and searched,
 // plus a jump to any session or page. The same actions, reachable by name instead of by hunting through menus.
+// In the palette only, not on a button: restarting the daemon is rare (after changing grovy's own code).
+const restartCmd = () => ({label: "Restart grovy", section: "grovy", sub: "Reload the daemon from the code on disk", run: restartDaemon});
+async function restartDaemon() {
+  closeSheet();
+  if (!await ask("Restart grovy's daemon with the code on disk?\nSessions keep running; the page reconnects in a moment.", "Restart")) return;
+  try { await api("/api/restart", {}); } catch (e) { return say(e.message); }
+  const t0 = Date.now();
+  while (Date.now() - t0 < 30000) {   // the old daemon answers for ~0.5s more: wait for it to go, then for the new one
+    await new Promise(r => setTimeout(r, 700));
+    try { if ((await fetch("/api/sessions", {cache: "no-store"})).ok && Date.now() - t0 > 1500) return location.reload(); }
+    catch (e) {}
+  }
+  say("grovy hasn't come back after 30s: check it on the computer (grovy ls, or its tmux window / service log).");
+}
 function currentCmds() {
-  const all = view ? [...sessionCmds(view, cur || {}), {label: "All sessions", section: "Go", run: () => { closeSheet(); go("#/"); }}, ...settingsCmds()]
-                   : [...newCmds(), ...settingsCmds()];
+  const all = view ? [...sessionCmds(view, cur || {}), {label: "All sessions", section: "Go", run: () => { closeSheet(); go("#/"); }}, ...settingsCmds(), restartCmd()]
+                   : [...newCmds(), ...settingsCmds(), restartCmd()];
   const seen = new Set();   // a where:"both" item is in two buckets (session + home): show it once
   return all.filter(c => { const k = c.label + "\u0000" + (c.section || ""); return seen.has(k) ? false : seen.add(k); });
 }

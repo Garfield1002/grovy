@@ -15,6 +15,7 @@ away: `grovy attach NAME` puts you in the real session (detach with Ctrl-b d).
   session can be resumed later.
 - **Command palette:** ⚡ on the session list (⋯ → Search commands in a session), or `Ctrl`/`⌘`+`K` on a keyboard,
   opens one searchable list of everything you can do here plus a jump to any session or page — start typing and press Enter.
+  *Restart grovy* there reloads grovy's daemon (after you change grovy itself); your sessions keep running.
 - **Background work:** subagents and commands Claude left running show as "idle · 2 running"; tap the strip above
   the message box to see each one, how long it has run and what it is doing.
 - **Updating a session:** after `grovy update`, ⋯ → Update session gives a running session the newest grovy

@@ -5009,6 +5009,48 @@ class TestHttp(unittest.TestCase):
                 self.assertEqual(self.upload("a", b"x")[0], 401)
         self.assertEqual(sorted(os.listdir(os.path.join(top, "a"))), [os.path.basename(res["path"])])
 
+    def test_restart_from_the_page(self):
+        """The palette's "Restart grovy": refused while the code on disk doesn't load (a broken checkout would take
+        grovy down), else answered first and then the daemon re-executes itself with its own arguments."""
+        with mock.patch.object(grovyd, "code_loads", return_value="SyntaxError: bad"), \
+             mock.patch.object(grovyd, "restart_in_place") as again:
+            code, body, _ = self.req("/api/restart", {})
+            self.assertEqual(code, 409, body)
+            self.assertIn("SyntaxError: bad", json.loads(body)["error"])
+            again.assert_not_called()
+        with mock.patch.object(grovyd, "code_loads", return_value=None), \
+             mock.patch.object(grovyd, "restart_in_place") as again:
+            self.assertEqual(self.req("/api/restart", {})[0], 200)
+            again.assert_called_once_with(self.httpd)
+        with mock.patch.object(self.httpd, "token", "secret"):
+            self.assertEqual(self.req("/api/restart", {})[0], 401)
+
+    def test_restart_execs_itself_under_the_store_lock(self):
+        held, done = [], threading.Event()
+        def execv(path, argv):
+            held.append((path, argv, self.store.lock._is_owned() if hasattr(self.store.lock, "_is_owned") else None,
+                         self.httpd.stopping))
+            done.set()
+            raise OSError("no exec in a test")
+        grovyd.restart_in_place(self.httpd, delay=0, execv=execv)
+        self.assertTrue(done.wait(5))
+        path, argv, owned, stopping = held[0]
+        self.assertEqual(path, sys.executable)
+        self.assertEqual(argv, getattr(sys, "orig_argv", None) or [sys.executable] + sys.argv)
+        self.assertIn(owned, (True, None))
+        self.assertTrue(stopping)
+        for _ in range(50):   # a failed exec leaves the old daemon serving
+            if not self.httpd.stopping:
+                break
+            time.sleep(.02)
+        self.assertFalse(self.httpd.stopping)
+
+    def test_code_loads(self):
+        self.assertIsNone(grovyd.code_loads())   # this checkout
+        bad = mock.Mock(returncode=1, stderr="Traceback ...\nSyntaxError: invalid syntax\n", stdout="")
+        with mock.patch.object(grovyd.subprocess, "run", return_value=bad):
+            self.assertEqual(grovyd.code_loads(), "SyntaxError: invalid syntax")
+
     def test_report_screenshot(self):
         """Report's picture of the page is saved before its issue session exists, where every session may read it
         (the attachments folder, in ".report", which no session can be named), and only a PNG is taken."""

@@ -559,6 +559,14 @@ Enter runs it, Esc closes. It is one flat surface over the same command descript
 palette doesn't open over another sheet (it would resolve a pending confirmation), and the hotkey isn't reserved: a
 `grovy.key("Ctrl+K")` is matched first and wins. On a Mac only `⌘K` opens it, so plain `Control+K` still edits text.
 
+**Restart grovy** (in the palette only, no button: `POST /api/restart`) reloads the daemon from the code on disk. It
+first imports `grovyd` in a separate Python (`code_loads`) and refuses with the error if that fails, so a broken
+checkout can't take grovy down from the page. Then, after answering, `restart_in_place` re-executes the same process
+with its own arguments (`sys.orig_argv`), under `Store.lock` so no change is mid-write: same tmux pane or systemd unit,
+same environment; exec closes the sockets (non-inheritable) and the new daemon clears the stale hooks socket as on any
+start. Sessions are untouched; events in the ~1s gap are lost, as with any restart. The page waits for the new daemon
+and reloads.
+
 **Sessions from the phone.** The **＋** → *New session*:
 * **Folders.** Pick one from a list (never a typed path) of folders where Claude won't stop at the workspace-trust
   dialog, which would hold back every hook. Verified rule (Claude Code 2.1.325): a plain folder inherits trust from a

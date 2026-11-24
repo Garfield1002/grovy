@@ -20,6 +20,7 @@ import socket
 import socketserver
 import ssl
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -989,6 +990,12 @@ class Http(http.server.BaseHTTPRequestHandler):
             return _res(*store.discard_project(body.get("path"), body.get("token")), key="message")
         if path == "/api/issues":
             return _res(*store.create_issue(body.get("path"), body.get("text"), body.get("ask")))
+        if path == "/api/restart":   # the command palette's "Restart grovy": the daemon, from the code on disk
+            why = code_loads()
+            if why:
+                return 409, {"error": "not restarted: the code on disk doesn't load: " + why}
+            restart_in_place(self.server)
+            return 200, {"status": "restarting"}
         if path == "/api/report":   # the "report" paint overlay (extensions/report.js): an issue in grovy's own repo
             return _res(*store.report_grovy_issue(body.get("note"), body.get("context"), body.get("ask")))
         m = re.fullmatch(r"/api/issues/([^/]+)/(finish|discard)", path)
@@ -1112,6 +1119,45 @@ class Subscriber(deque):
 
     def __eq__(self, other):
         return self is other
+
+
+def code_loads():
+    """None if the code on disk imports (grovyd and all of grovylib), else why not: checked in a separate Python before
+    a restart replaces this daemon with it, so a broken checkout can't take grovy down from the page."""
+    try:
+        r = subprocess.run([sys.executable, "-c", "import grovyd"], cwd=core.HERE, capture_output=True, text=True,
+                           timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"couldn't check it: {e}"
+    if r.returncode == 0:
+        return None
+    lines = (r.stderr or r.stdout or "").strip().splitlines()
+    return lines[-1] if lines else f"exit {r.returncode}"
+
+
+def restart_in_place(httpd, delay=0.5, execv=os.execv):
+    """Replace this daemon with a fresh one from the code on disk: the same process (so the same tmux pane or systemd
+    unit, with the same arguments and environment). exec closes every socket (Python makes them non-inheritable), so
+    the new daemon binds the port again and finds the hooks' socket file stale, which serve() clears. Closing them
+    here instead would end serve_forever on the main thread, and the process would exit before the exec. Claude
+    sessions live in tmux and never notice; events sent in the ~1s gap are lost, as with any restart. Runs on its own
+    thread, after delay, so the answer to the request that asked for it gets out first."""
+    def go():
+        time.sleep(delay)
+        httpd.stopping = True
+        st = httpd.store
+        try:
+            st.flush_live()
+        except Exception:
+            pass
+        print("grovyd: restarting (asked from the page)", file=sys.stderr, flush=True)
+        try:
+            with st.lock:   # never mid-change: nothing holds it across a write; a successful exec never comes back
+                execv(sys.executable, getattr(sys, "orig_argv", None) or [sys.executable] + sys.argv)
+        except OSError as e:   # still the old daemon, still serving
+            httpd.stopping = False
+            print(f"grovyd: restart failed: {e}", file=sys.stderr, flush=True)
+    threading.Thread(target=go, name="grovy-restart", daemon=True).start()
 
 
 class HttpServer(http.server.ThreadingHTTPServer):
